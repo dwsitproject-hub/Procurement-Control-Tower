@@ -1,0 +1,32 @@
+{
+  "name": "procurement-control-tower",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Procurement Control Tower v2 — PR to PO to GR analytics platform",
+  "workspaces": [
+    "packages/*",
+    "Backend",
+    "Frontend"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "npm run build -w @pct/rules && npm run build -w @pct/contracts && npm run build -w @pct/backend && npm run build -w @pct/frontend",
+    "build:packages": "npm run build -w @pct/rules && npm run build -w @pct/contracts",
+    "test": "npm run test -w @pct/rules",
+    "test:golden": "npm run test:golden -w @pct/backend",
+    "typecheck": "npm run typecheck -w @pct/rules && npm run typecheck -w @pct/contracts && npm run typecheck -w @pct/backend",
+    "db:migrate": "npm run db:migrate -w @pct/backend",
+    "db:seed": "npm run db:seed -w @pct/backend",
+    "ingest": "npm run ingest -w @pct/backend",
+    "dev:api": "npm run dev -w @pct/backend",
+    "dev:web": "npm run dev -w @pct/frontend"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "@types/node": "22.9.0",
+    "tsx": "4.19.2",
+    "vitest": "2.1.5"
+  }
+}

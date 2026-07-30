@@ -1,0 +1,38 @@
+{
+  "name": "@pct/backend",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:seed": "tsx src/db/seed.ts",
+    "ingest": "tsx src/cli/ingest.ts",
+    "test:golden": "tsx src/cli/golden.ts"
+  },
+  "dependencies": {
+    "@pct/contracts": "*",
+    "@pct/rules": "*",
+    "argon2": "0.41.1",
+    "cookie-parser": "1.4.7",
+    "express": "4.21.1",
+    "helmet": "8.0.0",
+    "multer": "1.4.5-lts.1",
+    "pg": "8.13.1",
+    "pino": "9.5.0",
+    "pino-http": "10.3.0",
+    "redis": "4.7.0",
+    "xlsx": "0.18.5",
+    "zod": "3.23.8",
+    "jose": "5.9.6"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "1.4.7",
+    "@types/express": "4.17.21",
+    "@types/multer": "1.4.12",
+    "@types/pg": "8.11.10"
+  }
+}

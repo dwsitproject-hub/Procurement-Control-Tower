@@ -1,0 +1,27 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+Backend/.env
+Frontend/.env
+data/
+spool/
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+# ── Real SAP exports — deliberately NOT committed ─────────────────────────
+# Assets/ holds live procurement data: 368 named requisitioners, approver login
+# identifiers and GR user names. That is personal data under the PDP Law
+# (UU 27/2022), and git history is effectively permanent — removing it later
+# means rewriting history everywhere the repo has been cloned.
+#
+# The application reads this folder as a read-only volume at runtime, so it does
+# not need to be in the repo. For CI and the golden-number suite, generate an
+# anonymised fixture instead (PRD v2 §23.3).
+#
+# To include it anyway, delete these two lines and commit deliberately.
+Assets/
+

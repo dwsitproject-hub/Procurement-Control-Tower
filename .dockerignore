@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.gitignore
+Docs
+Assets
+data
+spool
+logs
+*.log
+.env
+**/.env

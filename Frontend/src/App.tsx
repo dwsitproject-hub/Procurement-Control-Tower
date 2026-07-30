@@ -5,8 +5,9 @@ import { FreshnessBanner } from './components/FreshnessBanner';
 import { KpiCard } from './components/KpiCard';
 import { ChartPanel } from './components/Chart';
 import { DrillModal } from './components/DrillModal';
+import { DetailTable } from './components/DetailTable';
 
-type Tab = 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems' | 'datacheck';
+type Tab = 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems' | 'detail' | 'datacheck';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'executive', label: 'Executive' },
@@ -16,6 +17,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'delivery', label: 'Delivery' },
   { id: 'approvals', label: 'Approvals' },
   { id: 'governance', label: 'Governance' },
+  { id: 'detail', label: 'Detail Table' },
   { id: 'datacheck', label: 'Data Check' },
 ];
 
@@ -30,6 +32,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
   delivery: ['cycle_delivery', 'cycle_e2e', 'reversal_rate'],
   approvals: ['pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval', 'cycle_po_approval'],
   governance: ['wbs_compliance', 'retro_po_rate', 'sto_share', 'direct_po_share'],
+  detail: [],
   datacheck: [],
 };
 
@@ -41,6 +44,7 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   delivery: ['delivery_ordered_vs_received', 'movement_mix'],
   approvals: ['pending_pr_by_pic'],
   governance: ['wbs_by_plant'],
+  detail: [],
   datacheck: [],
 };
 
@@ -140,6 +144,8 @@ export default function App() {
               Publish a dataset first: <code>npm run ingest -w @pct/backend</code>
             </p>
           </div>
+        ) : tab === 'detail' ? (
+          <DetailTable />
         ) : tab === 'datacheck' ? (
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (

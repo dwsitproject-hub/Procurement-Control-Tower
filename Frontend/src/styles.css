@@ -193,3 +193,42 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* ── detail table ─────────────────────────────────────────────────── */
+
+.dt-toolbar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .6rem; }
+.dt-search {
+  flex: 1 1 320px; min-width: 220px; padding: .4rem .6rem; font: inherit;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text);
+}
+.dt-check { display: inline-flex; align-items: center; gap: .3rem; font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.dt-btn {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  padding: .35rem .6rem; color: var(--text); font-size: .8rem; white-space: nowrap;
+}
+.dt-btn:hover { border-color: var(--accent); }
+
+.dt-chooser {
+  display: flex; flex-wrap: wrap; gap: .3rem .7rem; padding: .6rem;
+  border: 1px solid var(--border); border-radius: 6px; margin-bottom: .6rem; background: var(--bg);
+}
+.dt-chip { display: inline-flex; align-items: center; gap: .3rem; font-size: .78rem; white-space: nowrap; }
+
+.dt-facets { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .6rem; }
+.dt-facet { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.dt-facet > summary {
+  cursor: pointer; padding: .3rem .6rem; font-size: .8rem; list-style: none;
+  display: flex; align-items: center; gap: .35rem;
+}
+.dt-facet > summary::-webkit-details-marker { display: none; }
+.dt-facet[open] > summary { border-bottom: 1px solid var(--border); }
+.dt-badge {
+  background: var(--accent); color: #fff; border-radius: 8px;
+  padding: 0 .35rem; font-size: .68rem; font-weight: 700;
+}
+.dt-facet-list { max-height: 260px; overflow: auto; padding: .5rem .6rem; display: flex; flex-direction: column; gap: .25rem; }
+
+.dt-scroll { max-height: 62vh; overflow: auto; }
+.dt-flags { white-space: nowrap; }
+.dt-sort { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-weight: 550; }
+.dt-sort:hover { color: var(--text); }

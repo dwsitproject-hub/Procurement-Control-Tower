@@ -22,6 +22,8 @@ import {
   grCompletionPct,
   isSto,
   isTokenPrice,
+  materialCategory,
+  priorityLabel,
   isZeroPriceAnomaly,
   lookupMovement,
   normCurrency,
@@ -128,6 +130,14 @@ export async function runTransform(
     loadStaged(batchId, 'gr'),
     loadStaged(batchId, 'fx'),
   ]);
+
+  // Category overrides are reference data an administrator can extend, so they
+  // are read from the database rather than hardcoded as v1 did.
+  const mgOverrideRows = await query<{ material_group: string; category: string | null }>(
+    `SELECT material_group, category FROM core.dim_material_group WHERE category IS NOT NULL`,
+  );
+  const mgOverrides: Record<string, string> = {};
+  for (const r of mgOverrideRows) mgOverrides[r.material_group] = r.category as string;
 
   const stoSuffix = rules['sto.doctype_suffix'] as string;
   const fxPolicy = rules['fx.policy'] as FxPolicy;
@@ -479,6 +489,9 @@ export async function runTransform(
       zeroP,
       r.batch_file_id,
       r.source_row,
+      materialCategory(s(p.materialGroup), mgOverrides),
+      i(p.urgency),
+      priorityLabel(i(p.urgency)),
     ]);
   }
 
@@ -562,10 +575,12 @@ export async function runTransform(
       wbs === 'violation' || wbs === 'compliant',
       wbs,
       poCount,
-      poCount > 0 ? st.status : st.status,
+      st.status,
       agingDays(asOfDate, reqDate),
       r.batch_file_id,
       r.source_row,
+      materialCategory(s(p.materialGroup), mgOverrides),
+      priorityLabel(i(p.urgency)),
     ]);
   }
 
@@ -723,6 +738,62 @@ export async function runTransform(
     [versionId],
   );
 
+  // ── conformed dimensions ──
+  // Type-1 upserts. Descriptive only: every attribute that affects a figure is
+  // denormalised onto the fact, so a renamed vendor never changes a published
+  // number. dim_plant names come from seeded reference data and are preserved.
+  await client.query(
+    `INSERT INTO core.dim_vendor (vendor_code, vendor_name, first_seen, last_seen)
+     SELECT vendor_code, max(vendor_name), min(document_date), max(document_date)
+       FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND vendor_code IS NOT NULL
+      GROUP BY vendor_code
+     ON CONFLICT (vendor_code) DO UPDATE
+       SET vendor_name = EXCLUDED.vendor_name,
+           first_seen  = LEAST(core.dim_vendor.first_seen, EXCLUDED.first_seen),
+           last_seen   = GREATEST(core.dim_vendor.last_seen, EXCLUDED.last_seen)`,
+    [versionId],
+  );
+
+  await client.query(
+    `INSERT INTO core.dim_material (material_code, description, material_group, base_uom, first_seen, last_seen)
+     SELECT material_code, max(short_text), max(material_group), max(order_unit),
+            min(document_date), max(document_date)
+       FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND material_code IS NOT NULL
+      GROUP BY material_code
+     ON CONFLICT (material_code) DO UPDATE
+       SET description = EXCLUDED.description, material_group = EXCLUDED.material_group,
+           last_seen = GREATEST(core.dim_material.last_seen, EXCLUDED.last_seen)`,
+    [versionId],
+  );
+
+  await client.query(
+    `INSERT INTO core.dim_doc_type (doc_type, is_sto)
+     SELECT DISTINCT doc_type, is_sto FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND doc_type IS NOT NULL
+     ON CONFLICT (doc_type) DO UPDATE SET is_sto = EXCLUDED.is_sto`,
+    [versionId],
+  );
+
+  // Plants seen in the data but absent from the seeded name list: register them
+  // so they appear in filters, with the code as a placeholder name.
+  await client.query(
+    `INSERT INTO core.dim_plant (plant, company_code, plant_name)
+     SELECT DISTINCT plant, left(plant, 2), plant FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND plant IS NOT NULL AND plant <> ''
+     ON CONFLICT (plant) DO NOTHING`,
+    [versionId],
+  );
+
+  await client.query(
+    `INSERT INTO core.dim_material_group (material_group, category)
+     SELECT DISTINCT material_group, material_category FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND material_group IS NOT NULL
+     ON CONFLICT (material_group) DO NOTHING`,
+    [versionId],
+  );
+
   await client.query(
     `ANALYZE core.fact_pr_item_v${versionId};
      ANALYZE core.fact_po_line_v${versionId};
@@ -833,6 +904,7 @@ const PR_COLS = [
   'is_deleted', 'release_indicator', 'wbs_element', 'release_l1_date', 'release_l2_date',
   'release_final_date', 'next_approver', 'is_fully_released', 'wbs_required', 'wbs_status',
   'po_line_count', 'status', 'aging_days', 'source_file_id', 'source_row',
+  'material_category', 'priority_label',
 ] as const;
 
 const PO_COLS = [
@@ -849,7 +921,7 @@ const PO_COLS = [
   'receipt_count', 'reversal_count', 'transit_qty_net', 'gr_completion_pct', 'join_method',
   'gr_date_would_contaminate', 'status', 'aging_days', 'po_approval_days', 'sourcing_days',
   'delivery_days', 'delivery_vs_promise_days', 'is_retro_po', 'is_token_price', 'is_zero_price',
-  'source_file_id', 'source_row',
+  'source_file_id', 'source_row', 'material_category', 'urgency', 'priority_label',
 ] as const;
 
 const GR_COLS = [

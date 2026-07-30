@@ -31,6 +31,7 @@ import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
 import { ManualUploadSource, ShareFolderSource, type DiscoveredFile } from '../modules/ingest/sources.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
+import { queryDetail, DETAIL_COLUMNS, type DetailFilters } from '../modules/analytics/detail.js';
 
 const env = loadEnv();
 
@@ -227,6 +228,30 @@ export function buildRouter(): Router {
       capabilities: caps,
       ssoEnabled: oidcEnabled(),
     });
+  }));
+
+
+  // ── per-user UI preferences (v1 used browser localStorage) ──
+
+  r.get('/api/v1/me/preferences/:key', role('viewer', async (req, res, ctx) => {
+    const row = await queryOne<{ pref_value: unknown }>(
+      `SELECT pref_value FROM app.user_preference WHERE user_id = $1 AND pref_key = $2`,
+      [ctx.principal.userId, req.params.key],
+    );
+    res.json({ key: req.params.key, value: row?.pref_value ?? null });
+  }));
+
+  r.put('/api/v1/me/preferences/:key', role('viewer', async (req, res, ctx) => {
+    const value = (req.body ?? {}).value;
+    if (value === undefined) throw new HttpProblem(400, 'invalid-body', 'value is required');
+    await query(
+      `INSERT INTO app.user_preference (user_id, pref_key, pref_value)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (user_id, pref_key)
+         DO UPDATE SET pref_value = EXCLUDED.pref_value, updated_at = now()`,
+      [ctx.principal.userId, req.params.key, JSON.stringify(value)],
+    );
+    res.json({ key: req.params.key, value });
   }));
 
   // ── dataset & freshness ──
@@ -485,6 +510,74 @@ export function buildRouter(): Router {
       Number(req.query.cursor ?? 0),
     );
     res.json({ ...page, asOfDate: v.asOfDate, appliedFilters: filters });
+  }));
+
+
+  // ── detail table (v1 pg-dt, 41 columns) ──
+
+  r.get('/api/v1/detail/columns', role('analyst', async (_req, res) => {
+    res.json({ columns: DETAIL_COLUMNS.map(({ sql: _s, ...rest }) => rest) });
+  }));
+
+  r.get('/api/v1/detail', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+
+    const list = (name: string): string[] | undefined => {
+      const raw = req.query[name];
+      if (raw === undefined) return undefined;
+      const arr = Array.isArray(raw) ? raw.map(String) : String(raw).split(',');
+      const cleaned = arr.map((x) => x.trim()).filter((x) => x !== '');
+      return cleaned.length > 0 ? cleaned : undefined;
+    };
+    const flag = (name: string): boolean => String(req.query[name] ?? '') === 'true';
+
+    const filters: DetailFilters = {
+      status: list('status'),
+      matCat: list('matCat'),
+      matGroup: list('matGroup'),
+      plant: list('plant'),
+      company: list('company'),
+      purchOrg: list('purchOrg'),
+      purchGroup: list('purchGroup'),
+      priority: list('priority'),
+      monthKey: list('monthKey'),
+      search: req.query.q === undefined ? undefined : String(req.query.q),
+      excludeSto: flag('excludeSto'),
+      includeDeleted: flag('includeDeleted'),
+      onlyOpen: flag('onlyOpen'),
+      onlyDirectPo: flag('onlyDirectPo'),
+      onlyReleaseExempt: flag('onlyReleaseExempt'),
+    };
+
+    // Unknown parameters are rejected, not ignored: a typo must not silently
+    // return unfiltered data.
+    const allowed = new Set([
+      'status','matCat','matGroup','plant','company','purchOrg','purchGroup','priority','monthKey',
+      'q','excludeSto','includeDeleted','onlyOpen','onlyDirectPo','onlyReleaseExempt',
+      'sort','dir','limit','cursor','facets',
+    ]);
+    for (const k of Object.keys(req.query)) {
+      if (!allowed.has(k)) {
+        throw new HttpProblem(400, 'invalid-parameter', `Unknown query parameter: ${k}`);
+      }
+    }
+
+    const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
+    const sortDir = String(req.query.dir ?? 'asc') === 'desc' ? 'desc' : 'asc';
+
+    const page = await queryDetail(
+      v.id,
+      v.asOfDate,
+      ctx.scope,
+      filters,
+      sortKey ? { key: sortKey, dir: sortDir } : null,
+      Math.min(Number(req.query.limit ?? 200), 1000),
+      Number(req.query.cursor ?? 0),
+      String(req.query.facets ?? '') === 'true',
+    );
+    res.json(page);
   }));
 
   // ── ingestion ──

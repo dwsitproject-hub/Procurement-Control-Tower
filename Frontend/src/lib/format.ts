@@ -91,4 +91,6 @@ export const FLAG_META: Record<string, { icon: string; label: string }> = {
   },
   danglingLink: { icon: '⛓', label: 'References a requisition absent from the PR feed' },
   directPo: { icon: '·', label: 'Direct PO — no requisition' },
+  retroPo: { icon: '⟲', label: 'Retro PO — ordered before the requisition was approved' },
+  wbsViolation: { icon: '§', label: 'Over the WBS threshold with no WBS Element' },
 };

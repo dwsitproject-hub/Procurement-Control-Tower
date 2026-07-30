@@ -32,6 +32,12 @@ import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeli
 import { ManualUploadSource, ShareFolderSource, type DiscoveredFile } from '../modules/ingest/sources.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
 import { queryDetail, DETAIL_COLUMNS, type DetailFilters } from '../modules/analytics/detail.js';
+import {
+  describeFilter, isEmptyFilter, parseGlobalFilter, type GlobalFilter,
+} from '../modules/analytics/globalfilter.js';
+import {
+  computeLiveChart, computeLiveKpis, globalFilterOptions, liveChartAvailable,
+} from '../modules/analytics/live.js';
 
 const env = loadEnv();
 
@@ -338,10 +344,85 @@ export function buildRouter(): Router {
 
   // ── KPIs ──
 
-  r.get('/api/v1/kpi', role('viewer', async (_req, res, ctx) => {
+  r.get('/api/v1/filters', role('viewer', async (_req, res, ctx) => {
     requireScope(ctx);
     const v = await currentVersion();
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+    res.json({ datasetVersionId: v.id, ...(await globalFilterOptions(v.id)) });
+  }));
+
+  r.get('/api/v1/kpi', role('viewer', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+
+    const gf: GlobalFilter = parseGlobalFilter(req.query as Record<string, unknown>);
+
+    // A filtered request recomputes from the facts using the SAME spec SQL the
+    // mart precomputes. The precomputed path below is untouched, so a bug in the
+    // live path cannot affect the default dashboard.
+    if (!isEmptyFilter(gf)) {
+      const fpLive = sessionFingerprint(ctx.sid);
+      const live = await computeLiveKpis(v.id, gf);
+      const liveIds = new Set(live.map((k) => k.kpiId));
+
+      // The 18 original mart KPIs (cycle times, GR/IR share, expedite, WBS…)
+      // have no live recomputation yet. Under a filter they must NOT silently
+      // vanish, and they must NOT show their unfiltered value as if filtered —
+      // so they render as unavailable with the reason stated.
+      const martOnly = await query<{ kpi_id: string; unit: string }>(
+        `SELECT kpi_id, unit FROM mart.kpi_value
+          WHERE dataset_version_id = $1 ORDER BY kpi_id`,
+        [v.id],
+      );
+
+      const filteredOut = martOnly
+        .filter((m) => !liveIds.has(m.kpi_id))
+        .map((m) => ({
+          kpiId: m.kpi_id,
+          title: KPI_TITLES[m.kpi_id as keyof typeof KPI_TITLES] ?? m.kpi_id,
+          status: 'unavailable' as const,
+          value: null,
+          numerator: null,
+          denominator: null,
+          sampleSize: null,
+          unit: m.unit,
+          currencyBasis: null,
+          severity: null,
+          statusReason: 'This figure does not support the global filter yet.',
+          detail: null,
+          drillToken: null,
+        }));
+
+      res.json({
+        datasetVersionId: v.id,
+        asOfDate: v.asOfDate,
+        appliedFilters: describeFilter(gf),
+        computed: 'live',
+        kpis: [
+          ...live.map((k) => ({
+            kpiId: k.kpiId,
+            title: KPI_TITLES[k.kpiId as keyof typeof KPI_TITLES] ?? k.kpiId,
+            status: k.status,
+            value: k.value,
+            numerator: k.numerator,
+            denominator: k.denominator,
+            sampleSize: k.sampleSize,
+            unit: k.unit,
+            currencyBasis: k.currencyBasis,
+            severity: k.severity,
+            statusReason: k.statusReason,
+            detail: k.detail,
+            drillToken:
+              k.drillPredicate && k.status === 'ok'
+                ? issueDrillToken(k.drillPredicate as unknown as DrillPredicate, v.id, ctx.scope, fpLive)
+                : null,
+          })),
+          ...filteredOut,
+        ],
+      });
+      return;
+    }
 
     const rows = await query<{
       kpi_id: string; status: string; value_num: number | null; numerator: number | null;
@@ -360,6 +441,7 @@ export function buildRouter(): Router {
       datasetVersionId: v.id,
       asOfDate: v.asOfDate,
       appliedFilters: {},
+      computed: 'precomputed',
       kpis: rows.map((k) => ({
         kpiId: k.kpi_id,
         title: KPI_TITLES[k.kpi_id as keyof typeof KPI_TITLES] ?? k.kpi_id,
@@ -395,6 +477,54 @@ export function buildRouter(): Router {
 
     const v = await currentVersion();
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+
+    const gf: GlobalFilter = parseGlobalFilter(req.query as Record<string, unknown>);
+
+    // Same rule as the KPI endpoint: filtered requests recompute live from the
+    // spec SQL; the precomputed path is left alone.
+    if (!isEmptyFilter(gf) && liveChartAvailable(meta.chartId)) {
+      const live = await computeLiveChart(v.id, meta.chartId, gf);
+      if (live) {
+        const fpLive = sessionFingerprint(ctx.sid);
+        res.json({
+          datasetVersionId: v.id,
+          asOfDate: v.asOfDate,
+          chartId: meta.chartId,
+          title: meta.title,
+          unit: meta.unit,
+          currencyBasis: null,
+          computed: 'live',
+          appliedFilters: describeFilter(gf),
+          buckets: live.points.map((pt) => ({
+            key: pt.bucketKey,
+            label: pt.bucketLabel,
+            ordinal: pt.ordinal,
+          })),
+          series: [
+            {
+              key: live.seriesKey,
+              label: live.seriesLabel,
+              points: live.points.map((pt) => ({
+                bucketKey: pt.bucketKey,
+                value: pt.value,
+                rowCount: pt.rowCount,
+                drillToken: issueDrillToken(
+                  {
+                    ...(pt.drillPredicate as unknown as DrillPredicate),
+                    label: `${meta.title} — ${pt.bucketLabel}`,
+                  },
+                  v.id,
+                  ctx.scope,
+                  fpLive,
+                ),
+              })),
+            },
+          ],
+          notes: live.points.length === 0 ? ['No rows match the active filter'] : (meta.notes ?? []),
+        });
+        return;
+      }
+    }
 
     const rows = await query<{
       series_key: string; series_label: string; bucket_key: string; bucket_label: string;
@@ -440,6 +570,14 @@ export function buildRouter(): Router {
       });
     }
 
+    // Charts without a live recomputation path fall back to the precomputed
+    // (unfiltered) series. Showing an unfiltered figure while a filter is
+    // active would be silently wrong, so the fallback is declared.
+    const filterNotApplied =
+      !isEmptyFilter(gf) && !liveChartAvailable(meta.chartId)
+        ? ['⚠ Global filter NOT applied to this chart — showing all data']
+        : [];
+
     res.json({
       datasetVersionId: v.id,
       asOfDate: v.asOfDate,
@@ -447,12 +585,15 @@ export function buildRouter(): Router {
       title: meta.title,
       unit: meta.unit,
       currencyBasis: null,
+      computed: 'precomputed',
       buckets: [...bucketMap.values()].sort((a, b) => a.ordinal - b.ordinal),
       series: [...seriesMap.values()],
-      notes:
-        rows.length === 0
+      notes: [
+        ...filterNotApplied,
+        ...(rows.length === 0
           ? ['No rows with the required dates in this dataset']
-          : (meta.notes ?? []),
+          : (meta.notes ?? [])),
+      ],
     });
   }));
 

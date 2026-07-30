@@ -8,11 +8,12 @@
  */
 
 import type pg from 'pg';
-import { expediteEffectiveness, median, percentile, shareOverThreshold } from '@pct/rules';
+import { expediteEffectiveness, mean, median, percentile, shareOverThreshold } from '@pct/rules';
 import type { KpiId } from '@pct/contracts';
 import { insertMany } from '../../db/client.js';
 import { CHART_META } from './charts.js';
 import { wbsLabel, type RuleSnapshot } from '../admin/rules.js';
+import { buildParityMart } from './mart_parity.js';
 
 type Sev = 'good' | 'neutral' | 'warning' | 'critical' | null;
 
@@ -317,7 +318,7 @@ export async function buildMart(
     [versionId],
   );
   kpis.push(simpleCount('split_sourcing', split[0]!.items, 'count', null,
-    { maxPoLinesPerPrItem: split[0]!.maxlines }, { grain: 'po_line', filters: { splitSourced: true } }));
+    { maxPoLinesPerPrItem: split[0]!.maxlines, entityUnit: 'PR items' }, { grain: 'po_line', filters: { splitSourced: true } }));
 
   const rev = await q<{ receipts: number; reversals: number }>(
     `SELECT count(*) FILTER (WHERE movement_type = '101')::int AS receipts,
@@ -335,7 +336,7 @@ export async function buildMart(
       WHERE dataset_version_id = $1 AND approve_date IS NULL`,
     [versionId],
   );
-  kpis.push(simpleCount('pending_pr_approvals', pendPr[0]!.n, 'count', null, null,
+  kpis.push(simpleCount('pending_pr_approvals', pendPr[0]!.n, 'count', null, { entityUnit: 'PR items' },
     { grain: 'pr_release', filters: { pending: true } }));
 
   // Release-exempt POs are excluded: they have no release record and can never be
@@ -346,7 +347,7 @@ export async function buildMart(
     [versionId],
   );
   kpis.push(simpleCount('pending_po_approvals', pendPo[0]!.n, 'count', null,
-    { releaseExemptExcluded: c.exempt },
+    { releaseExemptExcluded: c.exempt, entityUnit: 'POs' },
     { grain: 'po_line', filters: { poReleaseState: 'pending' } }));
 
   // ───────────────────────────────────────────────────────── persist KPIs
@@ -364,6 +365,8 @@ export async function buildMart(
   );
 
   await buildCharts(client, versionId, agingThreshold);
+  // The v1 parity cards and charts (Docs/V1_V2_Parity_Matrix.md).
+  await buildParityMart(client, versionId);
   void asOfDate;
 }
 
@@ -388,10 +391,19 @@ function cycleKpi(kpiId: KpiId, vals: number[], minSample: number, disabled: Rea
   if (vals.length < minSample) {
     return nullKpi(kpiId, 'days', `Fewer than ${minSample} observations.`, vals.length);
   }
+  // Median is the headline: PR-to-GR ranges 0-758 days on this data, so a handful
+  // of stale requisitions drags the average badly. v1 showed the average, so it is
+  // kept in the subtitle and the two remain reconcilable.
   return {
     kpiId, status: 'ok', value: median(vals), numerator: null, denominator: null,
     sampleSize: vals.length, unit: 'days', currencyBasis: null, severity: 'neutral',
-    statusReason: null, detail: { p90: percentile(vals, 0.9) }, drillPredicate: null,
+    statusReason: null,
+    detail: {
+      avg: mean(vals) === null ? null : Math.round(mean(vals)! * 10) / 10,
+      p90: percentile(vals, 0.9),
+      max: vals.length ? Math.max(...vals) : null,
+    },
+    drillPredicate: null,
   };
 }
 
@@ -499,7 +511,9 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
     );
     r.rows.forEach((x, i) =>
       push('po_value_by_month', 'value', 'Net order value (USD)', x.mk, monthLabel(x.mk), i + 1,
-        x.usd, x.n, 'usd', { grain: 'po_line', filters: { monthKey: x.mk, isSto: false } }),
+        x.usd, x.n, 'usd',
+        // Must mirror the aggregate's WHERE exactly, or the drill over-counts.
+        { grain: 'po_line', filters: { monthKey: x.mk, notSto: true, notDeleted: true } }),
     );
   }
 
@@ -516,9 +530,11 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
     );
     r.rows.forEach((x, i) => {
       push('delivery_ordered_vs_received', 'ordered', 'PO lines', x.mk, monthLabel(x.mk), i + 1,
-        x.ordered, x.ordered, 'count', { grain: 'po_line', filters: { monthKey: x.mk } });
+        x.ordered, x.ordered, 'count',
+        { grain: 'po_line', filters: { monthKey: x.mk, notDeleted: true } });
       push('delivery_ordered_vs_received', 'received', 'Lines with GR', x.mk, monthLabel(x.mk), i + 1,
-        x.received, x.received, 'count', { grain: 'po_line', filters: { monthKey: x.mk, hasReceipt: true } });
+        x.received, x.received, 'count',
+        { grain: 'po_line', filters: { monthKey: x.mk, hasReceipt: true, notDeleted: true } });
     });
   }
 
@@ -558,7 +574,7 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
     r.rows.forEach((x, i) =>
       push('top_vendors_spend', 'spend', 'Spend (USD)', x.vendor_code ?? '?',
         x.vendor_name ?? x.vendor_code ?? '?', i + 1, x.usd, x.n, 'usd',
-        { grain: 'po_line', filters: { vendorCode: x.vendor_code, isSto: false } }),
+        { grain: 'po_line', filters: { vendorCode: x.vendor_code, notSto: true, notDeleted: true } }),
     );
   }
 

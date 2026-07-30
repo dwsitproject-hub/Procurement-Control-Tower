@@ -22,17 +22,35 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
 
   const sub = subtitle(kpi);
 
+  const body = (
+    <>
+      <div className="v">{formatKpi(kpi.value, kpi.unit)}</div>
+      <div className="l">{kpi.title}</div>
+      <div className="s">{sub}</div>
+    </>
+  );
+
+  // A card with no drill predicate renders as a div, NOT a disabled button.
+  // Chrome greys disabled button text, so a perfectly valid figure read as the
+  // unavailable state — and a disabled button with no accessible name is a
+  // focusable control that announces nothing.
+  if (!kpi.drillToken) {
+    return (
+      <div className="kpi" data-sev={kpi.severity ?? 'neutral'}>
+        {body}
+      </div>
+    );
+  }
+
+  const token = kpi.drillToken;
   return (
     <button
       className="kpi"
       data-sev={kpi.severity ?? 'neutral'}
-      disabled={!kpi.drillToken}
-      onClick={() => kpi.drillToken && onDrill(kpi.drillToken, kpi.title)}
-      title={kpi.drillToken ? 'Click to see the rows behind this figure' : undefined}
+      onClick={() => onDrill(token, kpi.title)}
+      title="Click to see the rows behind this figure"
     >
-      <div className="v">{formatKpi(kpi.value, kpi.unit)}</div>
-      <div className="l">{kpi.title}</div>
-      <div className="s">{sub}</div>
+      {body}
     </button>
   );
 }
@@ -61,6 +79,20 @@ function subtitle(kpi: Kpi): string {
   }
   if (kpi.kpiId === 'pending_po_approvals' && kpi.detail) {
     parts.push(`${kpi.detail['releaseExemptExcluded']} release-exempt excluded`);
+  }
+
+  if (kpi.detail && kpi.detail['entityUnit']) {
+    // The figure counts entities; the drill opens the rows behind them.
+    parts.push('distinct ' + String(kpi.detail['entityUnit']) + ' — drill opens the lines');
+  }
+
+  if (kpi.unit === 'days' && kpi.detail && kpi.detail['avg'] !== undefined) {
+    // Median is the headline; v1 showed the average, so both stay visible and
+    // the two remain reconcilable against v1.
+    const avg = kpi.detail['avg'];
+    const p90 = kpi.detail['p90'];
+    if (avg !== null) parts.push('avg ' + formatNumber(Number(avg), 1) + 'd');
+    if (p90 !== null && p90 !== undefined) parts.push('p90 ' + formatNumber(Number(p90)) + 'd');
   }
 
   // The currency basis is part of the figure's meaning, not decoration.

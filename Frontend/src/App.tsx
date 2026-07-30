@@ -6,6 +6,9 @@ import { KpiCard } from './components/KpiCard';
 import { ChartPanel } from './components/Chart';
 import { DrillModal } from './components/DrillModal';
 import { DetailTable } from './components/DetailTable';
+import {
+  EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
+} from './components/GlobalFilterBar';
 
 type Tab = 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems' | 'detail' | 'datacheck';
 
@@ -22,28 +25,64 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 
 const TAB_KPIS: Record<Tab, string[]> = {
+  // Ordered to mirror v1's page layouts.
   executive: [
-    'demand_realism', 'expedite_effectiveness', 'grir_over_60d', 'commitment_over_60d',
-    'wbs_compliance', 'open_items', 'cycle_e2e', 'split_sourcing',
+    'open_po_commitment', 'grir_value', 'pr_pipeline_value', 'cycle_e2e',
+    'emergency_pct_value', 'demand_realism', 'expedite_effectiveness', 'wbs_compliance',
+    'total_pr_items', 'delivered_gr', 'open_items',
+    'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
   ],
-  openitems: ['open_items', 'pending_pr_approvals', 'pending_po_approvals', 'commitment_over_60d'],
-  pr: ['demand_realism', 'expedite_effectiveness', 'cycle_pr_approval', 'pending_pr_approvals'],
-  po: ['direct_po_share', 'sto_share', 'cycle_sourcing', 'cycle_po_approval', 'retro_po_rate', 'grir_over_60d'],
-  delivery: ['cycle_delivery', 'cycle_e2e', 'reversal_rate'],
-  approvals: ['pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval', 'cycle_po_approval'],
-  governance: ['wbs_compliance', 'retro_po_rate', 'sto_share', 'direct_po_share'],
+  openitems: [
+    'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
+    'po_not_delivered', 'open_items', 'emergency_open', 'urgent_open',
+    'avg_unreleased_age', 'retro_po_rate', 'open_pr_no_wbs', 'commitment_over_60d',
+  ],
+  pr: [
+    'cycle_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
+    'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
+    'emergency_urgent_share', 'at_risk_demand', 'pr_cancellation_rate', 'pr_deleted',
+    'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
+  ],
+  po: [
+    'total_po_amount', 'total_po_count', 'cycle_sourcing', 'cycle_po_approval',
+    'po_line_items', 'unique_suppliers', 'grir_over_60d', 'commitment_over_60d',
+    'lines_pending_po_approval', 'hold_po_lines', 'gr_coverage_pct',
+    'pending_po_approvals', 'pr_po_price_variance', 'tail_spend_pct',
+    'direct_po_share', 'sto_share', 'split_sourcing',
+  ],
+  delivery: ['cycle_delivery', 'cycle_e2e', 'items_delivered', 'delivered_gr', 'reversal_rate'],
+  approvals: [
+    'pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval',
+    'cycle_po_approval', 'approved_within_3d', 'oldest_unreleased', 'retro_po_rate',
+  ],
+  governance: [
+    'wbs_compliance', 'open_pr_no_wbs', 'retro_po_rate', 'sto_share',
+    'direct_po_share', 'sole_source_materials', 'tail_spend_pct',
+    'pr_cancellation_rate', 'emergency_pct_value',
+  ],
   detail: [],
   datacheck: [],
 };
 
 const TAB_CHARTS: Record<Tab, string[]> = {
-  executive: ['status_mix', 'po_value_by_month'],
-  openitems: ['aging_bands', 'status_mix'],
-  pr: ['pr_by_month', 'wbs_by_plant'],
-  po: ['po_value_by_month', 'top_vendors_spend', 'purch_group_workload'],
-  delivery: ['delivery_ordered_vs_received', 'movement_mix'],
+  executive: ['status_mix', 'po_value_by_month', 'items_by_priority', 'aging_by_priority'],
+  openitems: ['aging_bands', 'open_by_priority', 'unapproved_by_category', 'unreleased_aging_buckets'],
+  pr: [
+    'pr_by_month', 'items_by_category', 'pr_approval_by_priority',
+    'pr_approval_distribution', 'monthly_pr_no_po', 'pr_by_plant', 'wbs_by_plant',
+  ],
+  po: [
+    'po_value_by_month', 'top_vendors_spend', 'po_value_by_category', 'po_by_plant',
+    'po_value_by_purch_org', 'purch_group_workload', 'sourcing_by_priority',
+    'po_approval_by_priority', 'po_approval_distribution', 'sourcing_by_category',
+    'commitment_aging', 'top_materials_spend',
+  ],
+  delivery: [
+    'delivery_ordered_vs_received', 'delivery_by_category', 'delivery_by_priority',
+    'delivery_distribution', 'e2e_by_month', 'e2e_by_category', 'movement_mix',
+  ],
   approvals: ['pending_pr_by_pic'],
-  governance: ['wbs_by_plant'],
+  governance: ['wbs_by_plant', 'unapproved_by_category'],
   detail: [],
   datacheck: [],
 };
@@ -52,6 +91,7 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [tab, setTab] = useState<Tab>('executive');
+  const [gf, setGf] = useState<GlobalFilterState>(EMPTY_FILTER);
   const [dataset, setDataset] = useState<DatasetCurrent | null>(null);
   const [kpis, setKpis] = useState<Kpi[]>([]);
   const [drill, setDrill] = useState<{ token: string; label: string } | null>(null);
@@ -69,11 +109,26 @@ export default function App() {
   useEffect(() => {
     if (!me) return;
     api.get<DatasetCurrent>('/api/v1/dataset/current').then(setDataset).catch(() => undefined);
-    api
-      .get<{ kpis: Kpi[] }>('/api/v1/kpi')
-      .then((d) => setKpis(d.kpis))
-      .catch(() => setKpis([]));
   }, [me]);
+
+  // Refetch KPIs whenever the global filter changes. The query string is empty
+  // when nothing is selected, which keeps the fast precomputed path in play.
+  const gfQuery = globalFilterQuery(gf);
+  useEffect(() => {
+    if (!me) return;
+    let cancelled = false;
+    api
+      .get<{ kpis: Kpi[] }>(`/api/v1/kpi${gfQuery ? `?${gfQuery}` : ''}`)
+      .then((d) => {
+        if (!cancelled) setKpis(d.kpis);
+      })
+      .catch(() => {
+        if (!cancelled) setKpis([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [me, gfQuery]);
 
   if (!authChecked) {
     return <div className="center-msg"><div className="spinner" />Loading…</div>;
@@ -123,6 +178,8 @@ export default function App() {
         </div>
       )}
 
+      {dataset?.datasetVersionId != null && <GlobalFilterBar value={gf} onChange={setGf} />}
+
       <div className="tabs" role="tablist">
         {TABS.map((t) => (
           <button
@@ -159,7 +216,7 @@ export default function App() {
             )}
             <div className="chart-grid">
               {TAB_CHARTS[tab].map((c) => (
-                <ChartPanel key={c} chartId={c} onDrill={onDrill} />
+                <ChartPanel key={c} chartId={c} onDrill={onDrill} filterQuery={gfQuery} />
               ))}
             </div>
           </>

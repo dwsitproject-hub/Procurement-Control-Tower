@@ -218,6 +218,7 @@ export async function queryDetail(
     for (const [name, col] of [
       ['status', 'status'],
       ['matCat', 'mat_cat'],
+      ['matGroup', 'mat_group'],
       ['plant', 'plant'],
       ['company', 'company'],
       ['purchOrg', 'purch_org'],

@@ -113,6 +113,12 @@ const TABLES: Record<Grain, { table: string; alias: string; order: string; id: s
  */
 type Compiler = (v: unknown, alias: string, params: unknown[], grain: Grain) => string;
 
+const asInt = (v: unknown): number => {
+  const n = Number(v);
+  if (!Number.isInteger(n)) throw new Error(`expected an integer, got ${String(v)}`);
+  return n;
+};
+
 const p = (params: unknown[], v: unknown): string => {
   params.push(v);
   return `$${params.length}`;
@@ -138,9 +144,89 @@ function monthExpr(alias: string, grain: Grain): string {
 }
 
 const FILTERS: Record<string, Compiler> = {
+  // Filters the mart aggregates apply. Every predicate must carry the SAME
+  // filters as the query that produced its number — the omission of these two is
+  // what made 29 chart points drill to a higher count than they displayed.
+  notSto: (_v, a) => `NOT ${a}.is_sto`,
+  notDeleted: (_v, a) => `NOT ${a}.is_deleted`,
+  deletedOnly: (_v, a) => `${a}.is_deleted`,
+  hasOpenCommitment: (_v, a) => `COALESCE(${a}.still_deliver_val, 0) > 0`,
+  grirOpen: (_v, a) =>
+    `COALESCE(${a}.still_deliver_qty, 0) = 0 AND COALESCE(${a}.still_invoice_val, 0) > 0`,
+  urgencyLte: (v, a, ps) => `${a}.urgency <= ${p(ps, asInt(v))}`,
+  priorityLabel: (v, a, ps) =>
+    v === null ? `${a}.priority_label IS NULL` : `${a}.priority_label = ${p(ps, String(v))}`,
+  matCat: (v, a, ps) =>
+    v === null ? `${a}.material_category IS NULL` : `${a}.material_category = ${p(ps, String(v))}`,
+  prNoPo: (_v, a) => `${a}.po_line_count = 0`,
+  hasPo: (_v, a) => `${a}.po_line_count > 0`,
+  hasPr: (_v, a) => `${a}.pr_no IS NOT NULL`,
+  unreleased: (_v, a) => `${a}.release_final_date IS NULL`,
+  released: (_v, a) => `${a}.release_final_date IS NOT NULL`,
+  purchOrg: (v, a, ps) => `${a}.purch_org = ${p(ps, String(v))}`,
+  /**
+   * Histogram bucket. Without this every bar in a distribution chart drilled to
+   * the whole population, because the bucket range was in the aggregate's CASE
+   * expression but not in the stored predicate.
+   *
+   * Boundaries mirror the aggregate's CASE exactly, including that '0-3' catches
+   * negative values the way v1's buckets do.
+   */
+  distBucket: (v, a, ps) => {
+    const o = v as { measure?: string; bucket?: string };
+    const COL: Record<string, string> = {
+      pr_approval: `(${a}.release_final_date - ${a}.requisition_date)`,
+      po_approval: `${a}.po_approval_days`,
+      delivery: `${a}.delivery_days`,
+      aging: `${a}.aging_days`,
+    };
+    const col = COL[o.measure ?? ''];
+    if (!col) throw new Error(`unknown distribution measure: ${String(o.measure)}`);
+
+    const UPPER: Record<string, [number | null, number | null]> = {
+      '0-3': [null, 3],
+      '4-7': [3, 7],
+      '8-14': [7, 14],
+      '15-30': [14, 30],
+      '31-60': [30, 60],
+      '60+': [60, null],
+    };
+    const r = UPPER[o.bucket ?? ''];
+    if (!r) throw new Error(`unknown distribution bucket: ${String(o.bucket)}`);
+
+    const parts: string[] = [`${col} IS NOT NULL`];
+    if (r[0] !== null) parts.push(`${col} > ${p(ps, r[0])}`);
+    if (r[1] !== null) parts.push(`${col} <= ${p(ps, r[1])}`);
+    return `(${parts.join(' AND ')})`;
+  },
+  // ── global filters (W2) ──
+  // Merged into every predicate issued from a filtered figure, so a card and its
+  // drill can never disagree once a filter is applied.
+  companyCodeIn: (v, a, ps) => `${a}.company_code = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  plantIn: (v, a, ps) => `${a}.plant = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  purchOrgIn: (v, a, ps) => `${a}.purch_org = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  monthKeyIn: (v, a, ps, grain) =>
+    `${monthExpr(a, grain)} = ANY(${p(ps, (v as unknown[]).map(String))})`,
+
+  /**
+   * A lead-time chart only aggregates rows where its measure exists (a sourcing
+   * time needs a PR release; an approval time needs a release record). The
+   * predicate must say so too, or the drill returns every line and over-counts.
+   */
+  measureNotNull: (v, a) => {
+    const COL: Record<string, string> = {
+      sourcing: 'sourcing_days',
+      po_approval: 'po_approval_days',
+      delivery: 'delivery_days',
+    };
+    const col = COL[String(v)];
+    if (!col) throw new Error(`unknown measure: ${String(v)}`);
+    return `${a}.${col} IS NOT NULL`;
+  },
   status: (v, a, ps) => `${a}.status = ${p(ps, String(v))}`,
   statusIn: (v, a, ps) => `${a}.status = ANY(${p(ps, (v as unknown[]).map(String))})`,
   plant: (v, a, ps) => `${a}.plant = ${p(ps, String(v))}`,
+  companyCode: (v, a, ps) => `${a}.company_code = ${p(ps, String(v))}`,
   purchGroup: (v, a, ps) =>
     v === null ? `${a}.purch_group IS NULL` : `${a}.purch_group = ${p(ps, String(v))}`,
   vendorCode: (v, a, ps) => `${a}.vendor_code = ${p(ps, String(v))}`,
@@ -177,8 +263,11 @@ const FILTERS: Record<string, Compiler> = {
     void ps;
     return clause;
   },
+  // The full open set. Listing only the PO-side statuses made every PR-grain
+  // "open" drill under-count, because 'Unapproved PR' and 'PR Approved-No PO'
+  // were silently excluded.
   open: (_v, a) =>
-    `${a}.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`,
+    `${a}.status IN ('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`,
   hasReceipt: (v, a) => (v ? `${a}.receipt_date IS NOT NULL` : `${a}.receipt_date IS NULL`),
   movementType: (v, a, ps) => `${a}.movement_type = ${p(ps, String(v))}`,
   postingClass: (v, a, ps) => `${a}.posting_class = ${p(ps, String(v))}`,

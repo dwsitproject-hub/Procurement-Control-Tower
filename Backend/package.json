@@ -11,6 +11,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "ingest": "tsx src/cli/ingest.ts",
+    "sweep": "tsx src/cli/sweep.ts",
     "test:golden": "tsx src/cli/golden.ts"
   },
   "dependencies": {

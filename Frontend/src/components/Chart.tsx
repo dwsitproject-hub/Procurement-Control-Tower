@@ -19,9 +19,12 @@ const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948
 export function ChartPanel({
   chartId,
   onDrill,
+  filterQuery = '',
 }: {
   chartId: string;
   onDrill: (token: string, label: string) => void;
+  /** Global filter as a query string; empty keeps the precomputed path. */
+  filterQuery?: string;
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
@@ -30,8 +33,9 @@ export function ChartPanel({
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     api
-      .get<ChartResponse>(`/api/v1/chart/${chartId}`)
+      .get<ChartResponse>(`/api/v1/chart/${chartId}${filterQuery ? `?${filterQuery}` : ''}`)
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -41,7 +45,7 @@ export function ChartPanel({
     return () => {
       cancelled = true;
     };
-  }, [chartId]);
+  }, [chartId, filterQuery]);
 
   useEffect(() => {
     if (!data || !canvas.current || data.buckets.length === 0) return;

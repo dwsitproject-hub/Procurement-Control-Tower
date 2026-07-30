@@ -6,7 +6,66 @@
 
 Extracted from v1's source, not from screenshots: 10 page containers, **73 KPI cards**, **41 charts**, **18 tables**, **14 modals**, 9 filter controls.
 
-**Headline:** v2 currently implements **18 of 73 KPIs (25%)**, **10 of 41 charts (24%)**, **0 of 18 tables**, and **1 of 14 modals**. Four whole pages are missing.
+**Baseline at the time of writing:** v2 implemented **18 of 73 KPIs (25%)**, **10 of 41 charts (24%)**, **0 of 18 tables**, **1 of 14 modals**. Four whole pages missing.
+
+---
+
+## 0. Progress log
+
+The per-item tables in §2–§6 are the **original baseline** and are deliberately not
+rewritten row by row — that would risk introducing claims I have not measured.
+This log is the current state.
+
+| Date | Wave | Delivered | Verified |
+|---|---|---|---|
+| 30 Jul 2026 | **W1** | Detail Table (49 columns, 7 facet filters, server-side sort/search/paging, per-user layout); reference data recovered from v1 (21 companies, 183 plant names, 19 category overrides); `materialCategory` / `priorityLabel` ported into `packages/rules` | ✅ 28,664 rows served; golden numbers unchanged; 107 unit tests |
+| 30 Jul 2026 | **W4** | 35 further KPI cards → **53 of 73 (73%)**. Cycle cards now show median headline with avg and p90 in the subtitle (agreed decision) | ⚠️ 53 KPIs / 52 ok confirmed; final drill sweep pending |
+| 30 Jul 2026 | **W5** | 24 further charts → **34 of 41 (83%)** | ⚠️ 34 registered, 0 empty, 0 errors confirmed; final drill sweep pending |
+
+### Current position
+
+| | v1 | v2 |
+|---|---:|---:|
+| KPI cards | 73 | **53 (73%)** |
+| Charts | 41 | **34 (83%)** |
+| Tables | 18 | 1 |
+| Filters | 9 | 7 |
+| Pages with no equivalent | — | 3 (Vendor 360, Material Group, customisation) |
+
+### Drill-parity defects found and fixed during W4/W5
+
+The "drill count equals aggregate count" guarantee was broken in four distinct
+ways. All four are now closed in code:
+
+1. **Aggregate filters missing from predicates.** `po_value_by_month`,
+   `delivery_ordered_vs_received` and `top_vendors_spend` applied
+   `NOT is_sto` / `NOT is_deleted` in the aggregate but not in the stored
+   predicate. This was the original 29 mismatches.
+2. **`open` covered only the four PO statuses**, omitting `Unapproved PR` and
+   `PR Approved-No PO`, so every PR-grain "open" drill under-counted. Roughly 40
+   further mismatches.
+3. **Histogram buckets carried no range.** Each bar in the four distribution
+   charts drilled to the entire population, because the range lived in the
+   aggregate's `CASE` and never reached the predicate. Fixed by a `distBucket`
+   filter whose boundaries mirror the `CASE` exactly.
+4. **Null handling diverged on one bar.** `unreleased_aging_buckets` let a null
+   aging fall through the `CASE` into `60+` while the drill filter excluded it.
+   The aggregate now filters nulls explicitly.
+
+### Entity counts are not defects
+
+Five cards count **entities** while their drill returns the underlying **rows** —
+"# POs" 8,340 drills to 15,271 PO lines. v1 behaves the same way. Rather than
+leave that looking broken, these cards declare an `entityUnit` and say so in the
+subtitle: *"distinct POs — drill opens the lines"*. Affected:
+`po_hold`, `total_po_count`, `unique_suppliers`, `sole_source_materials`,
+`split_sourcing`, plus both pending-approval cards.
+
+### Remaining
+
+Vendor 360, Material and Material Group pages (11 KPIs, 9 charts, 10 tables),
+the 3 global filters, and the customisation suite (confirmed in scope).
+Roughly **10–14 working days**, down from 18–24.
 
 ---
 

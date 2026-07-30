@@ -39,11 +39,14 @@ interface DetailResponse {
   facets: Record<string, Facet[]>;
 }
 
-type MultiKey = 'status' | 'matCat' | 'plant' | 'company' | 'purchOrg' | 'purchGroup' | 'priority';
+type MultiKey =
+  | 'status' | 'matCat' | 'matGroup' | 'plant' | 'company'
+  | 'purchOrg' | 'purchGroup' | 'priority';
 
 const FILTER_LABELS: Record<MultiKey, string> = {
   status: 'Status',
   matCat: 'Category',
+  matGroup: 'Mat Group',
   plant: 'Plant',
   company: 'Company',
   purchOrg: 'Purch Org',

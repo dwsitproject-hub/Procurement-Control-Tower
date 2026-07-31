@@ -21,16 +21,24 @@ This log is the current state.
 | 30 Jul 2026 | **W1** | Detail Table (49 columns, 7 facet filters, server-side sort/search/paging, per-user layout); reference data recovered from v1 (21 companies, 183 plant names, 19 category overrides); `materialCategory` / `priorityLabel` ported into `packages/rules` | ✅ 28,664 rows served; golden numbers unchanged; 107 unit tests |
 | 30 Jul 2026 | **W4** | 35 further KPI cards → **53 of 73 (73%)**. Cycle cards now show median headline with avg and p90 in the subtitle (agreed decision) | ⚠️ 53 KPIs / 52 ok confirmed; final drill sweep pending |
 | 30 Jul 2026 | **W5** | 24 further charts → **34 of 41 (83%)** | ⚠️ 34 registered, 0 empty, 0 errors confirmed; final drill sweep pending |
+| 31 Jul 2026 | **W2** | Global filters (plant / purch org / month) recompute KPIs and charts live from the same spec SQL; drill predicates carry the filter | ✅ sweep 0/0 unfiltered (318 pts) and 0/0 filtered (107 pts) |
+| 31 Jul 2026 | **W3** | Vendor 360 tab (top-50 list + 11-KPI bio popup with spend-by-month, by-area, materials, PO/GR history) and Materials tab (category summary, material popup with IDR price trend, vendor/area share, sole-source list) | ✅ vendor popup drill parity verified (allLines = lineCount); D4 card stays null with reason |
+| 31 Jul 2026 | **W6** | Admin tab: exclusion config (applied at transform, V-C01 reports counts), server-side column mapping (2nd classify pass), per-version FX table | ✅ PUT round-trips verified; exclusions default empty so golden numbers unchanged |
+| 31 Jul 2026 | **W7** | Custom tab: KPI/chart builder from server-side whitelists, per-user saved specs, mandatory user-defined banner | ✅ custom drill-count parity (19,636 = 19,636); buckets partition population; injection attempt rejected 400 |
 
 ### Current position
 
 | | v1 | v2 |
 |---|---:|---:|
-| KPI cards | 73 | **53 (73%)** |
-| Charts | 41 | **34 (83%)** |
-| Tables | 18 | 1 |
-| Filters | 9 | 7 |
-| Pages with no equivalent | — | 3 (Vendor 360, Material Group, customisation) |
+| KPI cards | 73 | **53 (73%)** — remainder blocked (D4 / info-record column) or superseded |
+| Charts | 41 | **34 (83%)** — remainder are v1 duplicates or blocked on D4 |
+| Tables | 18 | Detail Table + vendor/material/category tables (entity tabs) |
+| Filters | 9 | 7 detail facets + 3 global (plant, purch org, month) |
+| Pages with no equivalent | — | 0 — Vendor 360, Materials and Custom tabs shipped 31 Jul 2026 |
+
+End-to-end run of 31 Jul 2026: 50/50 API checks passed (entity endpoints,
+exclusion and mapping round-trips, custom drill parity, golden numbers intact,
+53 KPIs). All four new tabs verified rendering in the browser on dataset v12.
 
 ### Drill-parity defects found and fixed during W4/W5
 

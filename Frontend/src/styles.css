@@ -266,3 +266,44 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 }
 .gf-panel-list { max-height: 300px; overflow: auto; padding: .4rem .5rem; display: flex; flex-direction: column; gap: .2rem; }
 .gf-opt { display: flex; align-items: center; gap: .35rem; font-size: .78rem; white-space: nowrap; }
+
+
+/* ── entity views (W3) ────────────────────────────────────────────── */
+
+.ent-row { cursor: pointer; }
+.ent-row--sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.ent-kpis {
+  display: grid; gap: .5rem; margin-bottom: .6rem;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+}
+.ent-bio {
+  border: 1px solid var(--border); border-radius: 6px; padding: .45rem .55rem;
+  background: var(--bg);
+}
+.ent-bio .v { font-weight: 650; font-variant-numeric: tabular-nums; }
+.ent-bio .l { color: var(--muted); font-size: .72rem; }
+.ent-ccy { margin-right: .6rem; font-variant-numeric: tabular-nums; }
+.ent-two { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); margin-bottom: .8rem; }
+.ent-mini { border: 1px solid var(--border); border-radius: 6px; padding: .5rem .6rem; background: var(--bg); }
+.ent-h { font-size: .85rem; margin: .6rem 0 .4rem; font-weight: 620; }
+.ent-bar-row { display: flex; align-items: center; gap: .5rem; font-size: .78rem; margin: .15rem 0; }
+.ent-bar-label { flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ent-bar-track { flex: 1; background: color-mix(in srgb, var(--border) 50%, transparent); border-radius: 3px; height: .8rem; }
+.ent-bar { display: block; height: 100%; background: var(--accent); border-radius: 3px; min-width: 2px; }
+.ent-bar-val { flex: 0 0 110px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ── custom builder (W7) ──────────────────────────────────────────── */
+
+.cu-field { display: flex; flex-direction: column; gap: .2rem; font-size: .78rem; color: var(--muted); }
+.cu-field select, .cu-field input {
+  padding: .3rem .45rem; font: inherit; color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); min-width: 130px;
+}
+.cu-x {
+  position: absolute; top: .3rem; right: .45rem; background: none; border: 0;
+  color: var(--muted); font-size: 1rem; line-height: 1; padding: .1rem .3rem;
+}
+.cu-x:hover { color: var(--crit); }
+.cu-link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
+.cu-bar { border: 0; cursor: pointer; }
+.cu-bar:hover { filter: brightness(1.15); }

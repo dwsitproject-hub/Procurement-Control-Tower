@@ -97,6 +97,8 @@ export interface TransformMetrics {
   fxCurrencies: number;
   fxYearResolved: number | null;
   unratedCurrencies: string[];
+  excludedPoLines: number;
+  excludedPrItems: number;
 }
 
 export interface TransformResult {
@@ -138,6 +140,17 @@ export async function runTransform(
   );
   const mgOverrides: Record<string, string> = {};
   for (const r of mgOverrideRows) mgOverrides[r.material_group] = r.category as string;
+
+  // Exclusions (W6, v1's cfg-modal): excluded rows are not loaded into the
+  // facts at all, so every KPI, chart, drill and detail row agrees by
+  // construction. Staging keeps them for lineage. Applying a change means a
+  // recompute, and the UI says so.
+  const exDocTypes = new Set(((rules['exclusions.doc_types'] as string[] | undefined) ?? []).map(String));
+  const exPurchGroups = new Set(((rules['exclusions.purch_groups'] as string[] | undefined) ?? []).map(String));
+  const exPurchOrgs = new Set(((rules['exclusions.purch_orgs'] as string[] | undefined) ?? []).map(String));
+  let excludedPoLines = 0;
+  let excludedPrItems = 0;
+  const excludedPoKeys = new Set<string>();
 
   const stoSuffix = rules['sto.doctype_suffix'] as string;
   const fxPolicy = rules['fx.policy'] as FxPolicy;
@@ -337,6 +350,17 @@ export async function runTransform(
     const key = `${poNo}|${poItem}`;
 
     const docType = s(p.docType);
+
+    if (
+      (docType !== null && exDocTypes.has(docType)) ||
+      exPurchGroups.has(s(p.purchGroup) ?? '') ||
+      exPurchOrgs.has(s(p.purchOrg) ?? '')
+    ) {
+      excludedPoLines += 1;
+      excludedPoKeys.add(key);
+      continue;
+    }
+
     const sto = isSto(docType, stoSuffix);
     if (sto) {
       stoLines += 1;
@@ -508,6 +532,11 @@ export async function runTransform(
     if (prNo === null || prItem === null) continue;
     const key = `${prNo}|${prItem}`;
 
+    if (exPurchGroups.has(s(p.purchGroup) ?? '') || exPurchOrgs.has(s(p.purchOrg) ?? '')) {
+      excludedPrItems += 1;
+      continue;
+    }
+
     const appr = derivePrApproval(releaseByPrItem.get(key) ?? []);
     const deleted = (s(p.deletionIndicator) ?? '').toLowerCase() === 'true';
     const totalValue = n(p.totalValueIdr);
@@ -600,6 +629,7 @@ export async function runTransform(
 
     const rule = lookupMovement(mvt);
     if (rule === null) continue; // already recorded as a BLOCKER
+    if (excludedPoKeys.has(`${poNo}|${poItem}`)) continue;
     if (!poByKey.has(`${poNo}|${poItem}`)) grOrphans += 1;
 
     const rawQty = n(p.qtyEntry);
@@ -835,6 +865,8 @@ export async function runTransform(
     fxCurrencies: new Set(fx.rates.map((r) => r.currency)).size,
     fxYearResolved: fx.yearResolved,
     unratedCurrencies: [...unrated],
+    excludedPoLines,
+    excludedPrItems,
   };
 
   // `contaminated` counts lines where a naive earliest-any-movement date WOULD

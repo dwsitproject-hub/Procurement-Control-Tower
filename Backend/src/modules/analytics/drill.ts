@@ -18,6 +18,7 @@ import { query, queryOne } from '../../db/client.js';
 import {
   intersectScopes, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+import { compileCustomFilter } from './custom.js';
 
 const env = loadEnv();
 
@@ -379,6 +380,12 @@ export async function executeDrill(
   where.push(scopeSql(sq, t.alias, params));
 
   for (const [k, v] of Object.entries(payload.filters ?? {})) {
+    // User-defined specs (W7) prefix their filters `custom:` and compile against
+    // their own whitelist, keeping this static one closed.
+    if (k.startsWith('custom:')) {
+      where.push(compileCustomFilter(k, v, t.alias, params, payload.grain));
+      continue;
+    }
     const compiler = FILTERS[k];
     if (!compiler) throw new Error(`unknown drill filter: ${k}`);
     where.push(compiler(v, t.alias, params, payload.grain));

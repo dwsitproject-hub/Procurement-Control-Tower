@@ -410,6 +410,19 @@ export function checkMetrics(m: TransformMetrics, rules: Record<string, unknown>
     drillPredicate: null,
   });
 
+  if (m.excludedPoLines > 0 || m.excludedPrItems > 0) {
+    out.push({
+      ruleId: 'V-C01',
+      severity: 'WARNING',
+      feed: null,
+      message: `Exclusion config removed ${m.excludedPoLines} PO line(s) and ${m.excludedPrItems} PR item(s) from every view. Edit under Admin > Exclusions; changes apply on the next recompute.`,
+      affectedRows: m.excludedPoLines + m.excludedPrItems,
+      measured: { excludedPoLines: m.excludedPoLines, excludedPrItems: m.excludedPrItems },
+      disablesKpis: [],
+      drillPredicate: null,
+    });
+  }
+
   out.push({
     ruleId: 'V-B08',
     severity: 'INFO',

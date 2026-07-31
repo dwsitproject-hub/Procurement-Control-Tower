@@ -9,8 +9,13 @@ import { DetailTable } from './components/DetailTable';
 import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
+import { MaterialsTab, VendorsTab } from './components/EntityViews';
+import { AdminTab } from './components/AdminTab';
+import { CustomTab } from './components/CustomTab';
 
-type Tab = 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems' | 'detail' | 'datacheck';
+type Tab =
+  | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
+  | 'vendors' | 'materials' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'executive', label: 'Executive' },
@@ -20,7 +25,11 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'delivery', label: 'Delivery' },
   { id: 'approvals', label: 'Approvals' },
   { id: 'governance', label: 'Governance' },
+  { id: 'vendors', label: 'Vendor 360' },
+  { id: 'materials', label: 'Materials' },
   { id: 'detail', label: 'Detail Table' },
+  { id: 'custom', label: 'Custom' },
+  { id: 'admin', label: 'Admin' },
   { id: 'datacheck', label: 'Data Check' },
 ];
 
@@ -60,7 +69,11 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'direct_po_share', 'sole_source_materials', 'tail_spend_pct',
     'pr_cancellation_rate', 'emergency_pct_value',
   ],
+  vendors: [],
+  materials: [],
   detail: [],
+  custom: [],
+  admin: [],
   datacheck: [],
 };
 
@@ -83,7 +96,11 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   ],
   approvals: ['pending_pr_by_pic'],
   governance: ['wbs_by_plant', 'unapproved_by_category'],
+  vendors: [],
+  materials: [],
   detail: [],
+  custom: [],
+  admin: [],
   datacheck: [],
 };
 
@@ -201,6 +218,14 @@ export default function App() {
               Publish a dataset first: <code>npm run ingest -w @pct/backend</code>
             </p>
           </div>
+        ) : tab === 'vendors' ? (
+          <VendorsTab onDrill={onDrill} />
+        ) : tab === 'materials' ? (
+          <MaterialsTab onDrill={onDrill} />
+        ) : tab === 'custom' ? (
+          <CustomTab onDrill={onDrill} />
+        ) : tab === 'admin' ? (
+          <AdminTab isAdmin={me.roles.includes('admin')} />
         ) : tab === 'detail' ? (
           <DetailTable />
         ) : tab === 'datacheck' ? (

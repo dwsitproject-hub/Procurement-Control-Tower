@@ -38,6 +38,7 @@ import {
 import {
   computeLiveChart, computeLiveKpis, globalFilterOptions, liveChartAvailable,
 } from '../modules/analytics/live.js';
+import { mountExtraRoutes } from './routes_extra.js';
 
 const env = loadEnv();
 
@@ -861,6 +862,9 @@ export function buildRouter(): Router {
   r.get('/api/v1/audit/verify', role('admin', async (_req, res) => {
     res.json({ ...(await verifyAuditChain()), checkedAt: new Date().toISOString() });
   }));
+
+  // ── W3 entity views, W6 steward tooling, W7 custom builder ──
+  mountExtraRoutes(r, { role, requireScope, currentVersion, HttpProblem });
 
   // ── health ──
 

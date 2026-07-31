@@ -17,6 +17,7 @@ import {
   checkFile, checkMetrics, checkStaged, disabledKpis, type Finding,
 } from '../validate/validate.js';
 import { classifyHeaders } from './classify.js';
+import { loadMappings } from '../admin/steward.js';
 import { REQUIRED_FEEDS } from './contracts.js';
 import { extractRow, readSheetFromBuffer } from './parse.js';
 import {
@@ -80,7 +81,13 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     const buf = await opts.source.read(f.handle);
     assertMagicBytes(buf, f.displayName);
     const sheet = readSheetFromBuffer(buf);
-    const cls = classifyHeaders(sheet.headers);
+    // First pass identifies the feed; steward mappings are per feed, so a
+    // second pass applies them once the feed is known. Cheap (headers only).
+    let cls = classifyHeaders(sheet.headers);
+    if (cls.feed !== null) {
+      const mappings = await loadMappings(cls.feed);
+      if (mappings.size > 0) cls = classifyHeaders(sheet.headers, mappings);
+    }
     prepared.push({
       displayName: f.displayName,
       byteSize: f.byteSize,

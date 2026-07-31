@@ -25,6 +25,7 @@ This log is the current state.
 | 31 Jul 2026 | **W3** | Vendor 360 tab (top-50 list + 11-KPI bio popup with spend-by-month, by-area, materials, PO/GR history) and Materials tab (category summary, material popup with IDR price trend, vendor/area share, sole-source list) | ✅ vendor popup drill parity verified (allLines = lineCount); D4 card stays null with reason |
 | 31 Jul 2026 | **W6** | Admin tab: exclusion config (applied at transform, V-C01 reports counts), server-side column mapping (2nd classify pass), per-version FX table | ✅ PUT round-trips verified; exclusions default empty so golden numbers unchanged |
 | 31 Jul 2026 | **W7** | Custom tab: KPI/chart builder from server-side whitelists, per-user saved specs, mandatory user-defined banner | ✅ custom drill-count parity (19,636 = 19,636); buckets partition population; injection attempt rejected 400 |
+| 31 Jul 2026 | **Gaps** | `po_irc` (info-record column persisted; 49.3% on reference data), On-Time vs Requested activation path (still disabled by V-M01 — the export's date column equals Release Date on 99.4% of rows; the KPI, vendor-bio figure and drill filter light up automatically when EBAN-LFDAT arrives), drag-to-reorder detail columns, `{force:true}` recompute | ✅ sweeps 0/0 on v14; 60/60 E2E; golden numbers unchanged |
 
 ### Current position
 

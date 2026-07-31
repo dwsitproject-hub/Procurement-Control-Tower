@@ -57,9 +57,12 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'po_line_items', 'unique_suppliers', 'grir_over_60d', 'commitment_over_60d',
     'lines_pending_po_approval', 'hold_po_lines', 'gr_coverage_pct',
     'pending_po_approvals', 'pr_po_price_variance', 'tail_spend_pct',
-    'direct_po_share', 'sto_share', 'split_sourcing',
+    'direct_po_share', 'sto_share', 'split_sourcing', 'po_irc',
   ],
-  delivery: ['cycle_delivery', 'cycle_e2e', 'items_delivered', 'delivered_gr', 'reversal_rate'],
+  delivery: [
+    'cycle_delivery', 'cycle_e2e', 'items_delivered', 'delivered_gr', 'reversal_rate',
+    'otd_vs_requested',
+  ],
   approvals: [
     'pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval',
     'cycle_po_approval', 'approved_within_3d', 'oldest_unreleased', 'retro_po_rate',

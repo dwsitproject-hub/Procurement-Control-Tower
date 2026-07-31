@@ -301,6 +301,18 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_line', filters: { poReleaseState: 'pending' } },
   },
   {
+    // v1 'Info-Record Coverage %': share of PO lines (STO included, deleted
+    // excluded — v1's _plScope) carrying a purchasing info record. The drill
+    // opens the numerator, matching the gr_coverage_pct convention.
+    id: 'po_irc',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE info_record IS NOT NULL) / NULLIF(count(*), 0) AS value,
+                 count(*) FILTER (WHERE info_record IS NOT NULL)::int AS numerator,
+                 count(*)::int AS denominator, count(*)::int AS sample
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted`,
+    drill: { grain: 'po_line', filters: { notDeleted: true, hasInfoRecord: true } },
+  },
+  {
     id: 'gr_coverage_pct',
     unit: 'percent',
     sql: `SELECT 100.0 * count(*) FILTER (WHERE receipt_date IS NOT NULL) / NULLIF(count(*), 0) AS value,

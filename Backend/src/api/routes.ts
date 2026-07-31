@@ -746,11 +746,12 @@ export function buildRouter(): Router {
 
   r.post('/api/v1/ingest/sync', role('steward', async (req, res, ctx) => {
     const source = new ShareFolderSource(env.SHARE_PATH, env.INGEST_FILE_SETTLE_SECONDS);
-    const out = await runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true });
+    const force = Boolean((req.body ?? {}).force);
+    const out = await runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force });
     await recordAudit({
       action: 'ingest.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
       outcome: out.outcome === 'failed' ? 'failure' : 'success',
-      detail: { outcome: out.outcome }, ip: req.ip,
+      detail: { outcome: out.outcome, force }, ip: req.ip,
     });
     res.json(out);
   }));

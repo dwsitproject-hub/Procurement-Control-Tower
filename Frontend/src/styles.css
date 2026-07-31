@@ -307,3 +307,8 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 .cu-link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 .cu-bar { border: 0; cursor: pointer; }
 .cu-bar:hover { filter: brightness(1.15); }
+
+/* ── detail table: drag-to-reorder headers ────────────────────────── */
+
+table.data th[draggable] { cursor: grab; }
+table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }

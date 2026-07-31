@@ -134,6 +134,62 @@ export async function buildMart(
     );
   }
 
+  // ─────────────────────────── On-Time vs Requested (blocked by D4 / V-M01)
+  //
+  // v1's v3x-otdr: receipt on or before the REQUESTED date (EBAN-LFDAT), not
+  // the PO promise date. Same gate as Demand Realism — the pathway is fully
+  // built and lights up on the first ingest whose PR export carries a genuine
+  // need-by column, with no code change.
+
+  if (disabledKpis.has('otd_vs_requested')) {
+    kpis.push({
+      kpiId: 'otd_vs_requested',
+      status: 'disabled',
+      value: null,
+      numerator: null,
+      denominator: null,
+      sampleSize: null,
+      unit: 'percent',
+      currencyBasis: null,
+      severity: null,
+      statusReason:
+        'Requested delivery date not present in this export (V-M01). On-time is measurable only against the PO promise date (see vendor OTD). Fix: add SAP EBAN-LFDAT to the ME5A variant. See PRD 13.1.1.',
+      detail: null,
+      drillPredicate: null,
+    });
+  } else {
+    const [row] = await q<{ ok: number; tot: number }>(
+      `SELECT count(*) FILTER (WHERE receipt_date <= need_by_date)::int AS ok,
+              count(*)::int AS tot
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_deleted AND NOT is_sto
+          AND receipt_date IS NOT NULL AND need_by_date IS NOT NULL`,
+      [versionId],
+    );
+    const tot = row?.tot ?? 0;
+    kpis.push(
+      tot < minSample
+        ? nullKpi('otd_vs_requested', 'percent', `Fewer than ${minSample} lines carry both a receipt and a requested date.`, tot)
+        : {
+            kpiId: 'otd_vs_requested',
+            status: 'ok',
+            value: ((row?.ok ?? 0) / tot) * 100,
+            numerator: row?.ok ?? 0,
+            denominator: tot,
+            sampleSize: tot,
+            unit: 'percent',
+            currencyBasis: null,
+            severity: (row?.ok ?? 0) / tot < 0.5 ? 'critical' : (row?.ok ?? 0) / tot < 0.8 ? 'warning' : 'good',
+            statusReason: null,
+            detail: null,
+            drillPredicate: {
+              grain: 'po_line',
+              filters: { notDeleted: true, notSto: true, otdrEvaluable: true },
+            },
+          },
+    );
+  }
+
   // ───────────────────────────────────────────── Expedite Effectiveness
 
   {

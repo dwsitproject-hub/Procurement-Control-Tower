@@ -73,6 +73,8 @@ export function DetailTable() {
   const [visible, setVisible] = useState<string[] | null>(null);
   const [chooserOpen, setChooserOpen] = useState(false);
   const savedRef = useRef(false);
+  const dragKey = useRef<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
@@ -154,6 +156,24 @@ export function DetailTable() {
     setVisible((cur) => {
       const base = cur ?? [];
       const next = base.includes(key) ? base.filter((k) => k !== key) : [...base, key];
+      persistLayout(next);
+      return next;
+    });
+  };
+
+  // Drag a header onto another to move it there. The `visible` array IS the
+  // column order, so reordering it is the whole feature; the same layout
+  // preference that stores visibility persists the order.
+  const reorderColumn = (from: string, to: string) => {
+    if (from === to) return;
+    setVisible((cur) => {
+      if (!cur) return cur;
+      const fi = cur.indexOf(from);
+      const ti = cur.indexOf(to);
+      if (fi < 0 || ti < 0) return cur;
+      const next = [...cur];
+      next.splice(fi, 1);
+      next.splice(ti, 0, from);
       persistLayout(next);
       return next;
     });
@@ -306,7 +326,32 @@ export function DetailTable() {
                 <tr>
                   <th />
                   {shown.map((c) => (
-                    <th key={c.key}>
+                    <th
+                      key={c.key}
+                      draggable
+                      className={dragOver === c.key ? 'dt-dragover' : undefined}
+                      title="Drag to reorder"
+                      onDragStart={(e) => {
+                        dragKey.current = c.key;
+                        e.dataTransfer.effectAllowed = 'move';
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (dragOver !== c.key) setDragOver(c.key);
+                      }}
+                      onDragLeave={() => setDragOver((cur) => (cur === c.key ? null : cur))}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragKey.current) reorderColumn(dragKey.current, c.key);
+                        dragKey.current = null;
+                        setDragOver(null);
+                      }}
+                      onDragEnd={() => {
+                        dragKey.current = null;
+                        setDragOver(null);
+                      }}
+                    >
                       {c.sortable ? (
                         <button
                           className="dt-sort"

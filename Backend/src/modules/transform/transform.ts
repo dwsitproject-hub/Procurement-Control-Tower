@@ -406,12 +406,16 @@ export async function runTransform(
     // PR-level context for status: is the parent PR deleted / released?
     let prDeleted = false;
     let prReleased = true;
+    // Requested delivery date carried over from the linked PR (D4). NULL until
+    // the ME5A export gains a genuine need-by column — see V-M01.
+    let needByDate: string | null = null;
     if (bridge) {
       const pr = prByKey.get(`${bridge.prNo}|${bridge.prItem}`);
       if (pr) {
         prDeleted = (s(pr.deletionIndicator) ?? '').toLowerCase() === 'true';
         const appr = derivePrApproval(releaseByPrItem.get(`${bridge.prNo}|${bridge.prItem}`) ?? []);
         prReleased = appr.fullyReleased;
+        needByDate = s(pr.needByDate);
       }
     }
 
@@ -516,6 +520,8 @@ export async function runTransform(
       materialCategory(s(p.materialGroup), mgOverrides),
       i(p.urgency),
       priorityLabel(i(p.urgency)),
+      s(p.infoRecord),
+      needByDate,
     ]);
   }
 
@@ -954,6 +960,7 @@ const PO_COLS = [
   'gr_date_would_contaminate', 'status', 'aging_days', 'po_approval_days', 'sourcing_days',
   'delivery_days', 'delivery_vs_promise_days', 'is_retro_po', 'is_token_price', 'is_zero_price',
   'source_file_id', 'source_row', 'material_category', 'urgency', 'priority_label',
+  'info_record', 'need_by_date',
 ] as const;
 
 const GR_COLS = [

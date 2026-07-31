@@ -75,13 +75,14 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     setBusy('recompute');
     setMsg('Recomputing — re-reading the share folder and rebuilding all facts…');
     try {
-      const out = await api.post<{ outcome: string }>('/api/v1/ingest/sync');
+      // force: exclusion changes alter the transform's behaviour while the
+      // source files stay byte-identical, so the bundle-hash no-op must be
+      // bypassed.
+      const out = await api.post<{ outcome: string }>('/api/v1/ingest/sync', { force: true });
       setMsg(
         out.outcome === 'published'
           ? 'Recompute complete — reload the page to see the new dataset version.'
-          : out.outcome === 'noop_unchanged'
-            ? 'Source files unchanged and exclusions are applied at transform: delete the current version bundle marker or re-upload to force. (Outcome: noop_unchanged — the bundle hash matches the published version.)'
-            : `Recompute outcome: ${out.outcome}`,
+          : `Recompute outcome: ${out.outcome}`,
       );
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'recompute failed');

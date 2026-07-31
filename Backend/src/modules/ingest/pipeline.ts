@@ -30,6 +30,12 @@ export interface IngestOptions {
   submittedBy?: string | null;
   /** Automatic batches publish immediately; manual batches wait for confirmation. */
   autoPublish?: boolean;
+  /**
+   * Re-process even when the bundle hash matches the published version. Needed
+   * when the transform's behaviour changed without the source changing —
+   * exclusion edits, new fact columns, rule updates.
+   */
+  force?: boolean;
   safety?: SafetyLimits;
   onProgress?: (stage: string, detail?: string) => void;
 }
@@ -101,13 +107,17 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   }
 
   // ── idempotency: identical bundle already published is a no-op ──
+  // Unless forced: a recompute after an exclusion or rule change must re-run
+  // the transform even though the source files are byte-identical.
   const bHash = bundleHash(prepared.map((p) => p.sha));
-  const already = await queryOne<{ id: string }>(
-    `SELECT id FROM ingest.batch WHERE bundle_hash = $1 AND state = 'PUBLISHED'`,
-    [bHash],
-  );
-  if (already) {
-    return { outcome: 'noop_unchanged', batchId: Number(already.id) };
+  if (!opts.force) {
+    const already = await queryOne<{ id: string }>(
+      `SELECT id FROM ingest.batch WHERE bundle_hash = $1 AND state = 'PUBLISHED'`,
+      [bHash],
+    );
+    if (already) {
+      return { outcome: 'noop_unchanged', batchId: Number(already.id) };
+    }
   }
 
   // ── completeness: a partial set does not start a batch ──
@@ -260,6 +270,15 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       await publishVersion(result.datasetVersionId, opts.submittedBy ?? null);
       timings.publishing = (Date.now() - pubStart) / 1000;
       timings.total = (Date.now() - t0) / 1000;
+      // A forced re-run reprocesses a byte-identical bundle, and only one batch
+      // per bundle hash may hold PUBLISHED (ux_batch_bundle_published). The old
+      // batch's version has just been superseded by the pointer swap above, so
+      // its state follows.
+      await query(
+        `UPDATE ingest.batch SET state = 'SUPERSEDED'
+          WHERE bundle_hash = $1 AND state = 'PUBLISHED' AND id <> $2`,
+        [bHash, batchId],
+      );
       await setState('PUBLISHED');
       await pruneOldVersions();
       return { outcome: 'published', batchId, datasetVersionId: result.datasetVersionId, findings };

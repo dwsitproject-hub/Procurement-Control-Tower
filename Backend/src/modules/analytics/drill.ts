@@ -277,6 +277,10 @@ const FILTERS: Record<string, Compiler> = {
   pending: (v, a) => (v ? `${a}.approve_date IS NULL` : `${a}.approve_date IS NOT NULL`),
   eindtEqualsDocdate: (v, a, ps) => `${a}.eindt_equals_docdate = ${p(ps, Boolean(v))}`,
   demandUnrealistic: (_v, a) => `${a}.need_by_date IS NOT NULL`,
+  hasInfoRecord: (v, a) => (v ? `${a}.info_record IS NOT NULL` : `${a}.info_record IS NULL`),
+  // On-Time vs Requested (D4): a line is evaluable only when both the receipt
+  // and the requested date exist. Empty until EBAN-LFDAT reaches the export.
+  otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.need_by_date IS NOT NULL`,
 };
 
 export interface DrillPage {

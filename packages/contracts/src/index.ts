@@ -140,7 +140,7 @@ export const KPI_IDS = [
   'pr_cancellation_rate','pr_deleted','total_po_amount','total_po_count',
   'po_line_items','unique_suppliers','lines_pending_po_approval','hold_po_lines',
   'gr_coverage_pct','pr_po_price_variance','tail_spend_pct','items_delivered',
-  'sole_source_materials','delivered_not_invoiced',
+  'sole_source_materials','delivered_not_invoiced','po_irc','otd_vs_requested',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -198,6 +198,8 @@ export const KPI_TITLES: Record<KpiId, string> = {
   items_delivered: 'Items Delivered',
   sole_source_materials: 'Sole-Source Materials',
   delivered_not_invoiced: 'Delivered, Not Invoiced',
+  po_irc: 'Info-Record Coverage %',
+  otd_vs_requested: 'On-Time vs Requested %',
 };
 
 export const KpiValueSchema = z.object({

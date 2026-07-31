@@ -119,6 +119,7 @@ export async function vendorDetail(
     unconverted: number; materials: number; areas: number; first_seen: string; last_seen: string;
     otd_num: number; otd_den: number; avg_late: number | null;
     open_usd: number | null; grir_usd: number | null; rev_101: number; rev_reversals: number;
+    otdr_num: number; otdr_den: number;
   }>(
     `SELECT max(pol.vendor_name) AS vendor_name,
             count(DISTINCT pol.po_no)::int AS po_count,
@@ -138,7 +139,10 @@ export async function vendorDetail(
             sum(pol.still_invoice_val_usd)
               FILTER (WHERE COALESCE(pol.still_deliver_qty,0) = 0 AND COALESCE(pol.still_invoice_val,0) > 0) AS grir_usd,
             sum(pol.receipt_count)::int AS rev_101,
-            sum(pol.reversal_count)::int AS rev_reversals
+            sum(pol.reversal_count)::int AS rev_reversals,
+            count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.need_by_date IS NOT NULL
+                             AND pol.receipt_date <= pol.need_by_date)::int AS otdr_num,
+            count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.need_by_date IS NOT NULL)::int AS otdr_den
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto`,
     params,
@@ -242,9 +246,15 @@ export async function vendorDetail(
       deliveredNotInvoicedUsd: bio.grir_usd,
       reversalRatePct:
         bio.rev_101 > 0 ? Math.round((bio.rev_reversals / bio.rev_101) * 1000) / 10 : null,
-      // v1's v3x-otdr needs the requested date — blocked on decision D4.
-      onTimeVsRequested: null,
-      onTimeVsRequestedReason: 'Requested delivery date not present in this export (V-M01 / D4).',
+      // v1's v3x-otdr. Computed against the requested date (EBAN-LFDAT) the
+      // moment the export carries one; until then no line is evaluable and the
+      // card stays an honest em dash with the D4 reason (never a fabricated 0).
+      onTimeVsRequested:
+        bio.otdr_den > 0 ? Math.round((bio.otdr_num / bio.otdr_den) * 1000) / 10 : null,
+      onTimeVsRequestedReason:
+        bio.otdr_den > 0
+          ? `${bio.otdr_den} lines carry both a receipt and a requested date.`
+          : 'Requested delivery date not present in this export (V-M01 / D4).',
     },
     spendByMonth: spendByMonth.map((m) => ({ monthKey: m.mk, usd: m.usd, lines: m.n })),
     byArea: byArea.map((a) => ({ plant: a.plant, plantName: a.plant_name, usd: a.usd, lines: a.n })),

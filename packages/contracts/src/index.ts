@@ -141,6 +141,11 @@ export const KPI_IDS = [
   'po_line_items','unique_suppliers','lines_pending_po_approval','hold_po_lines',
   'gr_coverage_pct','pr_po_price_variance','tail_spend_pct','items_delivered',
   'sole_source_materials','delivered_not_invoiced','po_irc','otd_vs_requested',
+  // G6.3 — the v1-only registry KPIs, promoted
+  'tail_spend_po_pct','valuation_coverage_pct','unique_requisitioners','avg_pr_line_value_idr',
+  'avg_po_value_idr','avg_value_per_po_usd','foreign_ccy_po_share','single_source_spend_idr',
+  'top_vendor_share_pct','top5_vendor_share_pct','avg_suppliers_per_material',
+  'worst_approver_gap','auto_release_share_pct','wbs_open_violations',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -200,6 +205,20 @@ export const KPI_TITLES: Record<KpiId, string> = {
   delivered_not_invoiced: 'Delivered, Not Invoiced',
   po_irc: 'Info-Record Coverage %',
   otd_vs_requested: 'On-Time vs Requested %',
+  tail_spend_po_pct: 'Tail Spend % (by PO)',
+  valuation_coverage_pct: 'Valuation Coverage %',
+  unique_requisitioners: 'Unique Requisitioners',
+  avg_pr_line_value_idr: 'Avg PR Line Value (IDR)',
+  avg_po_value_idr: 'Avg PO Value (IDR)',
+  avg_value_per_po_usd: 'Avg Value / PO (USD)',
+  foreign_ccy_po_share: 'Foreign-Currency PO Share',
+  single_source_spend_idr: 'Single-Source Spend (IDR)',
+  top_vendor_share_pct: 'Top Vendor Share %',
+  top5_vendor_share_pct: 'Top 5 Vendor Share %',
+  avg_suppliers_per_material: 'Avg Suppliers per Material',
+  worst_approver_gap: 'Worst Approver Gap (median days)',
+  auto_release_share_pct: 'Auto-Release Share %',
+  wbs_open_violations: 'Open PR w/o WBS (AR required)',
 };
 
 export const KpiValueSchema = z.object({

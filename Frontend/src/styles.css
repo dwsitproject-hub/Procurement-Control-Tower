@@ -312,3 +312,68 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 
 table.data th[draggable] { cursor: grab; }
 table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* ── G1/G2: chips, badges, anomaly strip, scope toggle ────────────── */
+
+.kpi-chips { display: inline-flex; gap: .3rem; margin-left: .4rem; vertical-align: middle; }
+.chip { padding: 0 .35rem; border-radius: 4px; font-size: .68rem; font-weight: 650; }
+.chip-emg { background: color-mix(in srgb, var(--crit) 15%, transparent); color: var(--crit); }
+.chip-urg { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.chip-std { background: color-mix(in srgb, var(--muted) 14%, transparent); color: var(--muted); }
+
+.tab-badge {
+  margin-left: .35rem; padding: 0 .4rem; border-radius: 99px; font-size: .68rem;
+  font-weight: 650; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn);
+}
+
+.anomaly-strip { margin-bottom: .8rem; }
+.anomaly {
+  background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--warn);
+  border-radius: var(--radius); padding: .4rem .7rem; margin: .3rem 0; font-size: .8rem;
+}
+
+.gf-scope { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.gf-seg {
+  background: none; border: 0; padding: .25rem .6rem; font-size: .78rem; color: var(--muted);
+  border-right: 1px solid var(--border);
+}
+.gf-seg:last-child { border-right: 0; }
+.gf-seg[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); font-weight: 600; }
+
+/* ── G5.2: manual theme override — must win over prefers-color-scheme ─ */
+
+:root[data-theme="dark"] {
+  --bg: #0f1216; --panel: #171b21; --border: #2a313a; --text: #e7ebf0; --muted: #9aa5b1;
+  --accent: #6aa9e9; --good: #4cc38a; --warn: #e2a03f; --crit: #f0616d; --neutral: #9aa5b1;
+  --shadow: none;
+}
+:root[data-theme="light"] {
+  --bg: #f6f7f9; --panel: #ffffff; --border: #dfe3e8; --text: #14181d; --muted: #5b6572;
+  --accent: #1f5fa9; --good: #1a7f4b; --warn: #a06000; --crit: #b0202c; --neutral: #46505c;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+
+/* ── G3: donut, OTD stacked bars ──────────────────────────────────── */
+
+.donut {
+  width: 120px; height: 120px; border-radius: 50%; flex: none;
+  mask: radial-gradient(circle 34px at 50% 50%, transparent 98%, #000);
+  -webkit-mask: radial-gradient(circle 34px at 50% 50%, transparent 98%, #000);
+}
+.otd-track { display: flex; overflow: hidden; }
+.otd-on { display: block; height: 100%; background: var(--good); }
+.otd-late { display: block; height: 100%; background: var(--crit); }
+
+/* ── G4: layout editing ───────────────────────────────────────────── */
+
+.ly-bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .8rem; }
+.ly-slot { position: relative; outline: 1px dashed var(--accent); outline-offset: 2px; border-radius: var(--radius); }
+.ly-controls {
+  position: absolute; top: -0.55rem; left: .3rem; z-index: 2; display: inline-flex; gap: .2rem;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .1rem .25rem;
+}
+.ly-btn { background: none; border: 0; font-size: .72rem; color: var(--muted); padding: 0 .2rem; }
+.ly-btn:hover { color: var(--text); }
+.ly-hide:hover { color: var(--crit); }
+.ly-swap { font-size: .74rem; max-width: 180px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); padding: .15rem .3rem; }
+.ly-hidden { display: inline-flex; gap: .3rem; align-items: center; font-size: .76rem; color: var(--muted); flex-wrap: wrap; }

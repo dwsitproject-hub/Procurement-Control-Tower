@@ -20,11 +20,18 @@ export function ChartPanel({
   chartId,
   onDrill,
   filterQuery = '',
+  onApplyFilter,
 }: {
   chartId: string;
   onDrill: (token: string, label: string) => void;
   /** Global filter as a query string; empty keeps the precomputed path. */
   filterQuery?: string;
+  /**
+   * v1's chart cross-filtering: when set, Alt/Shift-clicking a bar applies its
+   * bucket as a global filter instead of drilling. Only wired for charts whose
+   * bucket maps to a global-filter dimension.
+   */
+  onApplyFilter?: (bucketKey: string, bucketLabel: string) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
@@ -71,12 +78,18 @@ export function ChartPanel({
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        onClick: (_e, elements) => {
+        onClick: (e, elements) => {
           const el = elements[0];
           if (!el) return;
           const series = data.series[el.datasetIndex];
           const bucket = data.buckets[el.index];
           if (!series || !bucket) return;
+          // Alt/Shift-click cross-filters the page (v1 behaviour); plain click drills.
+          const native = e.native as MouseEvent | undefined;
+          if (onApplyFilter && native && (native.altKey || native.shiftKey)) {
+            onApplyFilter(bucket.key, bucket.label);
+            return;
+          }
           const point = series.points.find((x) => x.bucketKey === bucket.key);
           if (point?.drillToken) {
             onDrill(point.drillToken, `${data.title} — ${bucket.label} · ${series.label}`);
@@ -137,7 +150,14 @@ export function ChartPanel({
           <div className="chart-box">
             <canvas ref={canvas} role="img" aria-label={data.title} />
           </div>
-          {data.notes.length > 0 && <p className="note">{data.notes.join(' · ')}</p>}
+          {(data.notes.length > 0 || onApplyFilter) && (
+            <p className="note">
+              {data.notes.join(' · ')}
+              {onApplyFilter && (
+                <>{data.notes.length > 0 ? ' · ' : ''}Alt-click a bar to filter the page by it</>
+              )}
+            </p>
+          )}
         </>
       )}
     </div>

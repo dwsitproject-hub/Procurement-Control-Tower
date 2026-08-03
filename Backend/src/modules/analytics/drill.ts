@@ -278,6 +278,28 @@ const FILTERS: Record<string, Compiler> = {
   eindtEqualsDocdate: (v, a, ps) => `${a}.eindt_equals_docdate = ${p(ps, Boolean(v))}`,
   demandUnrealistic: (_v, a) => `${a}.need_by_date IS NOT NULL`,
   hasInfoRecord: (v, a) => (v ? `${a}.info_record IS NOT NULL` : `${a}.info_record IS NULL`),
+  valuedIdr: (_v, a) => `COALESCE(${a}.total_value_idr, 0) > 0`,
+  currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
+  foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
+  // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause
+  // EXACTLY — a converted PR item's own status never reaches 'Delivered', so
+  // the PR grain consults its PO lines. Any drift here would break the
+  // card-equals-drill guarantee under scope.
+  scopeOpen: (_v, a, _ps, grain) =>
+    grain === 'pr_item'
+      ? `(${a}.status IN ('Unapproved PR','PR Approved-No PO')
+          OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                      WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+                        AND _pl.pr_no = ${a}.pr_no AND _pl.pr_item = ${a}.pr_item
+                        AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')))`
+      : `${a}.status IN ('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`,
+  scopeComplete: (_v, a, _ps, grain) =>
+    grain === 'pr_item'
+      ? `EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                  WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+                    AND _pl.pr_no = ${a}.pr_no AND _pl.pr_item = ${a}.pr_item
+                    AND _pl.status = 'Delivered')`
+      : `${a}.status = 'Delivered'`,
   // On-Time vs Requested (D4): a line is evaluable only when both the receipt
   // and the requested date exist. Empty until EBAN-LFDAT reaches the export.
   otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.need_by_date IS NOT NULL`,
@@ -292,6 +314,44 @@ export interface DrillPage {
   columns: { key: string; label: string; type: string; currency?: string }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
+  /**
+   * Value totals over the WHOLE drill population (not the page) — v1's dd-modal
+   * header. Only for money-bearing grains. usdSum obeys the strict-FX rule:
+   * null when any line's currency is unrated, with usdComplete saying so.
+   */
+  totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;
+  /**
+   * "Open in Detail tab" (v1's dd-modal button): the drill filters translated
+   * into Detail-table query params, with any untranslatable keys named so the
+   * UI can say the handoff is approximate rather than pretending.
+   */
+  detailHandoff: { params: Record<string, string>; unmapped: string[] } | null;
+}
+
+/** Drill-filter keys → detail-table query params. Anything absent is unmapped. */
+function detailHandoffFor(filters: Record<string, unknown>): DrillPage['detailHandoff'] {
+  const params: Record<string, string> = {};
+  const unmapped: string[] = [];
+  for (const [k, v] of Object.entries(filters)) {
+    switch (k) {
+      case 'status': params['status'] = String(v); break;
+      case 'matCat': params['matCat'] = String(v); break;
+      case 'plant': params['plant'] = String(v); break;
+      case 'plantIn': params['plant'] = (v as unknown[]).map(String).join(','); break;
+      case 'purchOrg': params['purchOrg'] = String(v); break;
+      case 'purchOrgIn': params['purchOrg'] = (v as unknown[]).map(String).join(','); break;
+      case 'purchGroup': params['purchGroup'] = String(v); break;
+      case 'companyCode': params['company'] = String(v); break;
+      case 'companyCodeIn': params['company'] = (v as unknown[]).map(String).join(','); break;
+      case 'priorityLabel': params['priority'] = String(v); break;
+      case 'notSto': if (v) params['excludeSto'] = 'true'; break;
+      case 'open': params['onlyOpen'] = 'true'; break;
+      case 'vendorCode': case 'materialCode': params['q'] = String(v); break;
+      case 'notDeleted': break; // detail excludes deleted by default
+      default: unmapped.push(k);
+    }
+  }
+  return { params, unmapped };
 }
 
 const COLUMNS: Record<Grain, DrillPage['columns']> = {
@@ -397,11 +457,28 @@ export async function executeDrill(
 
   const whereSql = where.join(' AND ');
 
-  const countRow = await queryOne<{ n: number }>(
-    `SELECT count(*)::int AS n FROM ${t.table} ${t.alias} WHERE ${whereSql}`,
+  // Count and value totals in one pass. IDR sum is exact (document currency);
+  // the USD sum follows the strict no-silent-conversion rule.
+  const TOTAL_EXPR: Partial<Record<Grain, string>> = {
+    pr_item: `sum(${t.alias}.total_value_idr) AS idr_sum, NULL::numeric AS usd_sum, 0::int AS unrated`,
+    po_line: `sum(${t.alias}.net_order_value) FILTER (WHERE ${t.alias}.currency_code = 'IDR') AS idr_sum,
+              sum(${t.alias}.net_order_value_usd) AS usd_sum,
+              count(*) FILTER (WHERE ${t.alias}.net_order_value IS NOT NULL AND ${t.alias}.net_order_value_usd IS NULL)::int AS unrated`,
+  };
+  const totalExpr = TOTAL_EXPR[payload.grain];
+  const countRow = await queryOne<{ n: number; idr_sum: number | null; usd_sum: number | null; unrated: number }>(
+    `SELECT count(*)::int AS n${totalExpr ? `, ${totalExpr}` : ''}
+       FROM ${t.table} ${t.alias} WHERE ${whereSql}`,
     params,
   );
   const total = countRow?.n ?? 0;
+  const totals = totalExpr && countRow
+    ? {
+        idrSum: countRow.idr_sum === null ? null : Number(countRow.idr_sum),
+        usdSum: countRow.unrated > 0 || countRow.usd_sum === null ? null : Number(countRow.usd_sum),
+        usdComplete: countRow.unrated === 0,
+      }
+    : null;
 
   const pageParams = [...params, limit, offset];
   const rows = await query<Record<string, unknown>>(
@@ -439,6 +516,12 @@ export async function executeDrill(
     columns: COLUMNS[payload.grain],
     rows: decorated,
     nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
+    totals,
+    // Detail rows are PR×PO grain; only pr/po drills translate meaningfully.
+    detailHandoff:
+      payload.grain === 'po_line' || payload.grain === 'pr_item'
+        ? detailHandoffFor(payload.filters ?? {})
+        : null,
   };
 }
 

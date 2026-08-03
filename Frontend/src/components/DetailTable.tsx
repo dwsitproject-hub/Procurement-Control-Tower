@@ -56,19 +56,37 @@ const FILTER_LABELS: Record<MultiKey, string> = {
 
 const NUMERIC = new Set(['int', 'number', 'money', 'pct']);
 
-export function DetailTable() {
+export function DetailTable({
+  initial,
+  initialLabel,
+}: {
+  /** Pre-applied filters from a drill handoff ("Open in Detail tab", G1.2). */
+  initial?: Record<string, string>;
+  initialLabel?: string;
+} = {}) {
+  const init = initial ?? {};
+  const listOf = (k: string): string[] | undefined =>
+    init[k] !== undefined ? init[k]!.split(',').filter(Boolean) : undefined;
+
   const [data, setData] = useState<DetailResponse | null>(null);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [search, setSearch] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [filters, setFilters] = useState<Partial<Record<MultiKey, string[]>>>({});
-  const [excludeSto, setExcludeSto] = useState(false);
+  const [search, setSearch] = useState(init['q'] ?? '');
+  const [debounced, setDebounced] = useState(init['q'] ?? '');
+  const [filters, setFilters] = useState<Partial<Record<MultiKey, string[]>>>(() => {
+    const f: Partial<Record<MultiKey, string[]>> = {};
+    for (const k of ['status', 'matCat', 'plant', 'company', 'purchOrg', 'purchGroup', 'priority'] as MultiKey[]) {
+      const v = listOf(k);
+      if (v && v.length > 0) f[k] = v;
+    }
+    return f;
+  });
+  const [excludeSto, setExcludeSto] = useState(init['excludeSto'] === 'true');
   const [includeDeleted, setIncludeDeleted] = useState(false);
-  const [onlyOpen, setOnlyOpen] = useState(false);
+  const [onlyOpen, setOnlyOpen] = useState(init['onlyOpen'] === 'true');
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
   const [visible, setVisible] = useState<string[] | null>(null);
   const [chooserOpen, setChooserOpen] = useState(false);
@@ -220,6 +238,11 @@ export function DetailTable() {
   return (
     <>
       <div className="panel">
+        {initialLabel && (
+          <p className="note" style={{ marginTop: 0 }}>
+            Filters pre-applied from drill: <strong>{initialLabel}</strong> — adjust or clear them below.
+          </p>
+        )}
         <div className="dt-toolbar">
           <input
             className="dt-search"

@@ -37,6 +37,7 @@ const JOINED_ALIAS: Record<string, { kind: FactKind; alias: string }> = {
   pr_po_price_variance: { kind: 'po_line', alias: 'pol.' },
   e2e_by_month: { kind: 'po_line', alias: 'pol.' },
   e2e_by_category: { kind: 'po_line', alias: 'pol.' },
+  single_source_spend_idr: { kind: 'po_line', alias: 'p.' },
 };
 
 function targetOf(id: string, grain: string | undefined): { kind: FactKind; alias: string } {
@@ -67,10 +68,13 @@ export async function computeLiveKpis(
   for (const spec of PARITY_KPIS) {
     const grain = (spec.drill?.['grain'] as string | undefined) ?? 'po_line';
     const { kind, alias } = targetOf(spec.id, grain);
-    const clause = buildFilterClause(filter, kind, alias, 2);
 
     let sql: string;
+    let clause;
     try {
+      // Both steps can refuse: the scope toggle has no meaning on the GR grain,
+      // and a spec without an anchor cannot be filtered.
+      clause = buildFilterClause(filter, kind, alias, 2);
       sql = injectFilter(spec.sql, clause);
     } catch {
       // A spec with no anchor cannot be filtered honestly, so it reports as
@@ -162,7 +166,15 @@ export async function computeLiveChart(
       : 'po_line';
   const alias = JOINED_ALIAS[chartId]?.alias ?? '';
 
-  const clause = buildFilterClause(filter, kind, alias, 2);
+  // A scope toggle on a GR-grain chart cannot be honored; returning null makes
+  // the route fall back to the precomputed chart with its explicit
+  // "filter NOT applied" note — honest, and already what the sweep expects.
+  let clause;
+  try {
+    clause = buildFilterClause(filter, kind, alias, 2);
+  } catch {
+    return null;
+  }
   const sql = injectFilter(spec.sql, clause);
 
   const r = await pool.query<{

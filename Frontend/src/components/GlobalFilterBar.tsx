@@ -16,6 +16,8 @@ export interface GlobalFilterState {
   plant: string[];
   purchOrg: string[];
   monthKey: string[];
+  /** v1's "Show: All | Open Only | Complete (GR)" toggle. '' means All. */
+  scope: '' | 'open' | 'complete';
 }
 
 export const EMPTY_FILTER: GlobalFilterState = {
@@ -23,6 +25,7 @@ export const EMPTY_FILTER: GlobalFilterState = {
   plant: [],
   purchOrg: [],
   monthKey: [],
+  scope: '',
 };
 
 interface Option {
@@ -37,7 +40,9 @@ interface FilterOptions {
   monthKey: Option[];
 }
 
-const DIMENSIONS: { key: keyof GlobalFilterState; label: string }[] = [
+type ListDim = 'company' | 'plant' | 'purchOrg' | 'monthKey';
+
+const DIMENSIONS: { key: ListDim; label: string }[] = [
   { key: 'company', label: 'Company' },
   { key: 'plant', label: 'Plant' },
   { key: 'purchOrg', label: 'Purch Org' },
@@ -50,11 +55,14 @@ export function globalFilterQuery(f: GlobalFilterState): string {
   if (f.plant.length) q.set('plant', f.plant.join(','));
   if (f.purchOrg.length) q.set('purchOrg', f.purchOrg.join(','));
   if (f.monthKey.length) q.set('monthKey', f.monthKey.join(','));
+  if (f.scope) q.set('scope', f.scope);
   return q.toString();
 }
 
 export function activeFilterCount(f: GlobalFilterState): number {
-  return f.company.length + f.plant.length + f.purchOrg.length + f.monthKey.length;
+  return (
+    f.company.length + f.plant.length + f.purchOrg.length + f.monthKey.length + (f.scope ? 1 : 0)
+  );
 }
 
 export function GlobalFilterBar({
@@ -76,7 +84,7 @@ export function GlobalFilterBar({
 
   if (!opts) return null;
 
-  const toggle = (dim: keyof GlobalFilterState, v: string) => {
+  const toggle = (dim: ListDim, v: string) => {
     const cur = value[dim];
     onChange({
       ...value,
@@ -89,6 +97,20 @@ export function GlobalFilterBar({
   return (
     <div className="gf-bar">
       <span className="gf-label">Filters</span>
+
+      {/* v1's per-page Show toggle, global here: recomputes every KPI/chart live. */}
+      <div className="gf-scope" role="group" aria-label="Scope">
+        {([['', 'All'], ['open', 'Open only'], ['complete', 'Complete (GR)']] as const).map(([v, l]) => (
+          <button
+            key={v || 'all'}
+            className="gf-seg"
+            aria-pressed={value.scope === v}
+            onClick={() => onChange({ ...value, scope: v })}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
 
       {DIMENSIONS.map((d) => {
         const options = opts[d.key];

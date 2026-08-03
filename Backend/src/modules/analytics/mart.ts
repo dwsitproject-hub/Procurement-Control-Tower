@@ -336,7 +336,7 @@ export async function buildMart(
 
   const counts = await q<{
     po_lines: number; sto_lines: number; direct_po: number; dangling: number; retro: number;
-    open_items: number; token: number; exempt: number;
+    open_items: number; open_emg: number; open_urg: number; token: number; exempt: number;
   }>(
     `SELECT count(*)::int AS po_lines,
             count(*) FILTER (WHERE is_sto)::int AS sto_lines,
@@ -347,6 +347,8 @@ export async function buildMart(
             count(*) FILTER (WHERE link_status = 'dangling')::int AS dangling,
             count(*) FILTER (WHERE is_retro_po)::int AS retro,
             count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered'))::int AS open_items,
+            count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered') AND urgency <= 1)::int AS open_emg,
+            count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered') AND urgency = 2)::int AS open_urg,
             count(*) FILTER (WHERE is_token_price)::int AS token,
             count(*) FILTER (WHERE release_exempt)::int AS exempt
        FROM core.fact_po_line WHERE dataset_version_id = $1`,
@@ -364,7 +366,11 @@ export async function buildMart(
   kpis.push(simpleCount('retro_po_rate', c.retro, 'count', c.po_lines, { retroLines: c.retro },
     { grain: 'po_line', filters: { isRetroPo: true } }));
 
-  kpis.push(simpleCount('open_items', c.open_items, 'count', c.po_lines, null,
+  kpis.push(simpleCount('open_items', c.open_items, 'count', c.po_lines,
+    {
+      chip_emergency: c.open_emg, chip_urgent: c.open_urg,
+      chip_standard: c.open_items - c.open_emg - c.open_urg,
+    },
     { grain: 'po_line', filters: { statusIn: ['PO-Not Approved', 'HOLD PO', 'PO-No GR', 'Partially Delivered'] } }));
 
   const split = await q<{ items: number; maxlines: number }>(

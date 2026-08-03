@@ -32,6 +32,9 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
   const [debounced, setDebounced] = useState('');
   const [open, setOpen] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // v1's Vendor 360 has three faces: ranking, the vendors×materials×month
+  // pivot, and the all-vendors on-time/late chart (G3.1/G3.2).
+  const [view, setView] = useState<'top' | 'pivot' | 'otd'>('top');
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
@@ -60,6 +63,13 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
   return (
     <div className="panel">
       <div className="dt-toolbar">
+        {(['top', 'pivot', 'otd'] as const).map((v) => (
+          <button key={v} className="dt-btn" aria-pressed={view === v}
+            style={view === v ? { borderColor: 'var(--accent)', fontWeight: 600 } : {}}
+            onClick={() => setView(v)}>
+            {v === 'top' ? 'Top vendors' : v === 'pivot' ? 'Vendors × months' : 'On-time vs late'}
+          </button>
+        ))}
         <input
           className="dt-search"
           type="search"
@@ -69,11 +79,15 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
           aria-label="Search vendors"
         />
         <span className="count">
-          {formatNumber(total)} vendors · showing top {rows.length} by spend · STO excluded
+          {formatNumber(total)} vendors · STO excluded
         </span>
       </div>
 
-      {loading ? (
+      {view === 'pivot' ? (
+        <VendorPivot search={debounced} onOpenVendor={setOpen} />
+      ) : view === 'otd' ? (
+        <VendorOtdBars onOpenVendor={setOpen} />
+      ) : loading ? (
         <div className="center-msg"><div className="spinner" />Loading vendors…</div>
       ) : (
         <div className="table-wrap dt-scroll">
@@ -115,6 +129,133 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
 
       {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} />}
     </div>
+  );
+}
+
+// ─────────────────────────── vendors × materials × month pivot (G3.1)
+
+function VendorPivot({
+  search, onOpenVendor,
+}: { search: string; onOpenVendor: (code: string) => void }) {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [limit, setLimit] = useState(40);
+  const [expanded, setExpanded] = useState<Record<string, Record<string, any>[] | 'loading'>>({});
+
+  useEffect(() => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (search) q.set('q', search);
+    api.get<Record<string, any>>(`/api/v1/entity/vendor-pivot?${q.toString()}`)
+      .then(setD)
+      .catch(() => setD(null));
+  }, [search, limit]);
+
+  const toggle = (code: string) => {
+    if (expanded[code]) {
+      setExpanded((c) => {
+        const n = { ...c };
+        delete n[code];
+        return n;
+      });
+      return;
+    }
+    setExpanded((c) => ({ ...c, [code]: 'loading' }));
+    api.get<{ materials: Record<string, any>[] }>(`/api/v1/entity/vendor-pivot/${encodeURIComponent(code)}`)
+      .then((r) => setExpanded((c) => ({ ...c, [code]: r.materials })))
+      .catch(() => setExpanded((c) => ({ ...c, [code]: [] })));
+  };
+
+  if (!d) return <div className="center-msg"><div className="spinner" />Building pivot…</div>;
+  const months: string[] = d.months;
+  const cell = (v: number | null | undefined) =>
+    v === null || v === undefined ? '' : v >= 1e6 ? `${(v / 1e6).toFixed(1)} M` : formatNumber(Math.round(v));
+
+  return (
+    <>
+      <p className="note" style={{ marginTop: 0 }}>{d.note}</p>
+      <div className="table-wrap dt-scroll">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Vendor / material (USD)</th>
+              {months.map((m) => <th key={m} style={{ textAlign: 'right' }}>{m}</th>)}
+              <th style={{ textAlign: 'right' }}>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {d.rows.map((r: any) => (
+              <>
+                <tr key={r.code} className="ent-row">
+                  <td>
+                    <button className="cu-link" onClick={() => toggle(r.code)} title="Expand materials">
+                      {expanded[r.code] ? '▾' : '▸'}
+                    </button>{' '}
+                    <button className="cu-link" onClick={() => onOpenVendor(r.code)} title="Open vendor popup">
+                      {r.name ?? r.code}
+                    </button>
+                    {r.anyUnrated && <span className="muted" title="Some lines have unrated currencies"> ⚠</span>}
+                  </td>
+                  {months.map((m) => <td key={m} className="num">{cell(r.byMonth[m])}</td>)}
+                  <td className="num"><strong>{cell(r.total)}</strong></td>
+                </tr>
+                {expanded[r.code] === 'loading' && (
+                  <tr><td colSpan={months.length + 2} className="muted">Loading materials…</td></tr>
+                )}
+                {Array.isArray(expanded[r.code]) &&
+                  (expanded[r.code] as Record<string, any>[]).map((m: any) => (
+                    <tr key={`${r.code}|${m.code}`}>
+                      <td className="muted" style={{ paddingLeft: '2rem' }}>{m.code} {m.descr ? `· ${m.descr}` : ''}</td>
+                      {months.map((mk) => <td key={mk} className="num muted">{cell(m.byMonth[mk])}</td>)}
+                      <td className="num muted">{cell(m.total)}</td>
+                    </tr>
+                  ))}
+              </>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td><strong>Grand total ({formatNumber(d.totalVendors)} vendors)</strong></td>
+              <td colSpan={months.length} />
+              <td className="num"><strong>{d.grandTotalUsd === null ? `${DASH} (unrated ccy)` : cell(d.grandTotalUsd)}</strong></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      {d.rows.length < d.totalVendors && (
+        <button className="btn secondary" style={{ marginTop: '.6rem' }} onClick={() => setLimit((l) => l + 40)}>
+          Load more vendors ({formatNumber(d.rows.length)} of {formatNumber(d.totalVendors)})
+        </button>
+      )}
+    </>
+  );
+}
+
+// ───────────────────────────── all-vendors on-time vs late (G3.2)
+
+function VendorOtdBars({ onOpenVendor }: { onOpenVendor: (code: string) => void }) {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  useEffect(() => {
+    api.get<Record<string, any>>('/api/v1/entity/vendor-otd?limit=60').then(setD).catch(() => setD(null));
+  }, []);
+  if (!d) return <div className="center-msg"><div className="spinner" />Loading…</div>;
+  return (
+    <>
+      <p className="note" style={{ marginTop: 0 }}>{d.note}</p>
+      {d.vendors.map((v: any) => {
+        const total = v.onTime + v.late;
+        return (
+          <div key={v.vendorCode} className="ent-bar-row">
+            <span className="ent-bar-label" style={{ flexBasis: 220 }}>
+              <button className="cu-link" onClick={() => onOpenVendor(v.vendorCode)}>{v.vendorName ?? v.vendorCode}</button>
+            </span>
+            <span className="ent-bar-track otd-track">
+              <span className="otd-on" style={{ width: `${(v.onTime / total) * 100}%` }} title={`${v.onTime} on-time`} />
+              <span className="otd-late" style={{ width: `${(v.late / total) * 100}%` }} title={`${v.late} late`} />
+            </span>
+            <span className="ent-bar-val">{formatNumber(v.onTime)} / {formatNumber(v.late)} late</span>
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -178,6 +319,17 @@ function VendorModal({
                 right={<MiniBars title="Supply to area / plant (USD)" rows={d.byArea.map((a: any) => ({ label: a.plantName, value: a.usd, count: a.lines }))} money />}
               />
 
+              {/* v1's v3 popup pair: area-share donut + delivery-aging histogram (G3.3) */}
+              <TwoCol
+                left={<AreaDonut title="Share of spending by area" rows={d.byArea} />}
+                right={
+                  <MiniBars
+                    title="Delivery aging (GR vs PO delivery date)"
+                    rows={(d.deliveryAging ?? []).map((b: any) => ({ label: b.bucket, value: b.count, count: b.count }))}
+                  />
+                }
+              />
+
               <h4 className="ent-h">Materials supplied <span className="muted">(top {d.materials.length} of cap {d.caps.materials})</span></h4>
               <SimpleTable
                 head={['Material', 'Description', 'Lines', 'Qty', 'Spend USD', 'Last PO']}
@@ -187,7 +339,18 @@ function VendorModal({
                 ])}
               />
 
-              <h4 className="ent-h">PO history <span className="muted">(newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
+              <h4 className="ent-h">
+                PO history <span className="muted">(newest {d.poHistory.length}, cap {d.caps.poHistory})</span>
+                {d.poTotals && (
+                  <span className="muted">
+                    {' '}· Σ all {formatNumber(d.poTotals.lines)} lines / {formatNumber(d.poTotals.pos)} POs:{' '}
+                    {d.poTotals.valueIdr !== null && `${(d.poTotals.valueIdr / 1e9).toFixed(2)} B IDR`}
+                    {d.poTotals.valueUsd !== null
+                      ? ` · ${formatMoney(d.poTotals.valueUsd, 'USD')}`
+                      : ' · USD total unavailable (unrated ccy)'}
+                  </span>
+                )}
+              </h4>
               <PoHistoryTable rows={d.poHistory} />
 
               <h4 className="ent-h">GR history <span className="muted">(newest {d.grHistory.length}, cap {d.caps.grHistory})</span></h4>
@@ -211,6 +374,8 @@ function VendorModal({
 export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => void }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [category, setCategory] = useState<string>('');
+  const [group, setGroup] = useState<string>('');
+  const [limit, setLimit] = useState(150);
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [open, setOpen] = useState<string | null>(null);
@@ -221,13 +386,14 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
   }, [search]);
 
   useEffect(() => {
-    const q = new URLSearchParams();
+    const q = new URLSearchParams({ limit: String(limit) });
     if (category) q.set('category', category);
+    if (group) q.set('materialGroup', group);
     if (debounced) q.set('q', debounced);
     api.get<Record<string, any>>(`/api/v1/entity/material-groups?${q.toString()}`)
       .then(setD)
       .catch(() => setD(null));
-  }, [category, debounced]);
+  }, [category, group, debounced, limit]);
 
   if (!d) return <div className="center-msg"><div className="spinner" />Loading material groups…</div>;
 
@@ -243,8 +409,9 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
                 <th style={{ textAlign: 'right' }}>Lines</th>
                 <th style={{ textAlign: 'right' }}>POs</th>
                 <th style={{ textAlign: 'right' }}>Spend USD</th>
-                <th style={{ textAlign: 'right' }}>Median sourcing (d)</th>
-                <th style={{ textAlign: 'right' }}>Median delivery (d)</th>
+                <th style={{ textAlign: 'right' }}>Sourcing med (d)</th>
+                <th style={{ textAlign: 'right' }}>PO appr med (d)</th>
+                <th style={{ textAlign: 'right' }}>Delivery med (d)</th>
                 <th style={{ textAlign: 'right' }}>Open lines</th>
               </tr>
             </thead>
@@ -256,23 +423,46 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
                   onClick={() => setCategory(category === c.category ? '' : c.category)}
                 >
                   <td>{c.category}</td>
-                  <td className="num">{formatNumber(c.lines)}</td>
+                  <td className="num">
+                    {c.drillAll ? (
+                      <button className="cu-link" onClick={(e) => { e.stopPropagation(); onDrill(c.drillAll, `${c.category} — all PO lines`); }}>
+                        {formatNumber(c.lines)}
+                      </button>
+                    ) : formatNumber(c.lines)}
+                  </td>
                   <td className="num">{formatNumber(c.pos)}</td>
                   <td className="num">{formatMoney(c.spendUsd, 'USD')}</td>
                   <td className="num">{c.medianSourcingDays === null ? DASH : Math.round(c.medianSourcingDays)}</td>
+                  <td className="num">{c.medianPoApprovalDays === null || c.medianPoApprovalDays === undefined ? DASH : Math.round(c.medianPoApprovalDays)}</td>
                   <td className="num">{c.medianDeliveryDays === null ? DASH : Math.round(c.medianDeliveryDays)}</td>
-                  <td className="num">{formatNumber(c.openLines)}</td>
+                  <td className="num">
+                    {c.drillOpen ? (
+                      <button className="cu-link" onClick={(e) => { e.stopPropagation(); onDrill(c.drillOpen, `${c.category} — open lines`); }}>
+                        {formatNumber(c.openLines)}
+                      </button>
+                    ) : formatNumber(c.openLines)}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p className="note">STO and deleted lines excluded. Click a category to filter the material list.</p>
+        <p className="note">STO and deleted lines excluded. Click a category to filter the material list; click a count to open its rows.</p>
       </div>
 
       <div className="panel">
         <div className="dt-toolbar">
           <h2 style={{ margin: 0 }}>Materials{category ? ` — ${category}` : ''}</h2>
+          <select
+            className="dt-search"
+            style={{ flex: 'none', width: 160 }}
+            value={group}
+            onChange={(e) => { setGroup(e.target.value); setLimit(150); }}
+            aria-label="Material group"
+          >
+            <option value="">All material groups</option>
+            {(d.materialGroups ?? []).map((g: string) => <option key={g} value={g}>{g}</option>)}
+          </select>
           <input
             className="dt-search"
             type="search"
@@ -281,6 +471,7 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search materials"
           />
+          <span className="count">{formatNumber(d.totalMaterials)} materials match</span>
         </div>
         <div className="table-wrap dt-scroll">
           <table className="data">
@@ -310,7 +501,12 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
             </tbody>
           </table>
         </div>
-        <p className="note">Top {d.materials.length} by spend (cap {d.caps.materials}).</p>
+        <p className="note">Top {d.materials.length} of {formatNumber(d.totalMaterials)} by spend.</p>
+        {d.materials.length < d.totalMaterials && (
+          <button className="btn secondary" onClick={() => setLimit((l) => l + 150)}>
+            Load more materials
+          </button>
+        )}
       </div>
 
       <TwoCol
@@ -394,6 +590,37 @@ export function MaterialModal({
 }
 
 // ────────────────────────────────────────────────────────── small shared bits
+
+/** CSS conic-gradient donut — v1's area-share chart, no chart library needed. */
+function AreaDonut({ title, rows }: { title: string; rows: Record<string, any>[] }) {
+  const DONUT = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948'];
+  const withUsd = rows.filter((r) => r.usd !== null && Number(r.usd) > 0);
+  const total = withUsd.reduce((a, r) => a + Number(r.usd), 0);
+  if (total <= 0) return <div className="ent-mini"><div className="ent-h" style={{ marginTop: 0 }}>{title}</div><p className="note">No rated USD spend to chart.</p></div>;
+  let acc = 0;
+  const stops = withUsd.map((r, i) => {
+    const from = (acc / total) * 360;
+    acc += Number(r.usd);
+    const to = (acc / total) * 360;
+    return `${DONUT[i % DONUT.length]} ${from.toFixed(1)}deg ${to.toFixed(1)}deg`;
+  });
+  return (
+    <div className="ent-mini">
+      <div className="ent-h" style={{ marginTop: 0 }}>{title}</div>
+      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+        <div className="donut" style={{ background: `conic-gradient(${stops.join(', ')})` }} aria-hidden="true" />
+        <div>
+          {withUsd.map((r, i) => (
+            <div key={r.plant ?? i} style={{ fontSize: '.78rem' }}>
+              <span style={{ color: DONUT[i % DONUT.length] }}>■</span>{' '}
+              {r.plantName ?? r.plant} — {((Number(r.usd) / total) * 100).toFixed(1)}%
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function Bio({ label, value, title }: { label: string; value: string; title?: string }) {
   return (

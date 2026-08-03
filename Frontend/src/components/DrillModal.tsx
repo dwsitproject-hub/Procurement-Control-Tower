@@ -13,10 +13,13 @@ export function DrillModal({
   token,
   label,
   onClose,
+  onOpenDetail,
 }: {
   token: string;
   label: string;
   onClose: () => void;
+  /** v1's "Open in Detail tab →": receives detail query params + the drill label. */
+  onOpenDetail?: (params: Record<string, string>, label: string, unmapped: string[]) => void;
 }) {
   const [page, setPage] = useState<DrillPage | null>(null);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
@@ -78,6 +81,22 @@ export function DrillModal({
         <header>
           <h3 id="drill-title">{page?.label ?? label}</h3>
           <span className="spacer" />
+          {page?.detailHandoff && onOpenDetail && (
+            <button
+              className="btn secondary"
+              style={{ width: 'auto' }}
+              title={
+                page.detailHandoff.unmapped.length > 0
+                  ? `Approximate: ${page.detailHandoff.unmapped.join(', ')} cannot be expressed as detail filters`
+                  : 'Open these rows in the Detail Table'
+              }
+              onClick={() =>
+                onOpenDetail(page.detailHandoff!.params, page.label, page.detailHandoff!.unmapped)
+              }
+            >
+              Open in Detail tab →
+            </button>
+          )}
           <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>
             Close
           </button>
@@ -106,6 +125,16 @@ export function DrillModal({
             <>
               <p className="count">
                 <strong>{formatNumber(page.totalCount)}</strong> rows
+                {/* v1's dd-modal header: value totals over the whole population. */}
+                {page.totals?.idrSum !== null && page.totals?.idrSum !== undefined && (
+                  <> · Σ {(page.totals.idrSum / 1e9).toFixed(2)} B IDR</>
+                )}
+                {page.totals && page.totals.usdSum !== null && (
+                  <> · ≈ ${formatNumber(Math.round(page.totals.usdSum))} USD</>
+                )}
+                {page.totals && !page.totals.usdComplete && (
+                  <> · <span title="Some lines have no FX rate — no USD total is shown rather than an understated one.">USD total unavailable (unrated currencies)</span></>
+                )}
                 {page.note && <> · {page.note}</>}
                 {rows.length < page.totalCount && <> · showing {formatNumber(rows.length)}</>}
               </p>

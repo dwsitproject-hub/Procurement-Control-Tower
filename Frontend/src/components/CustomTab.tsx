@@ -225,7 +225,7 @@ function Builder({
 
 // ────────────────────────────────────────────────────────────── saved cards
 
-function CustomKpiCard({
+export function CustomKpiCard({
   spec, onDrill, onRemove,
 }: { spec: KpiSpec; onDrill: (t: string, l: string) => void; onRemove: () => void }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
@@ -255,7 +255,7 @@ function CustomKpiCard({
   );
 }
 
-function CustomChartPanel({
+export function CustomChartPanel({
   spec, onDrill, onRemove,
 }: { spec: ChartSpec; onDrill: (t: string, l: string) => void; onRemove: () => void }) {
   const [d, setD] = useState<Record<string, any> | null>(null);

@@ -22,11 +22,21 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
 
   const sub = subtitle(kpi);
 
+  // v1's per-card urgency breakdown chips (G1.4), carried in the detail jsonb.
+  const chips =
+    kpi.detail && kpi.detail['chip_emergency'] !== undefined ? (
+      <span className="kpi-chips">
+        <span className="chip chip-emg" title="Emergency (urgency 1)">E {formatNumber(Number(kpi.detail['chip_emergency']))}</span>
+        <span className="chip chip-urg" title="Urgent (urgency 2)">U {formatNumber(Number(kpi.detail['chip_urgent']))}</span>
+        <span className="chip chip-std" title="Standard / planned">S {formatNumber(Number(kpi.detail['chip_standard']))}</span>
+      </span>
+    ) : null;
+
   const body = (
     <>
       <div className="v">{formatKpi(kpi.value, kpi.unit)}</div>
       <div className="l">{kpi.title}</div>
-      <div className="s">{sub}</div>
+      <div className="s">{sub}{chips}</div>
     </>
   );
 
@@ -79,6 +89,15 @@ function subtitle(kpi: Kpi): string {
   }
   if (kpi.kpiId === 'pending_po_approvals' && kpi.detail) {
     parts.push(`${kpi.detail['releaseExemptExcluded']} release-exempt excluded`);
+  }
+  if (kpi.kpiId === 'top_vendor_share_pct' && kpi.detail?.['top_vendor']) {
+    parts.push(String(kpi.detail['top_vendor']));
+  }
+  if (kpi.kpiId === 'worst_approver_gap' && kpi.detail?.['worst_pic']) {
+    parts.push(String(kpi.detail['worst_pic']));
+  }
+  if (kpi.kpiId === 'wbs_open_violations' && kpi.detail?.['chip_value_idr']) {
+    parts.push(`${formatNumber(Number(kpi.numerator ?? 0))} PRs · ${(Number(kpi.detail['chip_value_idr']) / 1e9).toFixed(1)} B IDR`);
   }
 
   if (kpi.detail && kpi.detail['entityUnit']) {

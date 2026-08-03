@@ -16,14 +16,22 @@ export interface GlobalFilter {
   purchOrg?: string[];
   /** 'YYYY-MM' against the grain's primary date. */
   monthKey?: string[];
+  /** v1's per-page "Show: All | Open Only | Complete (GR)" toggle (G2.2). */
+  scope?: 'open' | 'complete';
 }
+
+/** The status set v1 (and the drill `open` filter) treat as open. */
+export const OPEN_STATUSES = [
+  'Unapproved PR', 'PR Approved-No PO', 'PO-Not Approved', 'HOLD PO', 'PO-No GR', 'Partially Delivered',
+];
 
 export function isEmptyFilter(f: GlobalFilter): boolean {
   return (
     (f.companyCode?.length ?? 0) === 0 &&
     (f.plant?.length ?? 0) === 0 &&
     (f.purchOrg?.length ?? 0) === 0 &&
-    (f.monthKey?.length ?? 0) === 0
+    (f.monthKey?.length ?? 0) === 0 &&
+    f.scope === undefined
   );
 }
 
@@ -79,6 +87,45 @@ export function buildFilterClause(
     n += 1;
   }
 
+  if (f.scope !== undefined) {
+    // GR postings carry no lifecycle status; a spec on that grain cannot be
+    // scoped honestly — the caller reports it unavailable instead.
+    if (kind === 'gr_posting') {
+      throw new Error('scope filter does not apply to GR postings');
+    }
+    if (kind === 'pr_item') {
+      // A converted PR item's own status stays 'PO-No GR' forever — the PR
+      // fact does not track delivery. Open/complete therefore consult the
+      // linked PO lines. The outer table must be named explicitly: inside
+      // EXISTS an unqualified column would bind to the inner alias.
+      const outer = alias !== '' ? alias : 'core.fact_pr_item.';
+      if (f.scope === 'open') {
+        parts.push(
+          `(${outer}status IN ('Unapproved PR','PR Approved-No PO')
+            OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                        WHERE _pl.dataset_version_id = ${outer}dataset_version_id
+                          AND _pl.pr_no = ${outer}pr_no AND _pl.pr_item = ${outer}pr_item
+                          AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')))`,
+        );
+      } else {
+        parts.push(
+          `EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                    WHERE _pl.dataset_version_id = ${outer}dataset_version_id
+                      AND _pl.pr_no = ${outer}pr_no AND _pl.pr_item = ${outer}pr_item
+                      AND _pl.status = 'Delivered')`,
+        );
+      }
+    } else if (f.scope === 'open') {
+      params.push(OPEN_STATUSES);
+      parts.push(`${alias}status = ANY($${n})`);
+      n += 1;
+    } else {
+      params.push('Delivered');
+      parts.push(`${alias}status = $${n}`);
+      n += 1;
+    }
+  }
+
   return { sql: parts.length === 0 ? '' : ` AND ${parts.join(' AND ')}`, params };
 }
 
@@ -126,6 +173,11 @@ export function mergeIntoPredicate(
   if (f.monthKey?.length) {
     filters['monthKeyIn'] = f.monthKey;
   }
+  if (f.scope === 'open') {
+    filters['scopeOpen'] = true;
+  } else if (f.scope === 'complete') {
+    filters['scopeComplete'] = true;
+  }
 
   return { ...predicate, filters };
 }
@@ -139,11 +191,13 @@ export function parseGlobalFilter(q: Record<string, unknown>): GlobalFilter {
     const cleaned = arr.map((x) => x.trim()).filter((x) => x !== '');
     return cleaned.length > 0 ? cleaned : undefined;
   };
+  const rawScope = q['scope'] === undefined ? undefined : String(q['scope']);
   return {
     companyCode: list('company'),
     plant: list('plant'),
     purchOrg: list('purchOrg'),
     monthKey: list('monthKey'),
+    scope: rawScope === 'open' || rawScope === 'complete' ? rawScope : undefined,
   };
 }
 
@@ -154,5 +208,6 @@ export function describeFilter(f: GlobalFilter): Record<string, unknown> {
   if (f.plant?.length) out['plant'] = f.plant;
   if (f.purchOrg?.length) out['purchOrg'] = f.purchOrg;
   if (f.monthKey?.length) out['monthKey'] = f.monthKey;
+  if (f.scope) out['scope'] = f.scope;
   return out;
 }

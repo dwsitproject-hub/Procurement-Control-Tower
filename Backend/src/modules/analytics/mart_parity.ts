@@ -84,12 +84,14 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'emergency_pct_value',
     unit: 'percent',
     currencyBasis: 'idr_based',
-    sql: `SELECT 100.0 * COALESCE(sum(total_value_idr) FILTER (WHERE urgency <= 1), 0)
+    // G6.1 (decision, 3 Aug 2026): v1 parity — urgency 1-2 by value, matching
+    // the card's own "Emg+Urg" label. Was urgency <= 1 (0.17%); now 11.3%.
+    sql: `SELECT 100.0 * COALESCE(sum(total_value_idr) FILTER (WHERE urgency <= 2), 0)
                  / NULLIF(sum(total_value_idr), 0) AS value,
-                 sum(total_value_idr) FILTER (WHERE urgency <= 1) AS numerator,
+                 sum(total_value_idr) FILTER (WHERE urgency <= 2) AS numerator,
                  sum(total_value_idr) AS denominator, count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted`,
-    drill: { grain: 'pr_item', filters: { notDeleted: true, urgencyLte: 1 } },
+    drill: { grain: 'pr_item', filters: { notDeleted: true, urgencyLte: 2 } },
     worseWhenHigh: { warn: 10, crit: 25 },
   },
   {
@@ -117,14 +119,20 @@ export const PARITY_KPIS: KpiSpec[] = [
   {
     id: 'pr_not_approved',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${PRI}
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${PRI}
            WHERE dataset_version_id = $1 AND status = 'Unapproved PR'`,
     drill: { grain: 'pr_item', filters: { status: 'Unapproved PR' } },
   },
   {
     id: 'pr_no_po',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${PRI}
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${PRI}
            WHERE dataset_version_id = $1 AND status = 'PR Approved-No PO'`,
     drill: { grain: 'pr_item', filters: { status: 'PR Approved-No PO' } },
   },
@@ -132,7 +140,10 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'po_hold',
     entityUnit: 'POs',
     unit: 'count',
-    sql: `SELECT count(DISTINCT po_no)::int AS value FROM ${POL}
+    sql: `SELECT count(DISTINCT po_no)::int AS value,
+                 count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${POL}
            WHERE dataset_version_id = $1 AND status = 'HOLD PO'`,
     drill: { grain: 'po_line', filters: { status: 'HOLD PO' } },
   },
@@ -146,7 +157,10 @@ export const PARITY_KPIS: KpiSpec[] = [
   {
     id: 'po_not_delivered',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${POL}
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${POL}
            WHERE dataset_version_id = $1 AND status = 'PO-No GR'`,
     drill: { grain: 'po_line', filters: { status: 'PO-No GR' } },
   },
@@ -296,7 +310,10 @@ export const PARITY_KPIS: KpiSpec[] = [
   {
     id: 'lines_pending_po_approval',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${POL}
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${POL}
            WHERE dataset_version_id = $1 AND po_release_state = 'pending'`,
     drill: { grain: 'po_line', filters: { poReleaseState: 'pending' } },
   },
@@ -365,6 +382,187 @@ export const PARITY_KPIS: KpiSpec[] = [
              GROUP BY material_code HAVING count(DISTINCT vendor_code) = 1
           ) x`,
     drill: { grain: 'po_line', filters: { notSto: true } },
+  },
+
+  // ── G6.3: the v1-only registry KPIs, promoted (decision 3 Aug 2026) ──
+  {
+    // v1 'Tail Spend % (IDR)': share of IDR spend in the bottom 80% of PO
+    // documents by value. The vendor-basis tail_spend_pct stays alongside.
+    id: 'tail_spend_po_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `WITH po_totals AS (
+            SELECT po_no, sum(net_order_value) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted AND currency_code = 'IDR'
+             GROUP BY po_no),
+          ranked AS (SELECT v, percent_rank() OVER (ORDER BY v DESC) AS pr FROM po_totals)
+          SELECT 100.0 * sum(v) FILTER (WHERE pr >= 0.2) / NULLIF(sum(v), 0) AS value,
+                 count(*) FILTER (WHERE pr >= 0.2)::int AS numerator,
+                 count(*)::int AS denominator, count(*)::int AS sample
+            FROM ranked`,
+    drill: null, // a percentile membership cannot be a static predicate
+  },
+  {
+    id: 'valuation_coverage_pct',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0) / NULLIF(count(*),0) AS value,
+                 count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0)::int AS numerator,
+                 count(*)::int AS denominator, count(*)::int AS sample
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0`,
+    drill: { grain: 'pr_item', filters: { notDeleted: true, prNoPo: true, valuedIdr: true } },
+    worseWhenLow: { warn: 80, crit: 60 },
+  },
+  {
+    // v1 parity: counts requisitioners across ALL PR items including deleted
+    // ones (a cancelled requisition is still a demand source). 368 on the
+    // reference data; excluding deleted would read 353.
+    id: 'unique_requisitioners',
+    entityUnit: 'requisitioners',
+    unit: 'count',
+    sql: `SELECT count(DISTINCT requisitioner)::int AS value, count(*)::int AS sample
+            FROM ${PRI} WHERE dataset_version_id = $1
+             AND COALESCE(requisitioner, '') <> ''`,
+    drill: { grain: 'pr_item', filters: {} },
+  },
+  {
+    id: 'avg_pr_line_value_idr',
+    unit: 'idr',
+    currencyBasis: 'idr_based',
+    sql: `SELECT sum(total_value_idr) / NULLIF(count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0), 0) AS value,
+                 count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0)::int AS sample
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted`,
+    drill: { grain: 'pr_item', filters: { notDeleted: true, valuedIdr: true } },
+  },
+  {
+    id: 'avg_po_value_idr',
+    entityUnit: 'POs',
+    unit: 'idr',
+    currencyBasis: 'idr_based',
+    sql: `SELECT sum(net_order_value) / NULLIF(count(DISTINCT po_no), 0) AS value,
+                 count(DISTINCT po_no)::int AS denominator, count(*)::int AS sample
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND currency_code = 'IDR'`,
+    drill: { grain: 'po_line', filters: { notDeleted: true, currencyIs: 'IDR' } },
+  },
+  {
+    id: 'avg_value_per_po_usd',
+    entityUnit: 'POs',
+    unit: 'usd',
+    currencyBasis: 'usd_strict',
+    sql: `SELECT CASE WHEN count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_usd IS NULL) > 0
+                      THEN NULL
+                      ELSE sum(net_order_value_usd) / NULLIF(count(DISTINCT po_no), 0) END AS value,
+                 count(DISTINCT po_no)::int AS denominator, count(*)::int AS sample
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'foreign_ccy_po_share',
+    entityUnit: 'POs',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(DISTINCT po_no) FILTER (WHERE currency_code <> 'IDR')
+                 / NULLIF(count(DISTINCT po_no), 0) AS value,
+                 count(DISTINCT po_no) FILTER (WHERE currency_code <> 'IDR')::int AS numerator,
+                 count(DISTINCT po_no)::int AS denominator, count(*)::int AS sample
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted`,
+    drill: { grain: 'po_line', filters: { notDeleted: true, foreignCcy: true } },
+  },
+  {
+    // IDR spend on single-vendor materials. NOT EXISTS keeps the anchor on the
+    // driving scan so the live-filter injection stays correct.
+    id: 'single_source_spend_idr',
+    unit: 'idr',
+    currencyBasis: 'idr_based',
+    sql: `SELECT sum(p.net_order_value) FILTER (WHERE p.currency_code = 'IDR') AS value,
+                 count(*)::int AS sample
+            FROM ${POL} p
+           WHERE p.dataset_version_id = $1 AND NOT p.is_sto AND NOT p.is_deleted
+             AND COALESCE(p.material_code, '') <> ''
+             AND NOT EXISTS (
+               SELECT 1 FROM ${POL} o
+                WHERE o.dataset_version_id = p.dataset_version_id
+                  AND o.material_code = p.material_code
+                  AND NOT o.is_sto AND NOT o.is_deleted
+                  AND o.vendor_code IS DISTINCT FROM p.vendor_code)`,
+    drill: null, // single-source membership is a correlated condition
+  },
+  {
+    id: 'top_vendor_share_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `WITH vs AS (
+            SELECT vendor_code, max(vendor_name) AS vn, sum(net_order_value) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND currency_code = 'IDR' AND vendor_code IS NOT NULL
+             GROUP BY vendor_code)
+          SELECT 100.0 * max(v) / NULLIF(sum(v), 0) AS value, count(*)::int AS sample,
+                 (SELECT vn FROM vs ORDER BY v DESC LIMIT 1) AS top_vendor
+            FROM vs`,
+    drill: null,
+  },
+  {
+    id: 'top5_vendor_share_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `WITH vs AS (
+            SELECT vendor_code, sum(net_order_value) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND currency_code = 'IDR' AND vendor_code IS NOT NULL
+             GROUP BY vendor_code)
+          SELECT 100.0 * (SELECT sum(v) FROM (SELECT v FROM vs ORDER BY v DESC LIMIT 5) t)
+                 / NULLIF(sum(v), 0) AS value, count(*)::int AS sample
+            FROM vs`,
+    drill: null,
+  },
+  {
+    id: 'avg_suppliers_per_material',
+    unit: 'ratio',
+    sql: `WITH m AS (
+            SELECT material_code, count(DISTINCT vendor_code) AS c FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND COALESCE(material_code, '') <> ''
+             GROUP BY material_code)
+          SELECT avg(c) AS value, count(*)::int AS sample FROM m`,
+    drill: null,
+  },
+  {
+    // Median approval wait per release PIC (>=30 steps), worst one. The PIC's
+    // name rides in the detail jsonb via the extra-column mechanism.
+    id: 'worst_approver_gap',
+    unit: 'days',
+    sql: `WITH g AS (
+            SELECT r.pic_release,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY (r.approve_date - i.requisition_date)) AS med,
+                   count(*)::int AS n
+              FROM core.fact_pr_release r
+              JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
+                           AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
+             WHERE r.dataset_version_id = $1
+               AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL
+             GROUP BY r.pic_release HAVING count(*) >= 30)
+          SELECT max(med) AS value, sum(n)::int AS sample,
+                 (SELECT pic_release FROM g ORDER BY med DESC LIMIT 1) AS worst_pic
+            FROM g`,
+    drill: null,
+  },
+  {
+    id: 'auto_release_share_pct',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE pic_release = 'Auto Release') / NULLIF(count(*), 0) AS value,
+                 count(*) FILTER (WHERE pic_release = 'Auto Release')::int AS numerator,
+                 count(*)::int AS denominator, count(*)::int AS sample
+            FROM core.fact_po_release WHERE dataset_version_id = $1`,
+    drill: { grain: 'po_release', filters: { picRelease: 'Auto Release' } },
+  },
+  {
+    // G6.4: v1's op-page card — WBS violations still open (no PO yet).
+    id: 'wbs_open_violations',
+    unit: 'count',
+    sql: `SELECT count(*)::int AS value,
+                 count(DISTINCT pr_no)::int AS numerator,
+                 sum(total_value_idr) AS chip_value_idr
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+             AND wbs_status = 'violation' AND po_line_count = 0`,
+    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'violation', prNoPo: true } },
   },
 ];
 
@@ -698,26 +896,32 @@ function severityOf(spec: KpiSpec, value: number | null): string | null {
 export async function buildParityMart(client: pg.PoolClient, versionId: number): Promise<void> {
   // ── KPIs ──
   const kpiRows: unknown[][] = [];
+  const CORE_COLS = new Set(['value', 'numerator', 'denominator', 'sample']);
   for (const spec of PARITY_KPIS) {
-    const r = await client.query<{
-      value: number | null; numerator: number | null; denominator: number | null; sample: number | null;
-    }>(spec.sql, [versionId]);
+    const r = await client.query<Record<string, unknown>>(spec.sql, [versionId]);
     const row = r.rows[0] ?? { value: null, numerator: null, denominator: null, sample: null };
-    const value = row.value === null || row.value === undefined ? null : Number(row.value);
+    const value = row['value'] === null || row['value'] === undefined ? null : Number(row['value']);
+
+    // Any extra columns a spec returns land in the detail jsonb — this is how a
+    // card carries its urgency chips (G1.4) without a second query.
+    const detail: Record<string, unknown> = spec.entityUnit ? { entityUnit: spec.entityUnit } : {};
+    for (const [k, v] of Object.entries(row)) {
+      if (!CORE_COLS.has(k) && v !== null && v !== undefined) detail[k] = Number.isNaN(Number(v)) ? v : Number(v);
+    }
 
     kpiRows.push([
       versionId, spec.id, '*', '*', '*',
       // A null value is 'unavailable', never a fabricated zero.
       value === null || Number.isNaN(value) ? 'unavailable' : 'ok',
       value,
-      row.numerator ?? null,
-      row.denominator ?? null,
-      row.sample ?? null,
+      row['numerator'] ?? null,
+      row['denominator'] ?? null,
+      row['sample'] ?? null,
       spec.unit,
       spec.currencyBasis ?? null,
       severityOf(spec, value),
       value === null ? 'No qualifying rows in scope.' : null,
-      spec.entityUnit ? JSON.stringify({ entityUnit: spec.entityUnit }) : null,
+      Object.keys(detail).length > 0 ? JSON.stringify(detail) : null,
       spec.drill === null ? null : JSON.stringify(spec.drill),
     ]);
   }

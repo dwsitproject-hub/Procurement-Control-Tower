@@ -13,6 +13,10 @@ import { MaterialsTab, VendorsTab } from './components/EntityViews';
 import { AdminTab } from './components/AdminTab';
 import { CustomTab } from './components/CustomTab';
 import { CoupaTab } from './components/CoupaTab';
+import { CustomKpiCard, CustomChartPanel } from './components/CustomTab';
+import {
+  LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
+} from './components/LayoutEdit';
 
 type Tab =
   | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
@@ -46,13 +50,15 @@ const TAB_KPIS: Record<Tab, string[]> = {
   openitems: [
     'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
     'po_not_delivered', 'open_items', 'emergency_open', 'urgent_open',
-    'avg_unreleased_age', 'retro_po_rate', 'open_pr_no_wbs', 'commitment_over_60d',
+    'avg_unreleased_age', 'retro_po_rate', 'open_pr_no_wbs', 'wbs_open_violations',
+    'commitment_over_60d',
   ],
   pr: [
     'cycle_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
     'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
     'emergency_urgent_share', 'at_risk_demand', 'pr_cancellation_rate', 'pr_deleted',
     'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
+    'valuation_coverage_pct', 'unique_requisitioners', 'avg_pr_line_value_idr',
   ],
   po: [
     'total_po_amount', 'total_po_count', 'cycle_sourcing', 'cycle_po_approval',
@@ -60,6 +66,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'lines_pending_po_approval', 'hold_po_lines', 'gr_coverage_pct',
     'pending_po_approvals', 'pr_po_price_variance', 'tail_spend_pct',
     'direct_po_share', 'sto_share', 'split_sourcing', 'po_irc',
+    'tail_spend_po_pct', 'avg_po_value_idr', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
   ],
   delivery: [
     'cycle_delivery', 'cycle_e2e', 'items_delivered', 'delivered_gr', 'reversal_rate',
@@ -68,11 +75,14 @@ const TAB_KPIS: Record<Tab, string[]> = {
   approvals: [
     'pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval',
     'cycle_po_approval', 'approved_within_3d', 'oldest_unreleased', 'retro_po_rate',
+    'worst_approver_gap', 'auto_release_share_pct',
   ],
   governance: [
     'wbs_compliance', 'open_pr_no_wbs', 'retro_po_rate', 'sto_share',
     'direct_po_share', 'sole_source_materials', 'tail_spend_pct',
     'pr_cancellation_rate', 'emergency_pct_value',
+    'single_source_spend_idr', 'top_vendor_share_pct', 'top5_vendor_share_pct',
+    'avg_suppliers_per_material',
   ],
   vendors: [],
   materials: [],
@@ -111,6 +121,36 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   datacheck: [],
 };
 
+// Charts whose bucket key maps onto a global-filter dimension (Alt-click filters).
+const CHART_FILTER_DIM: Record<string, 'monthKey' | 'plant' | 'purchOrg'> = {
+  po_value_by_month: 'monthKey',
+  pr_by_month: 'monthKey',
+  e2e_by_month: 'monthKey',
+  monthly_pr_no_po: 'monthKey',
+  delivery_ordered_vs_received: 'monthKey',
+  po_by_plant: 'plant',
+  pr_by_plant: 'plant',
+  wbs_by_plant: 'plant',
+  po_value_by_purch_org: 'purchOrg',
+};
+
+// Which validation findings surface inline on which tab (G1.5). The Data Check
+// tab always shows everything; these are the "you should know while reading
+// this page" callouts.
+const TAB_FINDINGS: Partial<Record<Tab, string[]>> = {
+  pr: ['V-M01', 'V-R03', 'V-R04'],
+  po: ['V-B01', 'V-B02', 'V-B03'],
+  delivery: ['V-M03', 'V-B07'],
+  openitems: ['V-B04'],
+};
+
+type ThemeMode = 'auto' | 'light' | 'dark';
+function applyTheme(mode: ThemeMode) {
+  if (mode === 'auto') delete document.documentElement.dataset['theme'];
+  else document.documentElement.dataset['theme'] = mode;
+  try { localStorage.setItem('pct_theme', mode); } catch { /* private mode */ }
+}
+
 export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -119,6 +159,16 @@ export default function App() {
   const [dataset, setDataset] = useState<DatasetCurrent | null>(null);
   const [kpis, setKpis] = useState<Kpi[]>([]);
   const [drill, setDrill] = useState<{ token: string; label: string } | null>(null);
+  const [detailInit, setDetailInit] = useState<{ params: Record<string, string>; label: string } | null>(null);
+  const [findings, setFindings] = useState<Finding[]>([]);
+  const [editing, setEditing] = useState(false);
+  const { layout, update: updateLayout } = useTabLayout(tab);
+  const [savedCustom, setSavedCustom] = useState<{ kpis: any[]; charts: any[] }>({ kpis: [], charts: [] });
+  const [chartCatalog, setChartCatalog] = useState<{ chartId: string; title?: string }[]>([]);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    try { return (localStorage.getItem('pct_theme') as ThemeMode) ?? 'auto'; } catch { return 'auto'; }
+  });
+  useEffect(() => { applyTheme(theme); }, [theme]);
 
   const onDrill = useCallback((token: string, label: string) => setDrill({ token, label }), []);
 
@@ -134,6 +184,25 @@ export default function App() {
     if (!me) return;
     api.get<DatasetCurrent>('/api/v1/dataset/current').then(setDataset).catch(() => undefined);
   }, [me]);
+
+  useEffect(() => {
+    if (!me) return;
+    api.get<{ specs: { kpis: any[]; charts: any[] } }>('/api/v1/custom/saved')
+      .then((d) => setSavedCustom(d.specs ?? { kpis: [], charts: [] }))
+      .catch(() => undefined);
+    api.get<{ charts: { chartId: string; title?: string }[] }>('/api/v1/chart')
+      .then((d) => setChartCatalog(d.charts))
+      .catch(() => undefined);
+  }, [me]);
+
+  // Inline anomaly banners (G1.5): the findings for the published version.
+  useEffect(() => {
+    if (!me || !dataset || dataset.datasetVersionId === null) return;
+    api
+      .get<{ findings: Finding[] }>(`/api/v1/dataset/${dataset.datasetVersionId}/validation`)
+      .then((d) => setFindings(d.findings))
+      .catch(() => setFindings([]));
+  }, [me, dataset]);
 
   // Refetch KPIs whenever the global filter changes. The query string is empty
   // when nothing is selected, which keeps the fast precomputed path in play.
@@ -175,9 +244,14 @@ export default function App() {
     );
   }
 
-  const visibleKpis = TAB_KPIS[tab]
-    .map((id) => kpis.find((k) => k.kpiId === id))
-    .filter((k): k is Kpi => k !== undefined);
+  // G4: the user's layout reorders/hides/swaps the tab's default slots.
+  const kpiSlots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
+  const chartSlots = applyLayout(TAB_CHARTS[tab], layout, 'chart');
+  const visibleKpis = kpiSlots
+    .map((slot) => ({ slot, kpi: kpis.find((k) => k.kpiId === (layout.replaced[slot] ?? slot)) }))
+    .filter((x): x is { slot: string; kpi: Kpi } => x.kpi !== undefined);
+  const shownCustomKpis = savedCustom.kpis.filter((k) => layout.customKpis.includes(k.title));
+  const shownCustomCharts = savedCustom.charts.filter((c) => layout.customCharts.includes(c.title));
 
   return (
     <div className="app">
@@ -187,6 +261,23 @@ export default function App() {
         <span className="who">
           {me.displayName} · {me.roles.join(', ')}
         </span>
+        <a
+          className="btn secondary"
+          style={{ width: 'auto', textDecoration: 'none' }}
+          href="/api/v1/snapshot"
+          download
+          title="Download a static HTML snapshot of the current dashboard (frozen figures, your data scope)"
+        >
+          ⤓ Snapshot
+        </a>
+        <button
+          className="btn secondary"
+          style={{ width: 'auto' }}
+          title="Theme: auto follows your system"
+          onClick={() => setTheme(theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto')}
+        >
+          {theme === 'auto' ? '◑ Auto' : theme === 'light' ? '☀ Light' : '☾ Dark'}
+        </button>
         <button className="btn secondary" style={{ width: 'auto' }} onClick={() => void logout()}>
           Sign out
         </button>
@@ -205,16 +296,27 @@ export default function App() {
       {dataset?.datasetVersionId != null && <GlobalFilterBar value={gf} onChange={setGf} />}
 
       <div className="tabs" role="tablist">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          // v1 shows the open-item total on the menu; PR-side + PO-side open.
+          const openBadge =
+            t.id === 'openitems'
+              ? ['pr_not_approved', 'pr_no_po', 'open_items'].reduce((acc, id) => {
+                  const k = kpis.find((x) => x.kpiId === id);
+                  return k?.value !== null && k?.value !== undefined ? acc + Number(k.value) : acc;
+                }, 0)
+              : 0;
+          return (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+              {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
+            </button>
+          );
+        })}
       </div>
 
       <main>
@@ -236,21 +338,105 @@ export default function App() {
         ) : tab === 'admin' ? (
           <AdminTab isAdmin={me.roles.includes('admin')} />
         ) : tab === 'detail' ? (
-          <DetailTable />
+          <DetailTable
+            key={detailInit ? JSON.stringify(detailInit.params) : 'plain'}
+            initial={detailInit?.params}
+            initialLabel={detailInit?.label}
+          />
         ) : tab === 'datacheck' ? (
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (
           <>
-            {visibleKpis.length > 0 && (
+            <LayoutEditBar
+              editing={editing}
+              setEditing={setEditing}
+              layout={layout}
+              update={updateLayout}
+              kpiOptions={kpis.map((k) => ({ id: k.kpiId, title: k.title })).sort((a, b) => a.title.localeCompare(b.title))}
+              chartOptions={chartCatalog.map((c) => ({ id: c.chartId, title: c.title ?? c.chartId }))}
+              customOptions={{
+                kpis: savedCustom.kpis.map((k) => k.title),
+                charts: savedCustom.charts.map((c) => c.title),
+              }}
+            />
+            {(TAB_FINDINGS[tab] ?? []).length > 0 && findings.length > 0 && (
+              <div className="anomaly-strip">
+                {findings
+                  .filter((f) => (TAB_FINDINGS[tab] ?? []).includes(f.ruleId))
+                  .filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT')
+                  .slice(0, 3)
+                  .map((f) => (
+                    <p key={f.ruleId} className="anomaly">
+                      <span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.message}
+                    </p>
+                  ))}
+              </div>
+            )}
+            {(visibleKpis.length > 0 || shownCustomKpis.length > 0) && (
               <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
-                {visibleKpis.map((k) => (
-                  <KpiCard key={k.kpiId} kpi={k} onDrill={onDrill} />
+                {visibleKpis.map(({ slot, kpi: k }) => (
+                  <div key={slot} className={editing ? 'ly-slot' : undefined}>
+                    {editing && (
+                      <LayoutControls
+                        id={slot}
+                        kind="kpi"
+                        layout={layout}
+                        update={updateLayout}
+                        currentIds={kpiSlots}
+                        swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
+                      />
+                    )}
+                    <KpiCard kpi={k} onDrill={onDrill} />
+                  </div>
+                ))}
+                {shownCustomKpis.map((spec) => (
+                  <div key={`cu-${spec.title}`} className={editing ? 'ly-slot' : undefined}>
+                    {editing && (
+                      <button
+                        className="ly-btn ly-hide" style={{ position: 'absolute', top: 2, right: 2, zIndex: 2 }}
+                        title="Remove from this tab"
+                        onClick={() => updateLayout((cur) => ({ ...cur, customKpis: cur.customKpis.filter((t) => t !== spec.title) }))}
+                      >✕</button>
+                    )}
+                    <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                  </div>
                 ))}
               </div>
             )}
             <div className="chart-grid">
-              {TAB_CHARTS[tab].map((c) => (
-                <ChartPanel key={c} chartId={c} onDrill={onDrill} filterQuery={gfQuery} />
+              {chartSlots.map((c) => (
+                <div key={c} className={editing ? 'ly-slot' : undefined}>
+                  {editing && (
+                    <LayoutControls id={c} kind="chart" layout={layout} update={updateLayout} currentIds={chartSlots} />
+                  )}
+                <ChartPanel
+                  chartId={c}
+                  onDrill={onDrill}
+                  filterQuery={gfQuery}
+                  onApplyFilter={
+                    CHART_FILTER_DIM[c]
+                      ? (bucketKey) => {
+                          const dim = CHART_FILTER_DIM[c]!;
+                          setGf((cur) =>
+                            cur[dim].includes(bucketKey) ? cur : { ...cur, [dim]: [...cur[dim], bucketKey] },
+                          );
+                        }
+                      : undefined
+                  }
+                />
+                </div>
+              ))}
+              {shownCustomCharts.map((spec) => (
+                <div key={`cu-${spec.title}`} className={editing ? 'ly-slot' : undefined}>
+                  {editing && (
+                    <button
+                      className="ly-btn ly-hide" style={{ position: 'absolute', top: 2, right: 2, zIndex: 2 }}
+                      title="Remove from this tab"
+                      onClick={() => updateLayout((cur) => ({ ...cur, customCharts: cur.customCharts.filter((t) => t !== spec.title) }))}
+                    >✕</button>
+                  )}
+                  <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                </div>
               ))}
             </div>
           </>
@@ -258,7 +444,16 @@ export default function App() {
       </main>
 
       {drill && (
-        <DrillModal token={drill.token} label={drill.label} onClose={() => setDrill(null)} />
+        <DrillModal
+          token={drill.token}
+          label={drill.label}
+          onClose={() => setDrill(null)}
+          onOpenDetail={(params, label) => {
+            setDetailInit({ params, label });
+            setDrill(null);
+            setTab('detail');
+          }}
+        />
       )}
     </div>
   );

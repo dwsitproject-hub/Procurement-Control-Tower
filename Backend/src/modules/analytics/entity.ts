@@ -199,11 +199,48 @@ export async function vendorDetail(
             pol.order_unit AS "orderUnit", pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd", pol.status, pol.receipt_date AS "receiptDate",
+            pol.gr_completion_pct AS "grCompletionPct",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp}
       ORDER BY pol.document_date DESC, pol.po_no DESC, pol.po_item
       LIMIT 200`,
+    params,
+  );
+
+  // Σ over the vendor's WHOLE population — v1's PO-summary total row. Computed
+  // in SQL, not by summing the capped page.
+  const poTotals = await queryOne<{
+    lines: number; pos: number; idr: number | null; usd: number | null; unrated: number;
+  }>(
+    `SELECT count(*)::int AS lines, count(DISTINCT pol.po_no)::int AS pos,
+            sum(pol.net_order_value) FILTER (WHERE pol.currency_code = 'IDR') AS idr,
+            sum(pol.net_order_value_usd) AS usd,
+            count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unrated
+       FROM core.fact_po_line pol
+      WHERE ${where} AND pol.vendor_code = ${vp}`,
+    params,
+  );
+
+  // Delivery aging histogram (v1's v3 popup chart): receipt vs promise date.
+  const deliveryAging = await query<{ bucket: string; ord: number; n: number }>(
+    `SELECT CASE
+              WHEN pol.receipt_date <= pol.delivery_date THEN 'Early / on-time'
+              WHEN pol.receipt_date <= pol.delivery_date + 7 THEN '1-7d (grace)'
+              WHEN pol.receipt_date <= pol.delivery_date + 14 THEN '8-14d late'
+              WHEN pol.receipt_date <= pol.delivery_date + 30 THEN '15-30d late'
+              ELSE '>30d late' END AS bucket,
+            min(CASE
+              WHEN pol.receipt_date <= pol.delivery_date THEN 1
+              WHEN pol.receipt_date <= pol.delivery_date + 7 THEN 2
+              WHEN pol.receipt_date <= pol.delivery_date + 14 THEN 3
+              WHEN pol.receipt_date <= pol.delivery_date + 30 THEN 4
+              ELSE 5 END) AS ord,
+            count(*)::int AS n
+       FROM core.fact_po_line pol
+      WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
+        AND pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL
+      GROUP BY 1 ORDER BY 2`,
     params,
   );
 
@@ -267,9 +304,154 @@ export async function vendorDetail(
       lastPo: m.last_po,
     })),
     poHistory: decorate(poHistory),
+    poTotals: poTotals
+      ? {
+          lines: poTotals.lines,
+          pos: poTotals.pos,
+          valueIdr: poTotals.idr,
+          valueUsd: poTotals.unrated > 0 ? null : poTotals.usd,
+          usdComplete: poTotals.unrated === 0,
+        }
+      : null,
+    deliveryAging: deliveryAging.map((b) => ({ bucket: b.bucket, count: b.n })),
     grHistory,
     caps: { poHistory: 200, grHistory: 200, materials: 100 },
   };
+}
+
+// ─────────────────────────────── vendor pivot + OTD chart (G3.1 / G3.2)
+
+/**
+ * v1's "Vendors × Materials — monthly order value" matrix, vendor level.
+ * USD-converted sums per month; a vendor with unrated lines shows null for the
+ * affected cells rather than an understated number.
+ */
+export async function vendorPivot(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  search: string,
+  limit: number,
+  offset: number,
+): Promise<Record<string, unknown>> {
+  const { where, params } = scoped(versionId, scope, 'pol');
+
+  let extra = '';
+  if (search.trim() !== '') {
+    params.push(`%${search.trim()}%`);
+    extra = ` AND (pol.vendor_name ILIKE $${params.length} OR pol.vendor_code ILIKE $${params.length})`;
+  }
+  const base = `${where}${extra} AND NOT pol.is_sto AND NOT pol.is_deleted AND pol.vendor_code IS NOT NULL`;
+
+  const months = await query<{ mk: string }>(
+    `SELECT DISTINCT to_char(pol.document_date, 'YYYY-MM') AS mk
+       FROM core.fact_po_line pol WHERE ${base} ORDER BY 1`,
+    params,
+  );
+
+  const totalRow = await queryOne<{ vendors: number; grand_usd: number | null; unrated: number }>(
+    `SELECT count(DISTINCT pol.vendor_code)::int AS vendors,
+            sum(pol.net_order_value_usd) AS grand_usd,
+            count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unrated
+       FROM core.fact_po_line pol WHERE ${base}`,
+    params,
+  );
+
+  const pageParams = [...params, limit, offset];
+  const rows = await query<{
+    code: string; name: string | null; mk: string; usd: number | null; unrated: number;
+  }>(
+    `WITH top AS (
+       SELECT pol.vendor_code AS code, sum(pol.net_order_value_usd) AS total
+         FROM core.fact_po_line pol WHERE ${base}
+        GROUP BY 1 ORDER BY total DESC NULLS LAST
+        LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length})
+     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+            to_char(pol.document_date, 'YYYY-MM') AS mk,
+            sum(pol.net_order_value_usd) AS usd,
+            count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unrated
+       FROM core.fact_po_line pol JOIN top ON top.code = pol.vendor_code
+      WHERE ${base}
+      GROUP BY pol.vendor_code, to_char(pol.document_date, 'YYYY-MM')`,
+    pageParams,
+  );
+
+  const byVendor = new Map<string, { code: string; name: string | null; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean }>();
+  for (const r of rows) {
+    let v = byVendor.get(r.code);
+    if (!v) {
+      v = { code: r.code, name: r.name, byMonth: {}, total: 0, anyUnrated: false };
+      byVendor.set(r.code, v);
+    }
+    v.byMonth[r.mk] = r.unrated > 0 ? null : r.usd === null ? null : Number(r.usd);
+    if (r.unrated > 0) v.anyUnrated = true;
+    if (r.usd !== null && r.unrated === 0) v.total += Number(r.usd);
+  }
+
+  return {
+    months: months.map((m) => m.mk),
+    totalVendors: totalRow?.vendors ?? 0,
+    grandTotalUsd: (totalRow?.unrated ?? 0) > 0 ? null : totalRow?.grand_usd ?? null,
+    rows: [...byVendor.values()].sort((a, b) => b.total - a.total),
+    note: 'USD-converted, period-matched FX · STO and deleted lines excluded · cells with unrated currencies show —',
+  };
+}
+
+/** Material × month sub-rows for one vendor (pivot expand). */
+export async function vendorPivotMaterials(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  vendorCode: string,
+): Promise<Record<string, unknown>[]> {
+  const { where, params } = scoped(versionId, scope, 'pol');
+  params.push(vendorCode);
+  const rows = await query<{
+    code: string | null; descr: string | null; mk: string; usd: number | null; unrated: number;
+  }>(
+    `SELECT COALESCE(NULLIF(pol.material_code, ''), '(service)') AS code,
+            left(max(pol.short_text), 50) AS descr,
+            to_char(pol.document_date, 'YYYY-MM') AS mk,
+            sum(pol.net_order_value_usd) AS usd,
+            count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unrated
+       FROM core.fact_po_line pol
+      WHERE ${where} AND pol.vendor_code = $${params.length} AND NOT pol.is_sto AND NOT pol.is_deleted
+      GROUP BY 1, to_char(pol.document_date, 'YYYY-MM')`,
+    params,
+  );
+  const byMat = new Map<string, { code: string; descr: string | null; byMonth: Record<string, number | null>; total: number }>();
+  for (const r of rows) {
+    const key = r.code ?? '(service)';
+    let m = byMat.get(key);
+    if (!m) {
+      m = { code: key, descr: r.descr, byMonth: {}, total: 0 };
+      byMat.set(key, m);
+    }
+    m.byMonth[r.mk] = r.unrated > 0 ? null : r.usd === null ? null : Number(r.usd);
+    if (r.usd !== null && r.unrated === 0) m.total += Number(r.usd);
+  }
+  return [...byMat.values()].sort((a, b) => b.total - a.total).slice(0, 60);
+}
+
+/** v1's all-vendors On-Time vs Late stacked chart (grace +7d, GR vs EINDT). */
+export async function vendorOtdChart(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const { where, params } = scoped(versionId, scope, 'pol');
+  params.push(limit);
+  return query(
+    `SELECT pol.vendor_code AS "vendorCode", max(pol.vendor_name) AS "vendorName",
+            count(*) FILTER (WHERE pol.receipt_date <= pol.delivery_date + 7)::int AS "onTime",
+            count(*) FILTER (WHERE pol.receipt_date > pol.delivery_date + 7)::int AS "late"
+       FROM core.fact_po_line pol
+      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
+        AND pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL
+        AND pol.vendor_code IS NOT NULL
+      GROUP BY pol.vendor_code
+      ORDER BY count(*) DESC
+      LIMIT $${params.length}`,
+    params,
+  );
 }
 
 // ─────────────────────────────────────────────────────────── material detail
@@ -372,17 +554,21 @@ export async function materialGroupPage(
   scope: readonly ScopeEntry[],
   category: string | null,
   search: string,
+  materialGroup: string | null = null,
+  limit = 150,
+  offset = 0,
 ): Promise<Record<string, unknown>> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
-  // Category summary (v1's mgt): items, value, medians per category.
+  // Category summary (v1's mgt): items, value, per-stage cycle medians (G3.4).
   const summary = await query<{
     cat: string; lines: number; pos: number; usd: number | null;
-    med_src: number | null; med_del: number | null;
+    med_src: number | null; med_appr: number | null; med_del: number | null;
   }>(
     `SELECT COALESCE(pol.material_category,'Other') AS cat, count(*)::int AS lines,
             count(DISTINCT pol.po_no)::int AS pos, sum(pol.net_order_value_usd) AS usd,
             percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.sourcing_days) AS med_src,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.po_approval_days) AS med_appr,
             percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.delivery_days) AS med_del
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
@@ -390,18 +576,37 @@ export async function materialGroupPage(
     params,
   );
 
-  // Materials list (v1's mxt), optionally narrowed by category and search.
+  // Material Explorer (v1's mxt) over the FULL catalogue: category, material
+  // group and search narrow it; limit/offset page it server-side.
   const matParams = [...params];
   let extra = '';
   if (category) {
     matParams.push(category);
     extra += ` AND COALESCE(pol.material_category,'Other') = $${matParams.length}`;
   }
+  if (materialGroup) {
+    matParams.push(materialGroup);
+    extra += ` AND pol.material_group = $${matParams.length}`;
+  }
   if (search.trim() !== '') {
     matParams.push(`%${search.trim()}%`);
     extra += ` AND (pol.material_code ILIKE $${matParams.length} OR pol.short_text ILIKE $${matParams.length})`;
   }
 
+  const matCount = await queryOne<{ n: number }>(
+    `SELECT count(DISTINCT pol.material_code)::int AS n
+       FROM core.fact_po_line pol
+      WHERE ${where} AND NOT pol.is_sto AND pol.material_code IS NOT NULL${extra}`,
+    matParams,
+  );
+
+  const groups = await query<{ grp: string }>(
+    `SELECT DISTINCT pol.material_group AS grp FROM core.fact_po_line pol
+      WHERE ${where} AND NOT pol.is_sto AND pol.material_group IS NOT NULL ORDER BY 1`,
+    params,
+  );
+
+  const pageParams = [...matParams, limit, offset];
   const materials = await query<{
     code: string; descr: string; grp: string | null; lines: number; vendors: number;
     qty: number | null; usd: number | null;
@@ -412,8 +617,9 @@ export async function materialGroupPage(
             sum(pol.order_qty) AS qty, sum(pol.net_order_value_usd) AS usd
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND pol.material_code IS NOT NULL${extra}
-      GROUP BY pol.material_code ORDER BY usd DESC NULLS LAST LIMIT 150`,
-    matParams,
+      GROUP BY pol.material_code ORDER BY usd DESC NULLS LAST
+      LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+    pageParams,
   );
 
   // Volume leaders (v1's mg-vol) and sole-source (v1's mg-ss).
@@ -444,7 +650,8 @@ export async function materialGroupPage(
   const open = await query<{ cat: string; n: number }>(
     `SELECT COALESCE(pol.material_category,'Other') AS cat, count(*)::int AS n
        FROM core.fact_po_line pol
-      WHERE ${where} AND pol.status IN ${OPEN_STATUSES}
+      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
+        AND pol.status IN ${OPEN_STATUSES}
       GROUP BY 1`,
     params,
   );
@@ -457,9 +664,12 @@ export async function materialGroupPage(
       pos: s2.pos,
       spendUsd: s2.usd,
       medianSourcingDays: s2.med_src,
+      medianPoApprovalDays: s2.med_appr,
       medianDeliveryDays: s2.med_del,
       openLines: openByCat.get(s2.cat) ?? 0,
     })),
+    materialGroups: groups.map((g) => g.grp),
+    totalMaterials: matCount?.n ?? 0,
     materials: materials.map((m) => ({
       materialCode: m.code,
       description: m.descr,
@@ -474,7 +684,8 @@ export async function materialGroupPage(
     soleSource: soleSource.map((x) => ({
       materialCode: x.code, description: x.descr, vendorName: x.vendor, lines: x.lines, spendUsd: x.usd,
     })),
-    caps: { materials: 150, volumeLeaders: 20, soleSource: 50 },
+    caps: { materials: limit, volumeLeaders: 20, soleSource: 50 },
+    pagination: { limit, offset },
   };
 }
 

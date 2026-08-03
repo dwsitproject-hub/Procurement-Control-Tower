@@ -22,21 +22,37 @@ type Tab =
   | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
   | 'vendors' | 'materials' | 'coupa' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'executive', label: 'Executive' },
-  { id: 'openitems', label: 'Open Items' },
-  { id: 'pr', label: 'PR' },
-  { id: 'po', label: 'PO' },
-  { id: 'delivery', label: 'Delivery' },
-  { id: 'approvals', label: 'Approvals' },
-  { id: 'governance', label: 'Governance' },
-  { id: 'vendors', label: 'Vendor 360' },
-  { id: 'materials', label: 'Materials' },
-  { id: 'coupa', label: 'Coupa' },
-  { id: 'detail', label: 'Detail Table' },
-  { id: 'custom', label: 'Custom' },
-  { id: 'admin', label: 'Admin' },
-  { id: 'datacheck', label: 'Data Check' },
+// v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
+const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: string }[] }[] = [
+  {
+    section: 'Main',
+    items: [
+      { id: 'executive', label: 'Overview', icon: '📊' },
+      { id: 'openitems', label: 'Open Items', icon: '🔥' },
+    ],
+  },
+  {
+    section: 'Analysis',
+    items: [
+      { id: 'pr', label: 'PR Analysis', icon: '📋' },
+      { id: 'po', label: 'PO Analysis', icon: '📦' },
+      { id: 'delivery', label: 'Delivery', icon: '🚚' },
+      { id: 'approvals', label: 'Approvals', icon: '✅' },
+      { id: 'governance', label: 'Governance', icon: '🏛️' },
+      { id: 'vendors', label: 'Vendor 360', icon: '🏆' },
+      { id: 'materials', label: 'Material Group', icon: '🧱' },
+      { id: 'coupa', label: 'Coupa', icon: '🔗' },
+    ],
+  },
+  {
+    section: 'Data',
+    items: [
+      { id: 'detail', label: 'Detail Table', icon: '🧾' },
+      { id: 'custom', label: 'Custom', icon: '🧮' },
+      { id: 'admin', label: 'Admin', icon: '⚙️' },
+      { id: 'datacheck', label: 'Data Quality', icon: '✔️' },
+    ],
+  },
 ];
 
 const TAB_KPIS: Record<Tab, string[]> = {
@@ -253,17 +269,30 @@ export default function App() {
   const shownCustomKpis = savedCustom.kpis.filter((k) => layout.customKpis.includes(k.title));
   const shownCustomCharts = savedCustom.charts.filter((c) => layout.customCharts.includes(c.title));
 
+  const totalItemsBadge = (() => {
+    const k = kpis.find((x) => x.kpiId === 'total_pr_items');
+    return k?.value !== null && k?.value !== undefined ? Number(k.value) : null;
+  })();
+  const dataCheckCount = findings.filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT' || f.severity === 'BLOCKER').length;
+
   return (
     <div className="app">
+      {/* v1's .bar: navy sticky header */}
       <div className="topbar">
+        <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>🏭</span>
         <h1>Procurement Control Tower</h1>
+        {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
+        {dataCheckCount > 0 && (
+          <button className="hdr-chip" onClick={() => setTab('datacheck')} title="Open Data Quality">
+            ⚠ Data Check ({dataCheckCount})
+          </button>
+        )}
         <span className="spacer" />
         <span className="who">
           {me.displayName} · {me.roles.join(', ')}
         </span>
         <a
-          className="btn secondary"
-          style={{ width: 'auto', textDecoration: 'none' }}
+          className="tbtn"
           href="/api/v1/snapshot"
           download
           title="Download a static HTML snapshot of the current dashboard (frozen figures, your data scope)"
@@ -271,14 +300,13 @@ export default function App() {
           ⤓ Snapshot
         </a>
         <button
-          className="btn secondary"
-          style={{ width: 'auto' }}
+          className="tbtn"
           title="Theme: auto follows your system"
           onClick={() => setTheme(theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto')}
         >
           {theme === 'auto' ? '◑ Auto' : theme === 'light' ? '☀ Light' : '☾ Dark'}
         </button>
-        <button className="btn secondary" style={{ width: 'auto' }} onClick={() => void logout()}>
+        <button className="tbtn" onClick={() => void logout()}>
           Sign out
         </button>
       </div>
@@ -293,32 +321,40 @@ export default function App() {
         </div>
       )}
 
+      <div className="shell">
+        {/* v1's .sb sidebar: grouped nav, orange active border, open-items badge */}
+        <nav className="sb" role="tablist" aria-orientation="vertical">
+          {NAV_GROUPS.map((g) => (
+            <div key={g.section}>
+              <div className="nsec">{g.section}</div>
+              {g.items.map((t) => {
+                const openBadge =
+                  t.id === 'openitems'
+                    ? ['pr_not_approved', 'pr_no_po', 'open_items'].reduce((acc, id) => {
+                        const k = kpis.find((x) => x.kpiId === id);
+                        return k?.value !== null && k?.value !== undefined ? acc + Number(k.value) : acc;
+                      }, 0)
+                    : 0;
+                return (
+                  <button
+                    key={t.id}
+                    className="ni"
+                    role="tab"
+                    aria-selected={tab === t.id}
+                    onClick={() => setTab(t.id)}
+                  >
+                    <span className="ic" aria-hidden="true">{t.icon}</span>
+                    {t.label}
+                    {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+
+      <div className="content">
       {dataset?.datasetVersionId != null && <GlobalFilterBar value={gf} onChange={setGf} />}
-
-      <div className="tabs" role="tablist">
-        {TABS.map((t) => {
-          // v1 shows the open-item total on the menu; PR-side + PO-side open.
-          const openBadge =
-            t.id === 'openitems'
-              ? ['pr_not_approved', 'pr_no_po', 'open_items'].reduce((acc, id) => {
-                  const k = kpis.find((x) => x.kpiId === id);
-                  return k?.value !== null && k?.value !== undefined ? acc + Number(k.value) : acc;
-                }, 0)
-              : 0;
-          return (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              onClick={() => setTab(t.id)}
-            >
-              {t.label}
-              {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
-            </button>
-          );
-        })}
-      </div>
-
       <main>
         {dataset?.datasetVersionId == null ? (
           <div className="panel">
@@ -455,6 +491,8 @@ export default function App() {
           </>
         )}
       </main>
+      </div>
+      </div>
 
       {drill && (
         <DrillModal

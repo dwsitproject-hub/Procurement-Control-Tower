@@ -9,6 +9,20 @@ import { DASH, formatKpi, formatNumber } from '../lib/format';
  * disabled Demand Realism reading as "0.3% — very bad" instead of
  * "not computable from this export".
  */
+// v1's card palette (each .kc carries a --c accent). Severity still wins:
+// a critical figure is red and a warning amber regardless of the decoration.
+const CARD_PALETTE = ['#1F3864', '#2E75B6', '#0D9488', '#7C3AED', '#ED7D31', '#4CAF50'];
+
+function accentFor(kpi: Kpi): string {
+  if (kpi.severity === 'critical') return '#C0392B';
+  if (kpi.severity === 'warning') return '#F59E0B';
+  if (kpi.severity === 'good') return '#4CAF50';
+  // Stable per-KPI decoration: hash the id into the palette.
+  let h = 0;
+  for (const ch of kpi.kpiId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CARD_PALETTE[h % CARD_PALETTE.length]!;
+}
+
 export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, label: string) => void }) {
   if (kpi.status !== 'ok' || kpi.value === null) {
     return (
@@ -19,6 +33,7 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
       </div>
     );
   }
+  const accent = accentFor(kpi);
 
   const sub = subtitle(kpi);
 
@@ -46,7 +61,7 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
   // focusable control that announces nothing.
   if (!kpi.drillToken) {
     return (
-      <div className="kpi" data-sev={kpi.severity ?? 'neutral'}>
+      <div className="kpi" data-sev={kpi.severity ?? 'neutral'} style={{ ['--c' as string]: accent }}>
         {body}
       </div>
     );
@@ -57,6 +72,7 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
     <button
       className="kpi"
       data-sev={kpi.severity ?? 'neutral'}
+      style={{ ['--c' as string]: accent }}
       onClick={() => onDrill(token, kpi.title)}
       title="Click to see the rows behind this figure"
     >

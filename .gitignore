@@ -26,3 +26,4 @@ Thumbs.db
 Assets/
 
 Docs/KPN - API Payload*.docx
+deploy/env/secrets.local.env

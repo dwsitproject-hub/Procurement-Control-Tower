@@ -22,6 +22,9 @@ import {
   type CustomChartSpec, type CustomKpiSpec,
 } from '../modules/analytics/custom.js';
 import type { Feed } from '@pct/contracts';
+import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
+import { COUPA_OBJECTS, runCoupaSync } from '../modules/coupa/sync.js';
+import { loadRuleSnapshot } from '../modules/admin/rules.js';
 
 // Injected from routes.ts so both files share one implementation.
 export interface RouteHelpers {
@@ -170,6 +173,132 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       detail: { sourceHeader: sourceHeader ?? null }, ip: req.ip,
     });
     res.json({ feed, field, sourceHeader: sourceHeader ?? null, appliesFromNextIngest: true });
+  }));
+
+  // ── Coupa integration (TECH_04) ──────────────────────────────────────────
+
+  r.get('/api/v1/admin/coupa', role('steward', async (_req, res) => {
+    const rules = await loadRuleSnapshot();
+    const status = await query(
+      `SELECT object, last_updated_at, last_run_at, last_status, last_error, last_trigger,
+              rows_upserted, runs
+         FROM ops.coupa_watermark ORDER BY object`,
+    );
+    const counts = await queryOne<Record<string, number>>(
+      `SELECT (SELECT count(*) FROM ops.coupa_sourcing_event)::int AS sourcing_events,
+              (SELECT count(*) FROM ops.coupa_supplier_response)::int AS supplier_responses,
+              (SELECT count(*) FROM ops.coupa_po_line)::int AS po_lines,
+              (SELECT count(*) FROM ops.coupa_receipt)::int AS receipts,
+              (SELECT count(*) FROM ops.coupa_invoice)::int AS invoices,
+              (SELECT count(*) FROM ops.coupa_payment)::int AS payments`,
+    );
+    res.json({
+      configured: coupaConfigured(),
+      host: coupaHost(),
+      objects: COUPA_OBJECTS,
+      config: {
+        enabled: rules['coupa.sync_enabled'] === true || rules['coupa.sync_enabled'] === 'true',
+        intervalMinutes: Number(rules['coupa.sync_interval_minutes'] ?? 10),
+        lookbackMinutes: Number(rules['coupa.lookback_minutes'] ?? 15),
+      },
+      status,
+      counts,
+    });
+  }));
+
+  r.put('/api/v1/admin/coupa/config', role('admin', async (req, res, ctx) => {
+    const bdy = (req.body ?? {}) as { enabled?: unknown; intervalMinutes?: unknown };
+    const enabled = bdy.enabled === true;
+    // The backend owns the clamp: the PRD requirement is 5-10 minutes, the
+    // panel offers 5-60; anything outside is corrected, not rejected.
+    const interval = Math.min(Math.max(Number(bdy.intervalMinutes ?? 10) || 10, 5), 60);
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [key, value] of [
+      ['coupa.sync_enabled', enabled],
+      ['coupa.sync_interval_minutes', interval],
+    ] as const) {
+      await query(
+        `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
+         VALUES ($1, $2::jsonb, $3, 'Coupa panel', $4)
+         ON CONFLICT (rule_key, effective_from)
+           DO UPDATE SET rule_value = EXCLUDED.rule_value, note = EXCLUDED.note, created_by = EXCLUDED.created_by`,
+        [key, JSON.stringify(value), today, ctx.principal.userId],
+      );
+    }
+    await recordAudit({
+      action: 'admin.coupa.config', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { enabled, intervalMinutes: interval }, ip: req.ip,
+    });
+    res.json({ enabled, intervalMinutes: interval });
+  }));
+
+  r.post('/api/v1/admin/coupa/sync', role('steward', async (req, res, ctx) => {
+    const out = await runCoupaSync('manual');
+    await recordAudit({
+      action: 'coupa.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome: out.outcome === 'error' ? 'failure' : 'success',
+      detail: {
+        outcome: out.outcome,
+        objects: out.objects.map((o) => ({ object: o.object, status: o.status, rows: o.rowsUpserted })),
+      },
+      ip: req.ip,
+    });
+    res.json(out);
+  }));
+
+  // The Coupa tab's data: sourcing + invoice/payment aggregates WITH the rows
+  // behind them in one payload. Figures and their rows travel together until
+  // Coupa grains join the drill-token machinery (C4b).
+  r.get('/api/v1/coupa/summary', role('analyst', async (_req, res) => {
+    const [sourcing] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS events,
+              count(*) FILTER (WHERE state NOT IN ('complete','canceled','template'))::int AS open_events,
+              count(*) FILTER (WHERE state = 'complete')::int AS completed,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (end_time - submit_time))/86400.0)
+                FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days
+         FROM ops.coupa_sourcing_event WHERE state <> 'template'`,
+    );
+    const [responses] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS responses,
+              count(DISTINCT quote_request_id)::int AS events_with_bids,
+              round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event
+         FROM ops.coupa_supplier_response WHERE state = 'submitted'`,
+    );
+    const [invoice] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS invoices,
+              count(*) FILTER (WHERE paid)::int AS paid_count,
+              count(*) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft'))::int AS open_count,
+              sum(gross_total) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft') AND currency = 'IDR') AS open_idr,
+              count(DISTINCT currency)::int AS currencies
+         FROM ops.coupa_invoice`,
+    );
+    const [linkage] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS coupa_po_lines,
+              count(*) FILTER (WHERE sap_po_no IS NOT NULL)::int AS with_sap_po,
+              count(*) FILTER (WHERE need_by_date IS NOT NULL)::int AS with_need_by
+         FROM ops.coupa_po_line`,
+    );
+    const recentEvents = await query(
+      `SELECT id, event_type, state, description, submit_time, end_time, plant, purch_org, sap_pr_no,
+              supplier_count, line_count
+         FROM ops.coupa_sourcing_event WHERE state <> 'template'
+        ORDER BY updated_at DESC NULLS LAST LIMIT 25`,
+    );
+    const recentInvoices = await query(
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
+              i.gross_total, i.currency, i.supplier_name, i.payment_term,
+              (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+         FROM ops.coupa_invoice i
+        ORDER BY i.updated_at DESC NULLS LAST LIMIT 25`,
+    );
+    const wm = await query(
+      `SELECT object, last_updated_at, last_run_at, last_status FROM ops.coupa_watermark ORDER BY object`,
+    );
+    res.json({
+      configured: coupaConfigured(),
+      sourcing, responses, invoice, linkage, recentEvents, recentInvoices, watermarks: wm,
+    });
   }));
 
   // ── W7: custom KPIs and charts ───────────────────────────────────────────

@@ -12,10 +12,11 @@ import {
 import { MaterialsTab, VendorsTab } from './components/EntityViews';
 import { AdminTab } from './components/AdminTab';
 import { CustomTab } from './components/CustomTab';
+import { CoupaTab } from './components/CoupaTab';
 
 type Tab =
   | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
-  | 'vendors' | 'materials' | 'detail' | 'custom' | 'admin' | 'datacheck';
+  | 'vendors' | 'materials' | 'coupa' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'executive', label: 'Executive' },
@@ -27,6 +28,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'governance', label: 'Governance' },
   { id: 'vendors', label: 'Vendor 360' },
   { id: 'materials', label: 'Materials' },
+  { id: 'coupa', label: 'Coupa' },
   { id: 'detail', label: 'Detail Table' },
   { id: 'custom', label: 'Custom' },
   { id: 'admin', label: 'Admin' },
@@ -74,6 +76,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
   ],
   vendors: [],
   materials: [],
+  coupa: [],
   detail: [],
   custom: [],
   admin: [],
@@ -101,6 +104,7 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   governance: ['wbs_by_plant', 'unapproved_by_category'],
   vendors: [],
   materials: [],
+  coupa: [],
   detail: [],
   custom: [],
   admin: [],
@@ -225,6 +229,8 @@ export default function App() {
           <VendorsTab onDrill={onDrill} />
         ) : tab === 'materials' ? (
           <MaterialsTab onDrill={onDrill} />
+        ) : tab === 'coupa' ? (
+          <CoupaTab />
         ) : tab === 'custom' ? (
           <CustomTab onDrill={onDrill} />
         ) : tab === 'admin' ? (

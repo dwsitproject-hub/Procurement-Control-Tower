@@ -94,6 +94,10 @@ services:
         condition: service_healthy
     env_file:
       - ./deploy/env/local.env
+      # Gitignored secrets (Coupa credentials etc.) — optional so a fresh
+      # clone still composes; integrations stay off until it exists.
+      - path: ./deploy/env/secrets.local.env
+        required: false
     environment:
       DATABASE_URL: postgres://pct:pct_local_dev@postgres:5432/pct
       REDIS_URL: redis://redis:6379

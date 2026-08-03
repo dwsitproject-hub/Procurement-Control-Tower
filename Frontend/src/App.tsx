@@ -59,7 +59,8 @@ const TAB_KPIS: Record<Tab, string[]> = {
   // Ordered to mirror v1's page layouts.
   executive: [
     'open_po_commitment', 'grir_value', 'pr_pipeline_value', 'cycle_e2e',
-    'emergency_pct_value', 'demand_realism', 'expedite_effectiveness', 'wbs_compliance',
+    'emergency_pct_value', 'otd_vs_requested', 'demand_realism', 'expedite_effectiveness',
+    'wbs_compliance',
     'total_pr_items', 'delivered_gr', 'open_items',
     'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
   ],
@@ -136,6 +137,29 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   admin: [],
   datacheck: [],
 };
+
+// v1's Overview is three titled sections; ids not listed fall into 'Overview'
+// so user-added cards keep appearing. Slot membership survives layout edits.
+const EXEC_SECTIONS: { title: string; ids: string[] }[] = [
+  {
+    title: '📊 Executive Summary',
+    ids: [
+      'open_po_commitment', 'grir_value', 'pr_pipeline_value', 'cycle_e2e',
+      'emergency_pct_value', 'otd_vs_requested', 'demand_realism',
+      'expedite_effectiveness', 'wbs_compliance',
+    ],
+  },
+  {
+    title: '📋 Overview',
+    ids: [
+      'total_pr_items', 'delivered_gr', 'open_items',
+      'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
+    ],
+  },
+];
+
+// v1's status donut; every other chart stays a bar.
+const DONUT_CHARTS = new Set(['status_mix']);
 
 // Charts whose bucket key maps onto a global-filter dimension (Alt-click filters).
 const CHART_FILTER_DIM: Record<string, 'monthKey' | 'plant' | 'purchOrg'> = {
@@ -408,7 +432,91 @@ export default function App() {
                   ))}
               </div>
             )}
-            {(visibleKpis.length > 0 || shownCustomKpis.length > 0) && (
+            {(visibleKpis.length > 0 || shownCustomKpis.length > 0) && (tab === 'executive' ? (
+              <>
+                {EXEC_SECTIONS.map((sec) => {
+                  const inSec = visibleKpis.filter(({ slot }) => sec.ids.includes(slot));
+                  if (inSec.length === 0) return null;
+                  return (
+                    <div key={sec.title}>
+                      <h2 className="sec-h">
+                        {sec.title}
+                        {sec.title.includes('Overview') && dataset?.prDateRange && (
+                          <span className="sec-sub">
+                            PR Date: {dataset.prDateRange.from} → {dataset.prDateRange.to}
+                          </span>
+                        )}
+                      </h2>
+                      <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
+                        {inSec.map(({ slot, kpi: k }) => (
+                          <div key={slot} className={editing ? 'ly-slot' : undefined}>
+                            {editing && (
+                              <LayoutControls
+                                id={slot} kind="kpi" layout={layout} update={updateLayout}
+                                currentIds={kpiSlots}
+                                swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
+                              />
+                            )}
+                            <KpiCard kpi={k} onDrill={onDrill} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {/* anything user-added or not in a named section */}
+                {(() => {
+                  const secIds = new Set(EXEC_SECTIONS.flatMap((x) => x.ids));
+                  const rest = visibleKpis.filter(({ slot }) => !secIds.has(slot));
+                  if (rest.length === 0 && shownCustomKpis.length === 0) return null;
+                  return (
+                    <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
+                      {rest.map(({ slot, kpi: k }) => (
+                        <div key={slot} className={editing ? 'ly-slot' : undefined}>
+                          {editing && (
+                            <LayoutControls
+                              id={slot} kind="kpi" layout={layout} update={updateLayout}
+                              currentIds={kpiSlots}
+                              swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
+                            />
+                          )}
+                          <KpiCard kpi={k} onDrill={onDrill} />
+                        </div>
+                      ))}
+                      {shownCustomKpis.map((spec) => (
+                        <CustomKpiCard key={`cu-${spec.title}`} spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                      ))}
+                    </div>
+                  );
+                })()}
+                {/* v1's 🔥 Open Items — Action Required strip */}
+                <h2 className="sec-h">🔥 Open Items — Action Required <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
+                <div className="act-grid">
+                  {([
+                    ['pr_not_approved', 'Unapproved PRs', 'var(--crit)'],
+                    ['pr_no_po', 'No PO', '#c2410c'],
+                    ['po_not_delivered', 'No GR', '#1d4ed8'],
+                  ] as const).map(([id, label, color]) => {
+                    const k = kpis.find((x) => x.kpiId === id);
+                    if (!k || k.value === null) return null;
+                    return (
+                      <button
+                        key={id}
+                        className="act-card"
+                        style={{ ['--c' as string]: color }}
+                        onClick={() => k.drillToken && onDrill(k.drillToken, k.title)}
+                      >
+                        <span className="act-v">{formatNumber(Number(k.value))}</span>
+                        <span className="act-l">{label}</span>
+                        <span className="act-go" onClick={(e) => { e.stopPropagation(); setTab('openitems'); }}>
+                          View Details →
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
               <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
                 {visibleKpis.map(({ slot, kpi: k }) => (
                   <div key={slot} className={editing ? 'ly-slot' : undefined}>
@@ -438,7 +546,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
-            )}
+            ))}
             <div className="chart-grid">
               {chartSlots.map((c) => (
                 <div key={c} className={editing ? 'ly-slot' : undefined}>
@@ -449,6 +557,7 @@ export default function App() {
                   chartId={c}
                   onDrill={onDrill}
                   filterQuery={gfQuery}
+                  variant={DONUT_CHARTS.has(c) ? 'doughnut' : 'bar'}
                   onApplyFilter={
                     CHART_FILTER_DIM[c]
                       ? (bucketKey) => {

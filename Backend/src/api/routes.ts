@@ -283,8 +283,16 @@ export function buildRouter(): Router {
       [v.batchId],
     );
 
+    // v1's Overview header shows the requisition-date span of the data.
+    const prRange = await queryOne<{ min: string | null; max: string | null }>(
+      `SELECT min(requisition_date)::text AS min, max(requisition_date)::text AS max
+         FROM core.fact_pr_item WHERE dataset_version_id = $1`,
+      [v.id],
+    );
+
     res.json({
       datasetVersionId: v.id,
+      prDateRange: prRange && prRange.min ? { from: prRange.min, to: prRange.max } : null,
       asOfDate: v.asOfDate,
       asOfSource: v.asOfSource,
       publishedAt: v.publishedAt,

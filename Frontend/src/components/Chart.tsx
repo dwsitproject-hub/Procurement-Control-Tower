@@ -1,13 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  BarController, BarElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, Tooltip,
+  ArcElement, BarController, BarElement, CategoryScale, Chart as ChartJS,
+  DoughnutController, Legend, LinearScale, Tooltip,
 } from 'chart.js';
 import { api, type ChartResponse } from '../lib/api';
 import { formatKpi } from '../lib/format';
 
-ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
+ChartJS.register(
+  ArcElement, BarController, BarElement, CategoryScale, DoughnutController,
+  LinearScale, Tooltip, Legend,
+);
 
 const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948'];
+// v1's PR Status Distribution donut colours, keyed by status.
+const STATUS_COLORS: Record<string, string> = {
+  Delivered: '#4CAF50',
+  'Partially Delivered': '#0D9488',
+  'PO-No GR': '#1d4ed8',
+  'PR Approved-No PO': '#c2410c',
+  'HOLD PO': '#C0392B',
+  'Unapproved PR': '#be123c',
+  'PO-Not Approved': '#7C3AED',
+  'PR-Deleted': '#94a3b8',
+  'PO-Deleted': '#64748B',
+  'Fully Reversed': '#F59E0B',
+};
 
 /**
  * Chart panel.
@@ -21,6 +38,7 @@ export function ChartPanel({
   onDrill,
   filterQuery = '',
   onApplyFilter,
+  variant = 'bar',
 }: {
   chartId: string;
   onDrill: (token: string, label: string) => void;
@@ -32,6 +50,8 @@ export function ChartPanel({
    * bucket maps to a global-filter dimension.
    */
   onApplyFilter?: (bucketKey: string, bucketLabel: string) => void;
+  /** 'doughnut' renders v1's status-distribution donut; default is bars. */
+  variant?: 'bar' | 'doughnut';
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
@@ -59,6 +79,58 @@ export function ChartPanel({
 
     chart.current?.destroy();
     const labels = data.buckets.map((b) => b.label);
+
+    if (variant === 'doughnut') {
+      const series = data.series[0];
+      if (!series) return;
+      const values = data.buckets.map((b) => series.points.find((x) => x.bucketKey === b.key)?.value ?? 0);
+      // Chart.js's per-type generics fight a union of bar|doughnut through one
+      // ref; the doughnut config is checked structurally here and cast once.
+      const doughnutCfg = {
+        type: 'doughnut',
+        data: {
+          labels,
+          datasets: [{
+            data: values.map((v) => Number(v)),
+            backgroundColor: data.buckets.map((b, i) => STATUS_COLORS[b.label] ?? PALETTE[i % PALETTE.length]),
+            borderWidth: 1,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          cutout: '55%',
+          onClick: (_e: unknown, elements: { index: number }[]) => {
+            const el = elements[0];
+            if (!el) return;
+            const bucket = data.buckets[el.index];
+            const point = bucket ? series.points.find((x) => x.bucketKey === bucket.key) : undefined;
+            if (point?.drillToken && bucket) onDrill(point.drillToken, `${data.title} — ${bucket.label}`);
+          },
+          plugins: {
+            legend: { display: true, position: 'right', labels: { boxWidth: 12, font: { size: 10 } } },
+            tooltip: {
+              callbacks: {
+                label: (ctx: { dataIndex: number; parsed: number }) => {
+                  const bucket = data.buckets[ctx.dataIndex];
+                  const point = bucket ? series.points.find((x) => x.bucketKey === bucket.key) : undefined;
+                  return `${bucket?.label}: ${formatKpi(ctx.parsed, data.unit)}${point ? ` (${point.rowCount.toLocaleString()} rows)` : ''}`;
+                },
+              },
+            },
+          },
+        },
+      };
+      chart.current = new ChartJS(
+        canvas.current,
+        doughnutCfg as unknown as ConstructorParameters<typeof ChartJS>[1],
+      ) as unknown as ChartJS;
+      return () => {
+        chart.current?.destroy();
+        chart.current = null;
+      };
+    }
 
     chart.current = new ChartJS(canvas.current, {
       type: 'bar',
@@ -121,7 +193,7 @@ export function ChartPanel({
       chart.current?.destroy();
       chart.current = null;
     };
-  }, [data, onDrill]);
+  }, [data, onDrill, variant]);
 
   if (error) {
     return (

@@ -64,6 +64,7 @@ export interface DatasetCurrent {
   datasetVersionId: number | null;
   state?: string;
   message?: string;
+  prDateRange?: { from: string; to: string } | null;
   asOfDate: string;
   asOfSource: string;
   publishedAt: string;

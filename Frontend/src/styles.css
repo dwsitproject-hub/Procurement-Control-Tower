@@ -449,3 +449,26 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 
 /* content column right of the sidebar */
 .content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* ── v1 Overview sections + action-required strip ─────────────────── */
+
+.sec-h {
+  font-size: .8rem; font-weight: 800; color: var(--heading);
+  margin: .2rem 0 .55rem; display: flex; align-items: baseline; gap: .6rem;
+}
+.sec-sub { font-size: .64rem; font-weight: 600; color: var(--muted); }
+
+.act-grid { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 1rem; }
+.act-card {
+  --c: var(--crit);
+  display: flex; align-items: center; gap: .6rem; text-align: left;
+  background: var(--panel); border: 1.5px solid var(--c); border-radius: 9px;
+  padding: .6rem .8rem; box-shadow: var(--shadow); cursor: pointer;
+}
+.act-card:hover { box-shadow: 0 2px 9px rgba(0,0,0,.14); }
+.act-v { font-size: 1.35rem; font-weight: 900; color: var(--c); }
+.act-l { font-weight: 700; font-size: .78rem; color: var(--text); flex: 1; }
+.act-go {
+  background: var(--c); color: #fff; border-radius: 6px; padding: .25rem .6rem;
+  font-size: .68rem; font-weight: 700; white-space: nowrap;
+}

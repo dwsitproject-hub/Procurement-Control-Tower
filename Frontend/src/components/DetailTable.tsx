@@ -240,7 +240,7 @@ export function DetailTable({
       <div className="panel">
         {initialLabel && (
           <p className="note" style={{ marginTop: 0 }}>
-            Filters pre-applied from drill: <strong>{initialLabel}</strong> — adjust or clear them below.
+            Pre-applied: <strong>{initialLabel}</strong> — adjust or clear the filters below.
           </p>
         )}
         <div className="dt-toolbar">

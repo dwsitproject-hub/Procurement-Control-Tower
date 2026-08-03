@@ -439,6 +439,19 @@ export default function App() {
                 </div>
               ))}
             </div>
+
+            {/* v1's "Open Items Detail" table: the open rows themselves, with
+                the detail facets (category / priority / mat cat / plant) and a
+                live row count — server-side, same engine as the Detail tab. */}
+            {tab === 'openitems' && (
+              <div style={{ marginTop: '1rem' }}>
+                <DetailTable
+                  key="openitems-detail"
+                  initial={{ onlyOpen: 'true' }}
+                  initialLabel="Open items only"
+                />
+              </div>
+            )}
           </>
         )}
       </main>

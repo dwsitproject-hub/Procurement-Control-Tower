@@ -45,6 +45,12 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
         <span className="chip chip-urg" title="Urgent (urgency 2)">U {formatNumber(Number(kpi.detail['chip_urgent']))}</span>
         <span className="chip chip-std" title="Standard / planned">S {formatNumber(Number(kpi.detail['chip_standard']))}</span>
       </span>
+    ) : kpi.detail && kpi.detail['gr_complete'] !== undefined ? (
+      // v1's Delivered (GR) card: complete vs partial receipt split.
+      <span className="kpi-chips">
+        <span className="chip chip-ok" title="Fully received lines">✔ {formatNumber(Number(kpi.detail['gr_complete']))}</span>
+        <span className="chip chip-urg" title="Partially received lines">◐ {formatNumber(Number(kpi.detail['gr_partial']))}</span>
+      </span>
     ) : null;
 
   const body = (
@@ -111,6 +117,12 @@ function subtitle(kpi: Kpi): string {
   }
   if (kpi.kpiId === 'pending_po_approvals' && kpi.detail) {
     parts.push(`${kpi.detail['releaseExemptExcluded']} release-exempt excluded`);
+  }
+  if (kpi.kpiId === 'delivered_gr' && kpi.detail?.['qty_gr'] && kpi.detail?.['qty_pr']) {
+    // v1's raw quantity compare - sums across units of measure, indicative only.
+    const g = Number(kpi.detail['qty_gr']);
+    const q = Number(kpi.detail['qty_pr']);
+    parts.push(`Qty GR/PR ${formatNumber(g)} / ${formatNumber(q)} (${((g / q) * 100).toFixed(0)}%, raw units)`);
   }
   if (kpi.kpiId === 'pr_pipeline_value' && kpi.detail?.['idr_total']) {
     parts.push(`= IDR ${(Number(kpi.detail['idr_total']) / 1e12).toFixed(2)}T (source valuation)`);

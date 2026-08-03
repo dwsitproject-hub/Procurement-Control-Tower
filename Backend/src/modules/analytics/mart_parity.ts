@@ -104,13 +104,26 @@ export const PARITY_KPIS: KpiSpec[] = [
   {
     id: 'total_pr_items',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted`,
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted`,
     drill: { grain: 'pr_item', filters: { notDeleted: true } },
   },
   {
     id: 'delivered_gr',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${POL}
+    // v1's card sub-details: complete vs partial, and the raw GR/PR quantity
+    // compare. The quantity ratio raw-sums across units of measure exactly as
+    // v1 does — indicative only, and labelled so in the UI.
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS gr_complete,
+                 count(*) FILTER (WHERE status = 'Partially Delivered')::int AS gr_partial,
+                 sum(receipt_qty_net) AS qty_gr,
+                 (SELECT sum(qty_requested) FROM ${PRI}
+                   WHERE dataset_version_id = $1 AND NOT is_deleted) AS qty_pr
+            FROM ${POL}
            WHERE dataset_version_id = $1 AND receipt_date IS NOT NULL`,
     drill: { grain: 'po_line', filters: { hasReceipt: true } },
   },
@@ -127,6 +140,7 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'pr_not_approved',
     unit: 'count',
     sql: `SELECT count(*)::int AS value,
+                 avg(aging_days)::numeric(8,1) AS avg_wait,
                  count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
                  count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
                  count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${PRI}
@@ -137,6 +151,7 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'pr_no_po',
     unit: 'count',
     sql: `SELECT count(*)::int AS value,
+                 avg(aging_days)::numeric(8,1) AS avg_wait,
                  count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
                  count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
                  count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${PRI}
@@ -165,6 +180,7 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'po_not_delivered',
     unit: 'count',
     sql: `SELECT count(*)::int AS value,
+                 avg(po_approval_days)::numeric(8,1) AS avg_po_appr,
                  count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
                  count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
                  count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${POL}
@@ -601,14 +617,30 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
            GROUP BY 1,2 ORDER BY 1`,
   },
+  // v1's 'Avg Aging by Priority (days)': grouped bars, PR Approval + E2E.
   {
-    chartId: 'aging_by_priority', seriesKey: 'days', seriesLabel: 'Avg aging (days)', unit: 'days',
+    chartId: 'aging_by_priority', seriesKey: 'pr_approval', seriesLabel: 'PR Approval', unit: 'days',
     sql: `SELECT COALESCE(priority_label,'(unlabelled)') AS bucket_key,
                  COALESCE(priority_label,'(unlabelled)') AS bucket_label,
-                 avg(aging_days)::numeric AS value, count(*)::int AS row_count,
+                 avg(release_final_date - requisition_date)::numeric(8,1) AS value,
+                 count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('priorityLabel', min(priority_label),'open',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND status IN ${OPEN}
+                   jsonb_build_object('priorityLabel', min(priority_label), 'released', true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND release_final_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'aging_by_priority', seriesKey: 'e2e', seriesLabel: 'E2E', unit: 'days',
+    sql: `SELECT COALESCE(pol.priority_label,'(unlabelled)') AS bucket_key,
+                 COALESCE(pol.priority_label,'(unlabelled)') AS bucket_label,
+                 avg(pol.receipt_date - pri.requisition_date)::numeric(8,1) AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('priorityLabel', min(pol.priority_label), 'hasReceipt', true, 'hasPr', true)) AS drill
+            FROM ${POL} pol JOIN ${PRI} pri
+              ON pri.dataset_version_id = pol.dataset_version_id
+             AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
+           WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
   },
   {

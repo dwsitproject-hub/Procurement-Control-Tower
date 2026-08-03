@@ -91,7 +91,7 @@ export const CHART_META: ChartMeta[] = [
   },
   // v1 parity charts — Docs/V1_V2_Parity_Matrix.md section 3
   { chartId: 'items_by_priority',        title: 'Items by priority category',       tab: 'executive', grain: 'pr_item', unit: 'count' },
-  { chartId: 'aging_by_priority',        title: 'Avg aging by priority (open)',     tab: 'executive', grain: 'pr_item', unit: 'days' },
+  { chartId: 'aging_by_priority',        title: 'Avg aging by priority (days)',     tab: 'executive', grain: 'pr_item', unit: 'days' },
   { chartId: 'open_by_priority',         title: 'Open items by priority',           tab: 'openitems', grain: 'pr_item', unit: 'count' },
   { chartId: 'unapproved_by_category',   title: 'Unapproved by material category',  tab: 'openitems', grain: 'pr_item', unit: 'count' },
   { chartId: 'unreleased_aging_buckets', title: 'Unreleased PR aging buckets',      tab: 'openitems', grain: 'pr_item', unit: 'count' },

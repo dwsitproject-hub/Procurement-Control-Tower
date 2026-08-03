@@ -489,3 +489,6 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
   background: var(--c); color: #fff; border-radius: 6px; padding: .25rem .6rem;
   font-size: .68rem; font-weight: 700; white-space: nowrap;
 }
+
+.chip-ok { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+.act-wait { font-size: .68rem; font-weight: 600; color: var(--muted); white-space: nowrap; }

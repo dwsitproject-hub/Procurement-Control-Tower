@@ -12,6 +12,14 @@ ChartJS.register(
 );
 
 const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948'];
+// v1 colours each priority bucket (Emergency red → Planned green).
+const PRIORITY_COLORS: Record<string, string> = {
+  '01-Emergency': '#C0392B',
+  '02-Urgent': '#ED7D31',
+  '03-Standard': '#2E75B6',
+  '04-Planned': '#4CAF50',
+  '(unlabelled)': '#94a3b8',
+};
 // v1's PR Status Distribution donut colours, keyed by status.
 const STATUS_COLORS: Record<string, string> = {
   Delivered: '#4CAF50',
@@ -142,7 +150,12 @@ export function ChartPanel({
             const p = s.points.find((x) => x.bucketKey === b.key);
             return p?.value ?? null;
           }),
-          backgroundColor: PALETTE[i % PALETTE.length],
+          // Single-series priority charts colour each bucket like v1
+          // (Emergency red ... Planned green); everything else keeps one hue.
+          backgroundColor:
+            data.series.length === 1 && data.buckets.some((b) => PRIORITY_COLORS[b.label])
+              ? data.buckets.map((b) => PRIORITY_COLORS[b.label] ?? PALETTE[0]!)
+              : PALETTE[i % PALETTE.length],
           borderRadius: 3,
         })),
       },

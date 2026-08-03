@@ -493,12 +493,13 @@ export default function App() {
                 <h2 className="sec-h">🔥 Open Items — Action Required <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
                 <div className="act-grid">
                   {([
-                    ['pr_not_approved', 'Unapproved PRs', 'var(--crit)'],
-                    ['pr_no_po', 'No PO', '#c2410c'],
-                    ['po_not_delivered', 'No GR', '#1d4ed8'],
-                  ] as const).map(([id, label, color]) => {
+                    ['pr_not_approved', 'Unapproved PRs', 'var(--crit)', 'avg_wait', 'Avg wait'],
+                    ['pr_no_po', 'No PO', '#c2410c', 'avg_wait', 'Avg sourcing wait'],
+                    ['po_not_delivered', 'No GR', '#1d4ed8', 'avg_po_appr', 'Avg PO approval'],
+                  ] as const).map(([id, label, color, waitKey, waitLabel]) => {
                     const k = kpis.find((x) => x.kpiId === id);
                     if (!k || k.value === null) return null;
+                    const wait = k.detail?.[waitKey];
                     return (
                       <button
                         key={id}
@@ -508,6 +509,9 @@ export default function App() {
                       >
                         <span className="act-v">{formatNumber(Number(k.value))}</span>
                         <span className="act-l">{label}</span>
+                        {wait !== null && wait !== undefined && (
+                          <span className="act-wait">{waitLabel}: {formatNumber(Number(wait))} days</span>
+                        )}
                         <span className="act-go" onClick={(e) => { e.stopPropagation(); setTab('openitems'); }}>
                           View Details →
                         </span>

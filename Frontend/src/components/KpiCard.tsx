@@ -142,12 +142,14 @@ function subtitle(kpi: Kpi): string {
     parts.push('distinct ' + String(kpi.detail['entityUnit']) + ' — drill opens the lines');
   }
 
-  if (kpi.unit === 'days' && kpi.detail && kpi.detail['avg'] !== undefined) {
-    // Median is the headline; v1 showed the average, so both stay visible and
-    // the two remain reconcilable against v1.
+  if (kpi.unit === 'days' && kpi.detail) {
+    // Whichever basis is the headline, the other stays in the subtitle so the
+    // two remain reconcilable (avg headline on the stage cards, median on E2E).
     const avg = kpi.detail['avg'];
+    const med = kpi.detail['median'];
     const p90 = kpi.detail['p90'];
-    if (avg !== null) parts.push('avg ' + formatNumber(Number(avg), 1) + 'd');
+    if (avg !== null && avg !== undefined) parts.push('avg ' + formatNumber(Number(avg), 1) + 'd');
+    if (med !== null && med !== undefined) parts.push('median ' + formatNumber(Number(med)) + 'd');
     if (p90 !== null && p90 !== undefined) parts.push('p90 ' + formatNumber(Number(p90)) + 'd');
   }
 

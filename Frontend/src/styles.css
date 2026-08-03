@@ -479,7 +479,9 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .act-card {
   --c: var(--crit);
   display: flex; align-items: center; gap: .6rem; text-align: left;
-  background: var(--panel); border: 1.5px solid var(--c); border-radius: 9px;
+  /* v1 tints the strip with the card's colour */
+  background: color-mix(in srgb, var(--c) 7%, var(--panel));
+  border: 1.5px solid color-mix(in srgb, var(--c) 55%, transparent); border-radius: 9px;
   padding: .6rem .8rem; box-shadow: var(--shadow); cursor: pointer;
 }
 .act-card:hover { box-shadow: 0 2px 9px rgba(0,0,0,.14); }
@@ -491,4 +493,32 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 }
 
 .chip-ok { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
-.act-wait { font-size: .68rem; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.act-wait {
+  font-size: .66rem; font-weight: 700; color: var(--c); white-space: nowrap;
+  background: color-mix(in srgb, var(--c) 12%, var(--panel));
+  border-radius: 12px; padding: .18rem .55rem;
+}
+
+
+/* v1's wide Overview cards */
+
+.ovc-grid { display: grid; gap: .85rem; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); margin-bottom: .85rem; }
+.ovc {
+  display: flex; justify-content: space-between; gap: 1rem; text-align: left; width: 100%;
+  background: var(--panel); border: 0; border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: .8rem .95rem; position: relative; overflow: hidden; min-height: 118px; cursor: pointer;
+}
+.ovc::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: var(--c, var(--navy)); }
+.ovc[data-k="total_pr_items"] { --c: var(--navy); }
+.ovc[data-k="delivered_gr"] { --c: var(--teal); }
+.ovc[data-k="open_items"] { --c: var(--orange); }
+.ovc:hover { box-shadow: 0 2px 9px rgba(0, 0, 0, .13); }
+.ovc .v { font-size: 1.6rem; font-weight: 900; color: var(--c, var(--navy)); line-height: 1.15; font-variant-numeric: tabular-nums; }
+.ovc .l { font-weight: 650; font-size: .7rem; color: var(--muted); margin-top: .1rem; }
+.ovc .s { font-size: .62rem; color: var(--muted); opacity: .85; }
+.ovc-rows { display: flex; flex-direction: column; justify-content: center; gap: .18rem; min-width: 0; }
+.ovc-row { display: flex; align-items: center; gap: .35rem; font-size: .68rem; white-space: nowrap; }
+.ovc-dot { width: .55rem; height: .55rem; border-radius: 50%; flex: none; }
+.ovc-lbl { color: var(--muted); font-weight: 600; }
+.ovc-val { font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+.ovc-strong { font-size: .66rem; }

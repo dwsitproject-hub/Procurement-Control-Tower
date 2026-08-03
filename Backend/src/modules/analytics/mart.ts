@@ -316,7 +316,8 @@ export async function buildMart(
       [versionId],
     );
     const vals = rows.map((x) => x.d!).filter((d) => d !== null && d >= 0);
-    kpis.push(cycleKpi(kpiId, vals, minSample, disabledKpis));
+    // Average headline (decision 3 Aug 2026, v1 parity); median in the subtitle.
+    kpis.push(cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg'));
   }
 
   {
@@ -442,7 +443,13 @@ function nullKpi(kpiId: KpiId, unit: KpiRow['unit'], reason: string, sample: num
   };
 }
 
-function cycleKpi(kpiId: KpiId, vals: number[], minSample: number, disabled: ReadonlySet<string>): KpiRow {
+function cycleKpi(
+  kpiId: KpiId,
+  vals: number[],
+  minSample: number,
+  disabled: ReadonlySet<string>,
+  basis: 'median' | 'avg' = 'median',
+): KpiRow {
   if (disabled.has(kpiId)) {
     return {
       kpiId, status: 'disabled', value: null, numerator: null, denominator: null,
@@ -453,15 +460,19 @@ function cycleKpi(kpiId: KpiId, vals: number[], minSample: number, disabled: Rea
   if (vals.length < minSample) {
     return nullKpi(kpiId, 'days', `Fewer than ${minSample} observations.`, vals.length);
   }
-  // Median is the headline: PR-to-GR ranges 0-758 days on this data, so a handful
-  // of stale requisitions drags the average badly. v1 showed the average, so it is
-  // kept in the subtitle and the two remain reconcilable.
+  // Both bases always travel together so the two stay reconcilable: whichever
+  // is the headline, the other sits in the subtitle. The four stage cards use
+  // the average (v1 parity, user decision 3 Aug 2026); E2E keeps the median
+  // because 0-758-day outliers drag its average badly.
+  const avg = mean(vals) === null ? null : Math.round(mean(vals)! * 10) / 10;
+  const med = median(vals);
   return {
-    kpiId, status: 'ok', value: median(vals), numerator: null, denominator: null,
+    kpiId, status: 'ok', value: basis === 'avg' ? avg : med,
+    numerator: null, denominator: null,
     sampleSize: vals.length, unit: 'days', currencyBasis: null, severity: 'neutral',
     statusReason: null,
     detail: {
-      avg: mean(vals) === null ? null : Math.round(mean(vals)! * 10) / 10,
+      ...(basis === 'avg' ? { median: med } : { avg }),
       p90: percentile(vals, 0.9),
       max: vals.length ? Math.max(...vals) : null,
     },

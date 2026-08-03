@@ -14,6 +14,7 @@ import { AdminTab } from './components/AdminTab';
 import { CustomTab } from './components/CustomTab';
 import { CoupaTab } from './components/CoupaTab';
 import { CustomKpiCard, CustomChartPanel } from './components/CustomTab';
+import { OverviewCard } from './components/OverviewCards';
 import {
   LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
 } from './components/LayoutEdit';
@@ -437,26 +438,42 @@ export default function App() {
                 {EXEC_SECTIONS.map((sec) => {
                   const inSec = visibleKpis.filter(({ slot }) => sec.ids.includes(slot));
                   if (inSec.length === 0) return null;
+                  // v1's Overview row: the three wide cards first, cycles below.
+                  const isOverviewSec = sec.title.includes('Overview');
+                  const wideIds = ['total_pr_items', 'delivered_gr', 'open_items'];
+                  const wide = isOverviewSec ? inSec.filter(({ slot }) => wideIds.includes(slot)) : [];
+                  const rest = isOverviewSec ? inSec.filter(({ slot }) => !wideIds.includes(slot)) : inSec;
+                  const controls = (slot: string) => editing && (
+                    <LayoutControls
+                      id={slot} kind="kpi" layout={layout} update={updateLayout}
+                      currentIds={kpiSlots}
+                      swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
+                    />
+                  );
                   return (
                     <div key={sec.title}>
                       <h2 className="sec-h">
                         {sec.title}
-                        {sec.title.includes('Overview') && dataset?.prDateRange && (
+                        {isOverviewSec && dataset?.prDateRange && (
                           <span className="sec-sub">
                             PR Date: {dataset.prDateRange.from} → {dataset.prDateRange.to}
                           </span>
                         )}
                       </h2>
+                      {wide.length > 0 && (
+                        <div className="ovc-grid">
+                          {wide.map(({ slot, kpi: k }) => (
+                            <div key={slot} className={editing ? 'ly-slot' : undefined}>
+                              {controls(slot)}
+                              <OverviewCard kpi={k} onDrill={onDrill} />
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
-                        {inSec.map(({ slot, kpi: k }) => (
+                        {rest.map(({ slot, kpi: k }) => (
                           <div key={slot} className={editing ? 'ly-slot' : undefined}>
-                            {editing && (
-                              <LayoutControls
-                                id={slot} kind="kpi" layout={layout} update={updateLayout}
-                                currentIds={kpiSlots}
-                                swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
-                              />
-                            )}
+                            {controls(slot)}
                             <KpiCard kpi={k} onDrill={onDrill} />
                           </div>
                         ))}

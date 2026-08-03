@@ -130,6 +130,39 @@ export function ChartPanel({
           },
         },
       };
+      // v1 prints each segment's count on the arc (readable slices only) and
+      // in the legend, so numbers are visible without hovering.
+      const total = values.reduce((a, v) => a + Number(v), 0);
+      const segmentLabels = {
+        id: 'segmentLabels',
+        afterDatasetsDraw(c: { ctx: CanvasRenderingContext2D; getDatasetMeta: (i: number) => { data: { tooltipPosition: () => { x: number; y: number } }[] } }) {
+          const ctx = c.ctx;
+          const meta = c.getDatasetMeta(0);
+          ctx.save();
+          ctx.font = '700 11px "Segoe UI", Arial, sans-serif';
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          values.forEach((v, i) => {
+            if (total <= 0 || Number(v) / total < 0.04) return; // unreadable slivers
+            const el = meta.data[i];
+            if (!el) return;
+            const pos = el.tooltipPosition();
+            ctx.fillText(Number(v).toLocaleString('en-GB'), pos.x, pos.y);
+          });
+          ctx.restore();
+        },
+      };
+      (doughnutCfg as unknown as { plugins: unknown[] }).plugins = [segmentLabels];
+      (doughnutCfg.options.plugins.legend.labels as unknown as Record<string, unknown>)['generateLabels'] = (
+        c: { data: { labels: string[]; datasets: { data: number[]; backgroundColor: string[] }[] } },
+      ) =>
+        c.data.labels.map((l, i) => ({
+          text: `${l} — ${Number(c.data.datasets[0]!.data[i]).toLocaleString('en-GB')}`,
+          fillStyle: c.data.datasets[0]!.backgroundColor[i],
+          strokeStyle: c.data.datasets[0]!.backgroundColor[i],
+          index: i,
+        }));
       chart.current = new ChartJS(
         canvas.current,
         doughnutCfg as unknown as ConstructorParameters<typeof ChartJS>[1],

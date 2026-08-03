@@ -17,6 +17,14 @@ export function formatMoney(v: number | null, ccy?: string): string {
   if (v === null || v === undefined || Number.isNaN(v)) return DASH;
   const prefix = ccy ? `${ccy} ` : '';
   const abs = Math.abs(v);
+  // Compact tiers keep card values on ONE line — "IDR 1,550,720.33M" wrapped
+  // and broke the card grid. v1 uses the same B-IDR notation.
+  if (abs >= 1_000_000_000_000) {
+    return `${prefix}${(v / 1_000_000_000_000).toLocaleString('en-GB', { maximumFractionDigits: 2 })}T`;
+  }
+  if (abs >= 1_000_000_000) {
+    return `${prefix}${(v / 1_000_000_000).toLocaleString('en-GB', { maximumFractionDigits: 2 })}B`;
+  }
   if (abs >= 1_000_000) {
     return `${prefix}${(v / 1_000_000).toLocaleString('en-GB', { maximumFractionDigits: 2 })}M`;
   }

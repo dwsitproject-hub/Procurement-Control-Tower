@@ -61,7 +61,12 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
   // focusable control that announces nothing.
   if (!kpi.drillToken) {
     return (
-      <div className="kpi" data-sev={kpi.severity ?? 'neutral'} style={{ ['--c' as string]: accent }}>
+      <div
+        className="kpi"
+        data-sev={kpi.severity ?? 'neutral'}
+        style={{ ['--c' as string]: accent }}
+        title={sub}
+      >
         {body}
       </div>
     );
@@ -74,7 +79,8 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
       data-sev={kpi.severity ?? 'neutral'}
       style={{ ['--c' as string]: accent }}
       onClick={() => onDrill(token, kpi.title)}
-      title="Click to see the rows behind this figure"
+      title={`${sub ? `${sub}
+` : ''}Click to see the rows behind this figure`}
     >
       {body}
     </button>

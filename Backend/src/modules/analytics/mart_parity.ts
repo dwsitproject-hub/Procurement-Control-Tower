@@ -72,10 +72,17 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true, grirOpen: true } },
   },
   {
+    // Headline in strict USD to sit beside the other exec money cards; the
+    // source-of-truth IDR total rides in the detail (PR valuations are IDR).
+    // Strict rule: any unrated row nulls the USD figure rather than
+    // understating it.
     id: 'pr_pipeline_value',
-    unit: 'idr',
-    currencyBasis: 'idr_based',
-    sql: `SELECT sum(total_value_idr) AS value, count(*)::int AS sample
+    unit: 'usd',
+    currencyBasis: 'usd_strict',
+    sql: `SELECT CASE WHEN count(*) FILTER (WHERE total_value_idr IS NOT NULL AND total_value_usd IS NULL) > 0
+                      THEN NULL ELSE sum(total_value_usd) END AS value,
+                 sum(total_value_idr) AS idr_total,
+                 count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1
              AND NOT is_deleted AND po_line_count = 0`,
     drill: { grain: 'pr_item', filters: { notDeleted: true, prNoPo: true } },

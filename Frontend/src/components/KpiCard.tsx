@@ -112,6 +112,9 @@ function subtitle(kpi: Kpi): string {
   if (kpi.kpiId === 'pending_po_approvals' && kpi.detail) {
     parts.push(`${kpi.detail['releaseExemptExcluded']} release-exempt excluded`);
   }
+  if (kpi.kpiId === 'pr_pipeline_value' && kpi.detail?.['idr_total']) {
+    parts.push(`= IDR ${(Number(kpi.detail['idr_total']) / 1e12).toFixed(2)}T (source valuation)`);
+  }
   if (kpi.kpiId === 'top_vendor_share_pct' && kpi.detail?.['top_vendor']) {
     parts.push(String(kpi.detail['top_vendor']));
   }

@@ -298,6 +298,7 @@ const FILTERS: Record<string, Compiler> = {
                 AND _pr.pr_no = ${a}.pr_no AND _pr.pr_item = ${a}.pr_item
                 AND ${a}.document_date < _pr.requisition_date)`,
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
+  requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
   foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
   // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause
   // EXACTLY — a converted PR item's own status never reaches 'Delivered', so

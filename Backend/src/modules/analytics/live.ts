@@ -46,6 +46,7 @@ const JOINED_ALIAS: Record<string, { kind: FactKind; alias: string }> = {
   e2e_by_category: { kind: 'po_line', alias: 'pol.' },
   single_source_spend_idr: { kind: 'po_line', alias: 'p.' },
   urgent_po_before_pr: { kind: 'po_line', alias: 'pol.' },
+  pr_approval_lead_time: { kind: 'pr_item', alias: 'i.' },
 };
 
 function targetOf(id: string, grain: string | undefined): { kind: FactKind; alias: string } {

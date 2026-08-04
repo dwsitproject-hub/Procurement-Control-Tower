@@ -146,7 +146,7 @@ export const KPI_IDS = [
   'avg_po_value_idr','avg_value_per_po_usd','foreign_ccy_po_share','single_source_spend_idr',
   'top_vendor_share_pct','top5_vendor_share_pct','avg_suppliers_per_material',
   'worst_approver_gap','auto_release_share_pct',
-  'urgent_po_before_pr','open_pr_with_wbs',
+  'urgent_po_before_pr','open_pr_with_wbs','median_pr_approval','pr_approval_lead_time',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -221,6 +221,8 @@ export const KPI_TITLES: Record<KpiId, string> = {
   auto_release_share_pct: 'Auto-Release Share %',
   urgent_po_before_pr: 'Urgent PO (PO before PR)',
   open_pr_with_wbs: 'Open PR with WBS',
+  median_pr_approval: 'Median PR Approval',
+  pr_approval_lead_time: 'PR Approval Lead Time (median)',
 };
 
 export const KpiValueSchema = z.object({

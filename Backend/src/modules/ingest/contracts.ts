@@ -122,8 +122,10 @@ const PREL: TemplateContract = {
     col('Login Name', 'str', 'REQ', 'loginName', 'personal data — never displayed below Auditor'),
     col('Approve Date', 'date', 'OPT', 'approveDate', 'blank = not yet approved at this level'),
     col('Approve Time', 'time', 'OPT', 'approveTime'),
-    col('Approved Lead Time - PR Created', 'int', 'IGN', undefined, 'SAP-precomputed; recomputed independently'),
-    col('GAP Approval Lead Time', 'int', 'IGN'),
+    col('Approved Lead Time - PR Created', 'int', 'OPT', 'apprLeadDays',
+      'SAP-precomputed PR created -> step approved; v1 pr-alt card (008)'),
+    col('GAP Approval Lead Time', 'int', 'OPT', 'gapLeadDays',
+      'SAP-precomputed per-step gap; v1 approval-bottlenecks table (008)'),
   ],
   aliases: [
     { field: 'prNo', aliasNorm: 'purchaserequisition' },

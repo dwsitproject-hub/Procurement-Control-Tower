@@ -223,6 +223,8 @@ export async function runTransform(
     plant: s(r.payload.plant),
     purchOrg: s(r.payload.purchOrg),
     docType: s(r.payload.docType),
+    apprLeadDays: i(r.payload.apprLeadDays),
+    gapLeadDays: i(r.payload.gapLeadDays),
   }));
   const filled = fillReleaseContinuations(releaseRaw);
 
@@ -737,6 +739,8 @@ export async function runTransform(
       (r.plant ?? '').slice(0, 2) || null,
       r.purchOrg,
       r.rowNumber,
+      r.apprLeadDays ?? null,
+      r.gapLeadDays ?? null,
     ]);
   }
 
@@ -1023,7 +1027,7 @@ const GR_COLS = [
 const PREL_COLS = [
   'dataset_version_id', 'pr_no', 'pr_item', 'rel_seq', 'rel_code', 'pic_release', 'login_name',
   'status', 'approve_date', 'approve_time', 'was_continuation', 'plant', 'company_code',
-  'purch_org', 'source_row',
+  'purch_org', 'source_row', 'lead_days', 'gap_days',
 ] as const;
 
 const POR_COLS = [

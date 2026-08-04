@@ -655,6 +655,34 @@ export const PARITY_KPIS: KpiSpec[] = [
                                  AND _pl2.status IN ('Delivered','Partially Delivered'))))`,
     drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'compliant', openBeforeGr: true } },
   },
+  {
+    // v1's pr-md card: median created -> fully-approved days, over the same
+    // population as cycle_pr_approval (its subtitle median, promoted to a card).
+    id: 'median_pr_approval',
+    unit: 'days',
+    sql: `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY (release_final_date - requisition_date)) AS value,
+                 count(*)::int AS sample
+            FROM ${PRI} WHERE dataset_version_id = $1
+             AND release_final_date IS NOT NULL AND requisition_date IS NOT NULL
+             AND (release_final_date - requisition_date) >= 0`,
+    drill: { grain: 'pr_item', filters: { released: true } },
+  },
+  {
+    // v1's pr-alt card: median of SAP's own 'Approved Lead Time - PR Created'
+    // over approved release steps with a positive lead, scoped like v1 to
+    // steps whose PR exists in the item feed. Kept alongside cycle_pr_approval
+    // (date-derived) rather than replacing it - two bases, both labelled.
+    id: 'pr_approval_lead_time',
+    unit: 'days',
+    sql: `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY r.lead_days) AS value,
+                 count(*)::int AS sample
+            FROM core.fact_pr_release r
+            JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
+                         AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
+           WHERE r.dataset_version_id = $1
+             AND r.approve_date IS NOT NULL AND r.lead_days > 0`,
+    drill: null,
+  },
 ];
 
 // ───────────────────────────────────────────────────────────────── chart specs

@@ -10,6 +10,7 @@ import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
 import { MaterialsTab, VendorsTab } from './components/EntityViews';
+import { PrTables } from './components/PrTables';
 import { AdminTab } from './components/AdminTab';
 import { CustomTab } from './components/CustomTab';
 import { CoupaTab } from './components/CoupaTab';
@@ -73,9 +74,9 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'commitment_over_60d',
   ],
   pr: [
-    'cycle_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
+    'cycle_pr_approval', 'median_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
     'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
-    'emergency_urgent_share', 'at_risk_demand', 'pr_cancellation_rate', 'pr_deleted',
+    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand', 'pr_cancellation_rate', 'pr_deleted',
     'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
     'valuation_coverage_pct', 'unique_requisitioners', 'avg_pr_line_value_idr',
   ],
@@ -649,6 +650,9 @@ export default function App() {
                 </div>
               ))}
             </div>
+
+            {/* v1's PR-page tables: approval bottlenecks + requisitioner demand. */}
+            {tab === 'pr' && <PrTables onDrill={onDrill} />}
 
             {/* v1's "Open Items Detail" table: the open rows themselves, with
                 the detail facets (category / priority / mat cat / plant) and a

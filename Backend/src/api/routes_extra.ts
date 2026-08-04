@@ -12,8 +12,8 @@ import { recordAudit } from '../modules/audit/audit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
 import { sessionFingerprint } from '../modules/auth/session.js';
 import {
-  materialDetail, materialGroupPage, vendorDetail, vendorList,
-  vendorPivot, vendorPivotMaterials, vendorOtdChart,
+  approverBottlenecks, materialDetail, materialGroupPage, requisitionerDemand,
+  vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
 } from '../modules/analytics/entity.js';
 import {
   exclusionOptions, fxTable, loadExclusions, mappingStatus, saveExclusions, saveMapping,
@@ -108,6 +108,40 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         ),
       },
     });
+  }));
+
+  // ── v1's PR Analysis tables: approval bottlenecks + requisitioner demand ──
+  r.get('/api/v1/entity/approver-bottlenecks', role('viewer', async (_req, res, ctx) => {
+    requireScope(ctx);
+    const v = await version();
+    const out = await approverBottlenecks(v.id, ctx.scope);
+    const fp = sessionFingerprint(ctx.sid);
+    // v1's row click: the PIC's pending release steps.
+    const rows = out.rows.map((b) => ({
+      ...b,
+      drillPending: issueDrillToken(
+        { grain: 'pr_release', filters: { picRelease: b.pic, pending: true },
+          label: `Pending PR approval · ${b.pic}` } as DrillPredicate,
+        v.id, ctx.scope, fp,
+      ),
+    }));
+    res.json({ datasetVersionId: v.id, rows });
+  }));
+
+  r.get('/api/v1/entity/requisitioner-demand', role('viewer', async (_req, res, ctx) => {
+    requireScope(ctx);
+    const v = await version();
+    const out = await requisitionerDemand(v.id, ctx.scope);
+    const fp = sessionFingerprint(ctx.sid);
+    const rows = out.rows.map((q) => ({
+      ...q,
+      drill: issueDrillToken(
+        { grain: 'pr_item', filters: { requisitioner: q.requisitioner },
+          label: `Requisitioner: ${q.requisitioner}` } as DrillPredicate,
+        v.id, ctx.scope, fp,
+      ),
+    }));
+    res.json({ datasetVersionId: v.id, rows });
   }));
 
   r.get('/api/v1/entity/material-groups', role('analyst', async (req, res, ctx) => {

@@ -584,3 +584,6 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 
 .dt-pager { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; margin-top: .75rem; }
 .dt-pages { display: inline-flex; align-items: center; gap: .25rem; flex-wrap: wrap; }
+
+/* v1's PR-page table panels. */
+.pr-tbl-h { margin: 0 0 .5rem; font-size: .78rem; color: var(--heading); }

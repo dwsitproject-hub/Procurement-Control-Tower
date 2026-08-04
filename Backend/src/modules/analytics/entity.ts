@@ -701,3 +701,83 @@ function decorate(rows: Record<string, unknown>[]): Record<string, unknown>[] {
     return { ...r, flags };
   });
 }
+
+// ─────────────────────────────── v1's PR-page tables (pr-bneck / pr-reqr)
+
+export type BottleneckRow = {
+  pic: string;
+  codes: string;
+  avgGap: number;
+  medGap: number;
+  steps: number;
+  pending: number;
+};
+
+/**
+ * v1's "Approval Bottlenecks" table: per release PIC, the average and median
+ * SAP GAP lead over positive-gap steps (>= 5 of them, like v1), total steps
+ * and pending count - worst average first, top 10. Only steps whose PR exists
+ * in the item feed count, exactly v1's scoping.
+ */
+export async function approverBottlenecks(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+): Promise<{ rows: BottleneckRow[] }> {
+  const { where, params } = scoped(versionId, scope, 'r');
+  const rows = await query<BottleneckRow>(
+    `SELECT r.pic_release AS pic,
+            string_agg(DISTINCT r.rel_code, ', ') AS codes,
+            round(avg(r.gap_days) FILTER (WHERE r.gap_days > 0)::numeric, 1)::float AS "avgGap",
+            round((percentile_cont(0.5) WITHIN GROUP (ORDER BY r.gap_days) FILTER (WHERE r.gap_days > 0))::numeric, 1)::float AS "medGap",
+            count(*)::int AS steps,
+            count(*) FILTER (WHERE r.approve_date IS NULL)::int AS pending
+       FROM core.fact_pr_release r
+      WHERE ${where} AND r.pic_release IS NOT NULL AND r.pic_release <> ''
+        AND EXISTS (SELECT 1 FROM core.fact_pr_item i
+                     WHERE i.dataset_version_id = r.dataset_version_id
+                       AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item)
+      GROUP BY 1
+     HAVING count(*) FILTER (WHERE r.gap_days > 0) >= 5
+      ORDER BY avg(r.gap_days) FILTER (WHERE r.gap_days > 0) DESC
+      LIMIT 10`,
+    params,
+  );
+  return { rows };
+}
+
+export type RequisitionerRow = {
+  requisitioner: string;
+  items: number;
+  valueIdr: number | null;
+  /** Strict FX: null when any valued line is unrated. */
+  valueUsd: number | null;
+  emg: number;
+  urg: number;
+};
+
+/** v1's "Demand by Requisitioner" table: top 10 by PR valuation. */
+export async function requisitionerDemand(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+): Promise<{ rows: RequisitionerRow[] }> {
+  const { where, params } = scoped(versionId, scope, 'i');
+  const raw = await query<RequisitionerRow & { unrated: number }>(
+    `SELECT i.requisitioner,
+            count(*)::int AS items,
+            sum(i.total_value_idr)::float AS "valueIdr",
+            sum(i.total_value_usd)::float AS "valueUsd",
+            count(*) FILTER (WHERE i.total_value_idr IS NOT NULL AND i.total_value_idr <> 0
+                               AND i.total_value_usd IS NULL)::int AS unrated,
+            count(*) FILTER (WHERE i.urgency <= 1)::int AS emg,
+            count(*) FILTER (WHERE i.urgency = 2)::int AS urg
+       FROM core.fact_pr_item i
+      WHERE ${where} AND i.requisitioner IS NOT NULL AND i.requisitioner <> ''
+      GROUP BY 1
+      ORDER BY sum(i.total_value_idr) DESC NULLS LAST
+      LIMIT 10`,
+    params,
+  );
+  return {
+    rows: raw.map(({ unrated, ...r }) => ({ ...r, valueUsd: unrated > 0 ? null : r.valueUsd })),
+  };
+}

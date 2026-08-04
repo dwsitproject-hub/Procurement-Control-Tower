@@ -582,11 +582,16 @@ export function MaterialModal({
 
               {/* v1's material-360: per-vendor unit-price trend + two share donuts. */}
               <div className="ent-mini" style={{ marginTop: '.6rem' }}>
-                <div className="ent-h" style={{ marginTop: 0 }}>Unit price by month — top vendors (IDR lines)</div>
+                <div className="ent-h" style={{ marginTop: 0 }}>
+                  Unit price by month — top vendors (IDR{d.priceBasis?.baseUnit ? ` per ${d.priceBasis.baseUnit}` : ''})
+                </div>
                 <PriceTrend rows={d.priceByVendor ?? []} />
                 <p className="note" style={{ marginBottom: 0 }}>
                   Showing top {Math.min(6, d.kpis.vendorCount)} of {d.kpis.vendorCount} vendors by amount.
-                  Unit price = Net Price ÷ Price Unit (i.e. Spend ÷ Order Qty), deduped per PO line, averaged per month.
+                  Unit price = Spend ÷ Order Qty per PO line, monthly ratio of sums{d.priceBasis?.baseUnit ? `, quantities normalised to ${d.priceBasis.baseUnit}` : ''}.
+                  Foreign-currency lines use their exact per-line IDR equivalent (FX at invoice/PO date);
+                  unrated lines and units that cannot be converted to the dominant base are excluded
+                  ({formatNumber(d.priceBasis?.chartedLines ?? 0)} of {formatNumber(d.kpis.lineCount)} lines charted).
                 </p>
               </div>
               <TwoCol
@@ -674,7 +679,7 @@ function PriceTrend({ rows }: { rows: Record<string, any>[] }) {
         plugins: {
           legend: { display: true, position: 'top', labels: { boxWidth: 10, font: { size: 9 } } },
         },
-        scales: { y: { title: { display: true, text: 'Unit price (IDR)' } } },
+        scales: { y: { title: { display: true, text: 'Unit price (IDR equivalent)' } } },
       },
     }) as unknown as ChartJS;
     return () => { chart.current?.destroy(); chart.current = null; };

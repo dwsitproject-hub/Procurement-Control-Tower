@@ -493,26 +493,45 @@ export async function materialDetail(
     params,
   );
 
-  // v1's material-360 line chart: unit price (= spend / qty, per line, IDR
-  // lines only) averaged per month, one series per top-6 vendor by amount.
-  const priceByVendor = await query<{ code: string | null; name: string | null; mk: string; price: number | null; n: number }>(
-    `WITH v6 AS (
-       SELECT pol.vendor_code, max(pol.vendor_name) AS vendor_name,
-              sum(pol.net_order_value) AS amt
+  // v1's material-360 line chart, on an honest axis. Two v1 crudenesses are
+  // fixed here: v1 mixes document currencies into one 'IDR' axis (v2 uses the
+  // per-line EXACT IDR equivalent, FX at invoice/PO date), and v1 divides by
+  // the raw order quantity whatever its unit, so a per-MT vendor charts 1000x
+  // above a per-KG vendor. v2 converts mass (G/KG/MT) and volume (ML/L/KL/M3)
+  // units to the material's dominant base; lines in an incomparable unit are
+  // excluded and counted. Monthly point = sum(value)/sum(qty), v1's ratio.
+  const priceByVendor = await query<{
+    code: string | null; name: string | null; mk: string; price: number | null;
+    n: number; base: string;
+  }>(
+    `WITH l AS (
+       SELECT pol.vendor_code, pol.vendor_name, pol.document_date,
+              pol.net_order_value_idr AS val, pol.order_qty AS q,
+              upper(COALESCE(pol.order_unit,'')) AS u
          FROM core.fact_po_line pol
         WHERE ${where} AND pol.material_code = ${mp}
-          AND pol.currency_code = 'IDR' AND NOT pol.is_sto AND NOT pol.is_token_price
-        GROUP BY pol.vendor_code ORDER BY amt DESC NULLS LAST LIMIT 6)
-     SELECT pol.vendor_code AS code, max(v6.vendor_name) AS name,
-            to_char(pol.document_date,'YYYY-MM') AS mk,
-            avg(pol.net_order_value / NULLIF(pol.order_qty, 0)) AS price,
-            count(*)::int AS n
-       FROM core.fact_po_line pol
-       JOIN v6 ON v6.vendor_code = pol.vendor_code
-      WHERE ${where} AND pol.material_code = ${mp}
-        AND pol.currency_code = 'IDR' AND NOT pol.is_sto AND NOT pol.is_token_price
-        AND pol.order_qty > 0 AND pol.document_date IS NOT NULL
-      GROUP BY pol.vendor_code, 3 ORDER BY 3`,
+          AND pol.net_order_value_idr > 0 AND NOT pol.is_sto AND NOT pol.is_token_price
+          AND pol.order_qty > 0 AND pol.document_date IS NOT NULL),
+     conv AS (
+       SELECT *,
+              CASE u WHEN 'MT' THEN 1000.0 WHEN 'TO' THEN 1000.0 WHEN 'TON' THEN 1000.0
+                     WHEN 'KG' THEN 1.0 WHEN 'G' THEN 0.001
+                     WHEN 'KL' THEN 1000.0 WHEN 'M3' THEN 1000.0 WHEN 'L' THEN 1.0 WHEN 'ML' THEN 0.001
+                     ELSE 1.0 END AS f,
+              CASE WHEN u IN ('MT','TO','TON','KG','G') THEN 'KG'
+                   WHEN u IN ('KL','M3','L','ML') THEN 'L'
+                   ELSE u END AS base
+         FROM l),
+     dom AS (SELECT base FROM conv GROUP BY base ORDER BY count(*) DESC, base LIMIT 1),
+     c2 AS (SELECT conv.* FROM conv JOIN dom ON conv.base = dom.base),
+     v6 AS (SELECT vendor_code, max(vendor_name) AS vendor_name, sum(val) AS amt
+              FROM c2 GROUP BY 1 ORDER BY amt DESC NULLS LAST LIMIT 6)
+     SELECT c2.vendor_code AS code, max(v6.vendor_name) AS name,
+            to_char(c2.document_date,'YYYY-MM') AS mk,
+            sum(c2.val) / NULLIF(sum(c2.q * c2.f), 0) AS price,
+            count(*)::int AS n, max(c2.base) AS base
+       FROM c2 JOIN v6 ON v6.vendor_code = c2.vendor_code
+      GROUP BY c2.vendor_code, 3 ORDER BY 3`,
     [...params],
   );
 
@@ -566,6 +585,12 @@ export async function materialDetail(
     priceByVendor: priceByVendor.map((x) => ({
       vendorCode: x.code, vendorName: x.name, monthKey: x.mk, unitPrice: x.price, lines: x.n,
     })),
+    priceBasis: {
+      baseUnit: priceByVendor[0]?.base ?? null,
+      // Lines whose unit cannot be converted to the dominant base (or without
+      // an IDR equivalent) are not in the trend; the modal says so.
+      chartedLines: priceByVendor.reduce((a, x) => a + x.n, 0),
+    },
     vendorShare: vendorShare.map((x) => ({ vendorCode: x.code, vendorName: x.name, usd: x.usd, lines: x.n })),
     areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, lines: x.n })),
     poHistory: decorate(poHistory),

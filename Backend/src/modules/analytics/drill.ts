@@ -279,6 +279,24 @@ const FILTERS: Record<string, Compiler> = {
   demandUnrealistic: (_v, a) => `${a}.need_by_date IS NOT NULL`,
   hasInfoRecord: (v, a) => (v ? `${a}.info_record IS NOT NULL` : `${a}.info_record IS NULL`),
   valuedIdr: (_v, a) => `COALESCE(${a}.total_value_idr, 0) > 0`,
+  // v1's four age bands (Open Items page). NULL aging never matches a band.
+  ageBand4: (v, a) => {
+    const ranges: Record<string, string> = {
+      '0-15': `${a}.aging_days <= 15`,
+      '15-30': `${a}.aging_days > 15 AND ${a}.aging_days <= 30`,
+      '31-90': `${a}.aging_days > 30 AND ${a}.aging_days <= 90`,
+      '>90': `${a}.aging_days > 90`,
+    };
+    const r = ranges[String(v)];
+    if (!r) throw new Error(`unknown ageBand4: ${String(v)}`);
+    return `(${r})`;
+  },
+  // v1's 'Urgent PO (PO before PR)': the PO document predates its requisition.
+  poBeforePr: (_v, a) =>
+    `EXISTS (SELECT 1 FROM core.fact_pr_item _pr
+              WHERE _pr.dataset_version_id = ${a}.dataset_version_id
+                AND _pr.pr_no = ${a}.pr_no AND _pr.pr_item = ${a}.pr_item
+                AND ${a}.document_date < _pr.requisition_date)`,
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
   foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
   // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause

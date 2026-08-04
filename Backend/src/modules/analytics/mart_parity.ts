@@ -600,6 +600,34 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_release', filters: { picRelease: 'Auto Release' } },
   },
   {
+    // v1's 'Urgent PO (PO before PR)': PO document date earlier than the
+    // requisition date — the PO was raised before the demand was recorded.
+    // Distinct from retro_po_rate, which compares against PR APPROVAL.
+    id: 'urgent_po_before_pr',
+    unit: 'count',
+    sql: `SELECT count(*)::int AS value,
+                 count(*) FILTER (WHERE pol.urgency <= 1)::int AS chip_emergency,
+                 count(*) FILTER (WHERE pol.urgency = 2)::int AS chip_urgent,
+                 count(*) FILTER (WHERE COALESCE(pol.urgency, 9) >= 3)::int AS chip_standard
+            FROM ${POL} pol JOIN ${PRI} pri
+              ON pri.dataset_version_id = pol.dataset_version_id
+             AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
+           WHERE pol.dataset_version_id = $1 AND NOT pol.is_deleted
+             AND pol.document_date < pri.requisition_date`,
+    drill: { grain: 'po_line', filters: { notDeleted: true, poBeforePr: true } },
+  },
+  {
+    // The counter of Open PR w/o WBS: AR-required open items that DO carry one.
+    id: 'open_pr_with_wbs',
+    unit: 'count',
+    sql: `SELECT count(*)::int AS value,
+                 count(DISTINCT pr_no)::int AS numerator,
+                 sum(total_value_idr) AS chip_value_idr
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+             AND wbs_status = 'compliant' AND po_line_count = 0`,
+    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'compliant', prNoPo: true } },
+  },
+  {
     // G6.4: v1's op-page card — WBS violations still open (no PO yet).
     id: 'wbs_open_violations',
     unit: 'count',
@@ -622,6 +650,12 @@ interface ChartSpec {
   /** Must return bucket_key, bucket_label, value, row_count, drill (jsonb). */
   sql: string;
 }
+
+/** v1's four Open-Items age bands, ordered oldest-first like v1. */
+const AGE4_BUCKET = `CASE WHEN aging_days > 90 THEN '>90' WHEN aging_days > 30 THEN '31-90'
+                          WHEN aging_days > 15 THEN '15-30' ELSE '0-15' END`;
+const AGE4_ORDER = `CASE WHEN aging_days > 90 THEN 1 WHEN aging_days > 30 THEN 2
+                         WHEN aging_days > 15 THEN 3 ELSE 4 END`;
 
 /** Aging/lead-time histogram buckets, matching v1's distribution charts. */
 const DIST_BUCKETS = `CASE WHEN d <= 3 THEN '0-3' WHEN d <= 7 THEN '4-7' WHEN d <= 14 THEN '8-14'
@@ -718,20 +752,116 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2, ${DIST_ORDER} ORDER BY ${DIST_ORDER}`,
   },
   {
+    // v1's buckets and v1's order: oldest first (>90d ... 0-15d).
     chartId: 'unreleased_aging_buckets', seriesKey: 'items', seriesLabel: 'Unreleased PR items', unit: 'count',
-    sql: `SELECT ${DIST_BUCKETS} AS bucket_key, ${DIST_BUCKETS} || ' days' AS bucket_label,
+    sql: `SELECT ${AGE4_BUCKET} AS bucket_key, ${AGE4_BUCKET} || 'd' AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('unreleased',true,'notDeleted',true,'distBucket',
-                     jsonb_build_object('measure','aging','bucket', ${DIST_BUCKETS}))) AS drill
-            FROM (SELECT aging_days AS d FROM ${PRI}
+                   jsonb_build_object('unreleased',true,'notDeleted',true,
+                     'ageBand4', ${AGE4_BUCKET})) AS drill
+            FROM (SELECT aging_days FROM ${PRI}
                    WHERE dataset_version_id = $1 AND release_final_date IS NULL AND NOT is_deleted
-                     -- Explicit: a NULL would fall through the CASE into '60+' here
-                     -- while the drill's distBucket filter excludes it, so the two
-                     -- would disagree on that one bar. The other three
-                     -- distributions already filter their measure.
                      AND aging_days IS NOT NULL) x
-           GROUP BY 1,2, ${DIST_ORDER} ORDER BY ${DIST_ORDER}`,
+           GROUP BY 1,2, ${AGE4_ORDER} ORDER BY ${AGE4_ORDER}`,
+  },
+  // v1's 'Aging Severity by Open Stage': item counts in age bands, one series
+  // per band, grouped by open stage. PR stages count PR items; PO stages count
+  // PO lines — each point's drill carries its own grain.
+  {
+    chartId: 'aging_severity_by_stage', seriesKey: 'b0_15', seriesLabel: '0-15d', unit: 'count',
+    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
+            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
+                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
+                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
+                   count(*)::numeric AS value, count(*)::int AS row_count,
+                   jsonb_build_object('grain','pr_item','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '0-15')) AS drill
+              FROM ${PRI} WHERE dataset_version_id = $1
+               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days <= 15
+             GROUP BY status
+            UNION ALL
+            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
+                   count(*)::numeric, count(*)::int,
+                   jsonb_build_object('grain','po_line','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '0-15'))
+              FROM ${POL} WHERE dataset_version_id = $1
+               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days <= 15
+             GROUP BY status
+          ) s ORDER BY s.ord`,
+  },
+  {
+    chartId: 'aging_severity_by_stage', seriesKey: 'b15_30', seriesLabel: '15-30d', unit: 'count',
+    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
+            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
+                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
+                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
+                   count(*)::numeric AS value, count(*)::int AS row_count,
+                   jsonb_build_object('grain','pr_item','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '15-30')) AS drill
+              FROM ${PRI} WHERE dataset_version_id = $1
+               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days > 15 AND aging_days <= 30
+             GROUP BY status
+            UNION ALL
+            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
+                   count(*)::numeric, count(*)::int,
+                   jsonb_build_object('grain','po_line','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '15-30'))
+              FROM ${POL} WHERE dataset_version_id = $1
+               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days > 15 AND aging_days <= 30
+             GROUP BY status
+          ) s ORDER BY s.ord`,
+  },
+  {
+    chartId: 'aging_severity_by_stage', seriesKey: 'b31_90', seriesLabel: '31-90d', unit: 'count',
+    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
+            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
+                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
+                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
+                   count(*)::numeric AS value, count(*)::int AS row_count,
+                   jsonb_build_object('grain','pr_item','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '31-90')) AS drill
+              FROM ${PRI} WHERE dataset_version_id = $1
+               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days > 30 AND aging_days <= 90
+             GROUP BY status
+            UNION ALL
+            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
+                   count(*)::numeric, count(*)::int,
+                   jsonb_build_object('grain','po_line','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '31-90'))
+              FROM ${POL} WHERE dataset_version_id = $1
+               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days > 30 AND aging_days <= 90
+             GROUP BY status
+          ) s ORDER BY s.ord`,
+  },
+  {
+    chartId: 'aging_severity_by_stage', seriesKey: 'b90p', seriesLabel: '>90d', unit: 'count',
+    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
+            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
+                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
+                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
+                   count(*)::numeric AS value, count(*)::int AS row_count,
+                   jsonb_build_object('grain','pr_item','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '>90')) AS drill
+              FROM ${PRI} WHERE dataset_version_id = $1
+               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days > 90
+             GROUP BY status
+            UNION ALL
+            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
+                   count(*)::numeric, count(*)::int,
+                   jsonb_build_object('grain','po_line','filters',
+                     jsonb_build_object('status', status, 'ageBand4', '>90'))
+              FROM ${POL} WHERE dataset_version_id = $1
+               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days > 90
+             GROUP BY status
+          ) s ORDER BY s.ord`,
   },
   {
     chartId: 'monthly_pr_no_po', seriesKey: 'items', seriesLabel: 'PR items with no PO', unit: 'count',

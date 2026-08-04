@@ -70,7 +70,8 @@ export function DetailTable({
 
   const [data, setData] = useState<DetailResponse | null>(null);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -125,22 +126,26 @@ export function DetailTable({
       q.set('sort', sort.key);
       q.set('dir', sort.dir);
     }
-    q.set('limit', '200');
+    q.set('limit', String(pageSize));
     q.set('facets', 'true');
     return q.toString();
-  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort]);
+  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+
+  // Any filter/sort/page-size change restarts at page 1.
+  useEffect(() => {
+    setPage(0);
+  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     api
-      .get<DetailResponse>(`/api/v1/detail?${queryString}`)
+      .get<DetailResponse>(`/api/v1/detail?${queryString}${page > 0 ? `&cursor=${page * pageSize}` : ''}`)
       .then((d) => {
         if (cancelled) return;
         setData(d);
         setRows(d.rows);
-        setCursor(d.nextCursor);
         if (visible === null) setVisible(d.columns.filter((c) => c.default).map((c) => c.key));
       })
       .catch((e: Error) => {
@@ -154,14 +159,7 @@ export function DetailTable({
     };
     // `visible` deliberately excluded: changing columns must not refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryString]);
-
-  const loadMore = useCallback(async () => {
-    if (!cursor) return;
-    const d = await api.get<DetailResponse>(`/api/v1/detail?${queryString}&cursor=${cursor}`);
-    setRows((r) => [...r, ...d.rows]);
-    setCursor(d.nextCursor);
-  }, [cursor, queryString]);
+  }, [queryString, page]);
 
   const persistLayout = useCallback((cols: string[]) => {
     if (!savedRef.current) return;
@@ -330,7 +328,9 @@ export function DetailTable({
           ) : (
             <>
               <strong>{formatNumber(data?.totalCount ?? 0)}</strong> rows
-              {rows.length < (data?.totalCount ?? 0) && <> · showing {formatNumber(rows.length)}</>}
+              {(data?.totalCount ?? 0) > pageSize && (
+                <> · showing {formatNumber(page * pageSize + 1)}–{formatNumber(Math.min((page + 1) * pageSize, data?.totalCount ?? 0))}</>
+              )}
               {loading && <> · refreshing…</>}
             </>
           )}
@@ -422,10 +422,48 @@ export function DetailTable({
           </div>
         )}
 
-        {cursor && (
-          <button className="btn secondary" style={{ marginTop: '.75rem' }} onClick={() => void loadMore()}>
-            Load more
-          </button>
+        {data && data.totalCount > 0 && (
+          <div className="dt-pager">
+            <label className="dt-check">
+              Rows per page
+              <select
+                className="ly-swap"
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value) as 50 | 100 | 200)}
+              >
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </label>
+            {(() => {
+              const pages = Math.max(1, Math.ceil(data.totalCount / pageSize));
+              const nums: number[] = [];
+              for (let i = 0; i < pages; i += 1) {
+                if (i === 0 || i === pages - 1 || Math.abs(i - page) <= 2) nums.push(i);
+              }
+              return (
+                <span className="dt-pages">
+                  <button className="dt-btn" disabled={page === 0} onClick={() => setPage(page - 1)}>‹ Prev</button>
+                  {nums.map((n2, idx) => (
+                    <span key={n2}>
+                      {idx > 0 && nums[idx - 1] !== n2 - 1 && <span className="muted">…</span>}
+                      <button
+                        className="dt-btn"
+                        aria-current={n2 === page ? 'page' : undefined}
+                        style={n2 === page ? { borderColor: 'var(--accent)', fontWeight: 700 } : {}}
+                        onClick={() => setPage(n2)}
+                      >
+                        {n2 + 1}
+                      </button>
+                    </span>
+                  ))}
+                  <button className="dt-btn" disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>Next ›</button>
+                  <span className="muted">page {page + 1} of {formatNumber(pages)}</span>
+                </span>
+              );
+            })()}
+          </div>
         )}
       </div>
     </>

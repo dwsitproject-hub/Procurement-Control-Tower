@@ -512,6 +512,11 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .ovc[data-k="total_pr_items"] { --c: var(--navy); }
 .ovc[data-k="delivered_gr"] { --c: var(--teal); }
 .ovc[data-k="open_items"] { --c: var(--orange); }
+.ovc[data-k="pr_not_approved"] { --c: #be123c; }
+.ovc[data-k="pr_no_po"] { --c: #c2410c; }
+.ovc[data-k="po_hold"] { --c: var(--crit); }
+.ovc[data-k="lines_pending_po_approval"] { --c: var(--purple); }
+.ovc[data-k="po_not_delivered"] { --c: #1d4ed8; }
 .ovc:hover { box-shadow: 0 2px 9px rgba(0, 0, 0, .13); }
 .ovc .v { font-size: 1.6rem; font-weight: 900; color: var(--c, var(--navy)); line-height: 1.15; font-variant-numeric: tabular-nums; }
 .ovc .l { font-weight: 650; font-size: .7rem; color: var(--muted); margin-top: .1rem; }
@@ -522,3 +527,6 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .ovc-lbl { color: var(--muted); font-weight: 600; }
 .ovc-val { font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
 .ovc-strong { font-size: .66rem; }
+
+.dt-pager { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; margin-top: .75rem; }
+.dt-pages { display: inline-flex; align-items: center; gap: .25rem; flex-wrap: wrap; }

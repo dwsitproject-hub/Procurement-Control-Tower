@@ -146,6 +146,7 @@ export const KPI_IDS = [
   'avg_po_value_idr','avg_value_per_po_usd','foreign_ccy_po_share','single_source_spend_idr',
   'top_vendor_share_pct','top5_vendor_share_pct','avg_suppliers_per_material',
   'worst_approver_gap','auto_release_share_pct','wbs_open_violations',
+  'urgent_po_before_pr','open_pr_with_wbs',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -219,6 +220,8 @@ export const KPI_TITLES: Record<KpiId, string> = {
   worst_approver_gap: 'Worst Approver Gap (median days)',
   auto_release_share_pct: 'Auto-Release Share %',
   wbs_open_violations: 'Open PR w/o WBS (AR required)',
+  urgent_po_before_pr: 'Urgent PO (PO before PR)',
+  open_pr_with_wbs: 'Open PR with WBS (AR required)',
 };
 
 export const KpiValueSchema = z.object({

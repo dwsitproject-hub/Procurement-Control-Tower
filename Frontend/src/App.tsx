@@ -67,8 +67,9 @@ const TAB_KPIS: Record<Tab, string[]> = {
   ],
   openitems: [
     'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
-    'po_not_delivered', 'open_items', 'emergency_open', 'urgent_open',
-    'avg_unreleased_age', 'retro_po_rate', 'open_pr_no_wbs', 'wbs_open_violations',
+    'po_not_delivered', 'open_items',
+    'emergency_open', 'urgent_open', 'avg_unreleased_age', 'urgent_po_before_pr',
+    'retro_po_rate', 'open_pr_no_wbs', 'open_pr_with_wbs', 'wbs_open_violations',
     'commitment_over_60d',
   ],
   pr: [
@@ -113,7 +114,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
 
 const TAB_CHARTS: Record<Tab, string[]> = {
   executive: ['status_mix', 'po_value_by_month', 'items_by_priority', 'aging_by_priority'],
-  openitems: ['aging_bands', 'open_by_priority', 'unapproved_by_category', 'unreleased_aging_buckets'],
+  openitems: ['aging_severity_by_stage', 'aging_bands', 'open_by_priority', 'unapproved_by_category', 'unreleased_aging_buckets'],
   pr: [
     'pr_by_month', 'items_by_category', 'pr_approval_by_priority',
     'pr_approval_distribution', 'monthly_pr_no_po', 'pr_by_plant', 'wbs_by_plant',
@@ -161,6 +162,15 @@ const EXEC_SECTIONS: { title: string; ids: string[] }[] = [
 
 // v1's status donut; every other chart stays a bar.
 const DONUT_CHARTS = new Set(['status_mix']);
+
+// Cards that render v1's wide layout (value left, breakdown rows right).
+const TAB_WIDE_IDS: Partial<Record<Tab, string[]>> = {
+  executive: ['total_pr_items', 'delivered_gr', 'open_items'],
+  openitems: [
+    'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
+    'po_not_delivered', 'open_items',
+  ],
+};
 
 // Charts whose bucket key maps onto a global-filter dimension (Alt-click filters).
 const CHART_FILTER_DIM: Record<string, 'monthKey' | 'plant' | 'purchOrg'> = {
@@ -451,7 +461,7 @@ export default function App() {
                   if (inSec.length === 0) return null;
                   // v1's Overview row: the three wide cards first, cycles below.
                   const isOverviewSec = sec.title.includes('Overview');
-                  const wideIds = ['total_pr_items', 'delivered_gr', 'open_items'];
+                  const wideIds = TAB_WIDE_IDS['executive'] ?? [];
                   const wide = isOverviewSec ? inSec.filter(({ slot }) => wideIds.includes(slot)) : [];
                   const rest = isOverviewSec ? inSec.filter(({ slot }) => !wideIds.includes(slot)) : inSec;
                   const controls = (slot: string) => editing && (
@@ -549,8 +559,29 @@ export default function App() {
                 </div>
               </>
             ) : (
+              <>
+              {(TAB_WIDE_IDS[tab] ?? []).length > 0 && (
+                <div className="ovc-grid">
+                  {visibleKpis
+                    .filter(({ slot }) => (TAB_WIDE_IDS[tab] ?? []).includes(slot))
+                    .map(({ slot, kpi: k }) => (
+                      <div key={slot} className={editing ? 'ly-slot' : undefined}>
+                        {editing && (
+                          <LayoutControls
+                            id={slot} kind="kpi" layout={layout} update={updateLayout}
+                            currentIds={kpiSlots}
+                            swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
+                          />
+                        )}
+                        <OverviewCard kpi={k} onDrill={onDrill} />
+                      </div>
+                    ))}
+                </div>
+              )}
               <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
-                {visibleKpis.map(({ slot, kpi: k }) => (
+                {visibleKpis
+                  .filter(({ slot }) => !(TAB_WIDE_IDS[tab] ?? []).includes(slot))
+                  .map(({ slot, kpi: k }) => (
                   <div key={slot} className={editing ? 'ly-slot' : undefined}>
                     {editing && (
                       <LayoutControls
@@ -578,6 +609,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              </>
             ))}
             <div className="chart-grid">
               {chartSlots.map((c) => (

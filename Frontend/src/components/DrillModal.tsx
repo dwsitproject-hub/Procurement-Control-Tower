@@ -2,6 +2,33 @@ import { useEffect, useState } from 'react';
 import { ApiError, api, type DrillPage } from '../lib/api';
 import { FLAG_META, formatCell, formatNumber } from '../lib/format';
 
+/** v1's sCls status-pill palette, verbatim. Partially Delivered takes the
+ *  Delivered pill because v1 marks any row with a GR as Delivered. */
+const STATUS_PILL: Record<string, string> = {
+  Delivered: 'sd',
+  'Partially Delivered': 'sd',
+  'PO-No GR': 'su',
+  'HOLD PO': 'shold',
+  'PO-Not Approved': 'sp',
+  'PO-Deleted': 'spdel',
+  'PR Approved-No PO': 'sn',
+  'Unapproved PR': 'sa',
+};
+
+/** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
+function agingStyle(days: number): React.CSSProperties | undefined {
+  if (days > 30) return { color: 'var(--crit)', fontWeight: 700 };
+  if (days > 14) return { color: 'var(--warn)', fontWeight: 700 };
+  return undefined;
+}
+
+/** v1's dd-modal value cell: >= 1M shown as 'x.x M', with a small ccy tag. */
+function moneyCellText(v: number): string {
+  return Math.abs(v) >= 1e6
+    ? (v / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' M'
+    : v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
 /**
  * Drill modal.
  *
@@ -79,12 +106,11 @@ export function DrillModal({
         onClick={(e) => e.stopPropagation()}
       >
         <header>
-          <h3 id="drill-title">{page?.label ?? label}</h3>
+          <h3 id="drill-title">{'\u{1F50D} '}{label || page?.label}</h3>
           <span className="spacer" />
           {page?.detailHandoff && onOpenDetail && (
             <button
-              className="btn secondary"
-              style={{ width: 'auto' }}
+              className="dd-open"
               title={
                 page.detailHandoff.unmapped.length > 0
                   ? `Approximate: ${page.detailHandoff.unmapped.join(', ')} cannot be expressed as detail filters`
@@ -97,8 +123,8 @@ export function DrillModal({
               Open in Detail tab →
             </button>
           )}
-          <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>
-            Close
+          <button className="dd-x" onClick={onClose} aria-label="Close" title="Close">
+            {'\u2715'}
           </button>
         </header>
 
@@ -127,13 +153,16 @@ export function DrillModal({
                 <strong>{formatNumber(page.totalCount)}</strong> rows
                 {/* v1's dd-modal header: value totals over the whole population. */}
                 {page.totals?.idrSum !== null && page.totals?.idrSum !== undefined && (
-                  <> · Σ {(page.totals.idrSum / 1e9).toFixed(2)} B IDR</>
+                  <> · Σ {(page.totals.idrSum / 1e9).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} B IDR</>
                 )}
                 {page.totals && page.totals.usdSum !== null && (
                   <> · ≈ ${formatNumber(Math.round(page.totals.usdSum))} USD</>
                 )}
                 {page.totals && !page.totals.usdComplete && (
                   <> · <span title="Some lines have no FX rate — no USD total is shown rather than an understated one.">USD total unavailable (unrated currencies)</span></>
+                )}
+                {page.grain === 'pr_item' && page.totals?.idrSum !== null && page.totals?.idrSum !== undefined && (
+                  <> · PR rows valued at PR estimate</>
                 )}
                 {page.note && <> · {page.note}</>}
                 {rows.length < page.totalCount && <> · showing {formatNumber(rows.length)}</>}
@@ -146,7 +175,7 @@ export function DrillModal({
                 </p>
               ) : (
                 <div className="table-wrap">
-                  <table className="data">
+                  <table className="data dd-tbl">
                     <thead>
                       <tr>
                         <th />
@@ -156,8 +185,13 @@ export function DrillModal({
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map((r, i) => (
-                        <tr key={i}>
+                      {rows.map((r, i) => {
+                        // v1's row classes: deleted rows dim (rd), others stripe (re).
+                        const st = String(r['status'] ?? '');
+                        const rowCls =
+                          st === 'Deleted' || st === 'PO-Deleted' ? 'rd' : i % 2 ? '' : 're';
+                        return (
+                        <tr key={i} className={rowCls}>
                           <td>
                             {((r['flags'] as string[]) ?? []).map((f) => {
                               const m = FLAG_META[f];
@@ -168,18 +202,55 @@ export function DrillModal({
                               ) : null;
                             })}
                           </td>
-                          {page.columns.map((c) => (
-                            <td
-                              key={c.key}
-                              className={
-                                ['money', 'int', 'number', 'pct'].includes(c.type) ? 'num' : ''
+                          {page.columns.map((c) => {
+                            const v = r[c.key];
+                            const num = ['money', 'int', 'number', 'pct'].includes(c.type);
+                            // v1's status pill, colour-coded per lifecycle state.
+                            if (c.key === 'status' && v) {
+                              return (
+                                <td key={c.key}>
+                                  <span className={'bs ' + (STATUS_PILL[String(v)] ?? 'sl')}>
+                                    {String(v)}
+                                  </span>
+                                </td>
+                              );
+                            }
+                            // v1's aging colour rule.
+                            if (c.key === 'agingDays' && v !== null && v !== undefined) {
+                              return (
+                                <td key={c.key} className="num" style={agingStyle(Number(v))}>
+                                  {formatNumber(Number(v))}
+                                </td>
+                              );
+                            }
+                            // v1's value cells: compact M + small blue ccy tag; USD plain.
+                            if (c.type === 'money') {
+                              if (v === null || v === undefined) {
+                                return <td key={c.key} className="num dd-dash">{'\u2014'}</td>;
                               }
-                            >
-                              {formatCell(r[c.key], c.type, c.currency)}
-                            </td>
-                          ))}
+                              if (c.currency === 'USD') {
+                                return (
+                                  <td key={c.key} className="num">
+                                    {Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                  </td>
+                                );
+                              }
+                              const ccy = c.currency ?? String(r['currencyCode'] ?? 'IDR');
+                              return (
+                                <td key={c.key} className="num">
+                                  {moneyCellText(Number(v))} <span className="dd-ccy">{ccy}</span>
+                                </td>
+                              );
+                            }
+                            return (
+                              <td key={c.key} className={num ? 'num' : ''}>
+                                {formatCell(v, c.type, c.currency)}
+                              </td>
+                            );
+                          })}
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

@@ -233,7 +233,38 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 .modal header h3 { margin: 0; font-size: .95rem; }
 .modal header .spacer { flex: 1; }
 .modal .body { overflow: auto; padding: .5rem 1rem 1rem; }
-.modal .count { color: var(--muted); font-size: .82rem; }
+.modal .count { color: var(--muted); font-size: .72rem; }
+
+/* ── drill modal — v1's dd-modal look ── */
+.modal header h3 { font-weight: 800; }
+.dd-open {
+  border: 1px solid var(--navy); background: none; color: var(--heading);
+  font-size: .72rem; font-weight: 700; padding: .3rem .7rem; border-radius: 6px; cursor: pointer;
+}
+.dd-open:hover { background: color-mix(in srgb, var(--navy) 8%, transparent); }
+.dd-x {
+  border: none; background: none; font-size: 1.05rem; line-height: 1;
+  cursor: pointer; color: var(--muted); padding: .15rem .35rem;
+}
+table.dd-tbl th { background: var(--navy); color: #fff; font-weight: 700; }
+table.dd-tbl tbody tr.re td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+table.dd-tbl tbody tr.rd td { color: var(--muted); opacity: .7; }
+.dd-ccy { font-size: .6rem; font-weight: 700; color: #0369a1; }
+.dd-dash { color: var(--border); }
+
+/* v1's status pills (sCls), colours verbatim. */
+.bs {
+  display: inline-block; padding: 1px 6px; border-radius: 8px;
+  font-size: .66rem; font-weight: 800; white-space: nowrap;
+}
+.bs.sd { background: #d1fae5; color: #065f46; }
+.bs.su { background: #dbeafe; color: #1e40af; }
+.bs.shold { background: #fce7f3; color: #be185d; }
+.bs.sp { background: #ede9fe; color: #6d28d9; }
+.bs.spdel { background: #fee2e2; color: #b91c1c; }
+.bs.sn { background: #ffedd5; color: #9a3412; }
+.bs.sa { background: #fee2e2; color: #991b1b; }
+.bs.sl { background: #f1f5f9; color: #64748b; }
 
 /* ── login ────────────────────────────────────────────────────────── */
 

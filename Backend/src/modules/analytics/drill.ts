@@ -389,16 +389,24 @@ function detailHandoffFor(filters: Record<string, unknown>): DrillPage['detailHa
 }
 
 const COLUMNS: Record<Grain, DrillPage['columns']> = {
+  // v1's dd-modal column order. The PO columns come from the first linked PO
+  // line (blank while unsourced), exactly like v1's act rows; WBS violations
+  // surface as the § row flag rather than a column.
   pr_item: [
     { key: 'prNo', label: 'PR No', type: 'string' },
     { key: 'prItem', label: 'Item', type: 'int' },
     { key: 'shortText', label: 'Description', type: 'string' },
+    { key: 'materialCode', label: 'Material', type: 'string' },
+    { key: 'materialCategory', label: 'Mat Cat', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
-    { key: 'totalValueIdr', label: 'Value IDR', type: 'money', currency: 'IDR' },
-    { key: 'wbsStatus', label: 'WBS', type: 'enum' },
+    { key: 'vendorName', label: 'Supplier', type: 'string' },
+    { key: 'poNo', label: 'PO No', type: 'string' },
     { key: 'status', label: 'Status', type: 'enum' },
-    { key: 'requisitionDate', label: 'PR date', type: 'date' },
+    { key: 'documentDate', label: 'PO Date', type: 'date' },
+    { key: 'receiptDate', label: 'GR Date', type: 'date' },
     { key: 'agingDays', label: 'Aging (d)', type: 'int' },
+    { key: 'totalValueIdr', label: 'Value (doc ccy)', type: 'money', currency: 'IDR' },
+    { key: 'totalValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
   ],
   po_line: [
     { key: 'poNo', label: 'PO No', type: 'string' },
@@ -407,9 +415,8 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'shortText', label: 'Description', type: 'string' },
     { key: 'vendorName', label: 'Vendor', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
-    { key: 'netOrderValue', label: 'Value', type: 'money' },
-    { key: 'currencyCode', label: 'Ccy', type: 'string' },
-    { key: 'netOrderValueUsd', label: 'Value USD', type: 'money', currency: 'USD' },
+    { key: 'netOrderValue', label: 'Value (doc ccy)', type: 'money' },
+    { key: 'netOrderValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
     { key: 'status', label: 'Status', type: 'enum' },
     { key: 'documentDate', label: 'PO date', type: 'date' },
     { key: 'receiptDate', label: 'GR date', type: 'date' },
@@ -445,9 +452,13 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
 };
 
 const SELECTS: Record<Grain, string> = {
-  pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText", f.plant,
-            f.total_value_idr AS "totalValueIdr", f.wbs_status AS "wbsStatus", f.status,
-            f.requisition_date AS "requisitionDate", f.aging_days AS "agingDays"`,
+  pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText",
+            f.material_code AS "materialCode", f.material_category AS "materialCategory", f.plant,
+            fp.vendor_name AS "vendorName", fp.po_no AS "poNo", f.status,
+            fp.document_date AS "documentDate", fp.receipt_date AS "receiptDate",
+            f.aging_days AS "agingDays", f.total_value_idr AS "totalValueIdr",
+            f.total_value_usd AS "totalValueUsd",
+            f.requisition_date AS "requisitionDate", f.wbs_status AS "_wbs"`,
   po_line: `f.po_no AS "poNo", f.po_item AS "poItem", f.pr_no AS "prNo", f.short_text AS "shortText",
             f.vendor_name AS "vendorName", f.plant, f.net_order_value AS "netOrderValue",
             f.currency_code AS "currencyCode", f.net_order_value_usd AS "netOrderValueUsd",
@@ -463,6 +474,21 @@ const SELECTS: Record<Grain, string> = {
                f.was_continuation AS "wasContinuation"`,
   po_release: `f.po_no AS "poNo", f.rel_seq AS "relSeq", f.pic_release AS "picRelease",
                f.amount, f.currency_code AS "currencyCode", f.approve_date AS "approveDate"`,
+};
+
+/**
+ * Page-query joins per grain. The PR grain borrows its first linked PO line so
+ * the drill shows v1's Supplier / PO No / PO Date / GR Date columns; LEFT
+ * LATERAL .. LIMIT 1 keeps the row count identical, and the count query never
+ * uses it.
+ */
+const PAGE_JOINS: Partial<Record<Grain, string>> = {
+  pr_item: `LEFT JOIN LATERAL (
+              SELECT _p.po_no, _p.vendor_name, _p.document_date, _p.receipt_date
+                FROM core.fact_po_line _p
+               WHERE _p.dataset_version_id = f.dataset_version_id
+                 AND _p.pr_no = f.pr_no AND _p.pr_item = f.pr_item
+               ORDER BY _p.po_no, _p.po_item LIMIT 1) fp ON true`,
 };
 
 export async function executeDrill(
@@ -494,7 +520,10 @@ export async function executeDrill(
   // Count and value totals in one pass. IDR sum is exact (document currency);
   // the USD sum follows the strict no-silent-conversion rule.
   const TOTAL_EXPR: Partial<Record<Grain, string>> = {
-    pr_item: `sum(${t.alias}.total_value_idr) AS idr_sum, NULL::numeric AS usd_sum, 0::int AS unrated`,
+    pr_item: `sum(${t.alias}.total_value_idr) AS idr_sum,
+              sum(${t.alias}.total_value_usd) AS usd_sum,
+              count(*) FILTER (WHERE ${t.alias}.total_value_idr IS NOT NULL AND ${t.alias}.total_value_idr <> 0
+                                 AND ${t.alias}.total_value_usd IS NULL)::int AS unrated`,
     po_line: `sum(${t.alias}.net_order_value) FILTER (WHERE ${t.alias}.currency_code = 'IDR') AS idr_sum,
               sum(${t.alias}.net_order_value_usd) AS usd_sum,
               count(*) FILTER (WHERE ${t.alias}.net_order_value IS NOT NULL AND ${t.alias}.net_order_value_usd IS NULL)::int AS unrated`,
@@ -516,7 +545,7 @@ export async function executeDrill(
 
   const pageParams = [...params, limit, offset];
   const rows = await query<Record<string, unknown>>(
-    `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias}
+    `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
       WHERE ${whereSql} ORDER BY ${t.order}
       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
     pageParams,
@@ -530,7 +559,8 @@ export async function executeDrill(
     if (r['_exempt']) flags.push('releaseExempt');
     if (r['_link'] === 'dangling') flags.push('danglingLink');
     if (payload.grain === 'po_line' && r['_link'] === null) flags.push('directPo');
-    for (const k of ['_sto', '_token', '_exempt', '_link']) delete r[k];
+    if (r['_wbs'] === 'violation') flags.push('wbsViolation');
+    for (const k of ['_sto', '_token', '_exempt', '_link', '_wbs']) delete r[k];
     return { ...r, flags };
   });
 

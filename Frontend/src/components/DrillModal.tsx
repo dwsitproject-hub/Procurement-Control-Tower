@@ -1,19 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ApiError, api, type DrillPage } from '../lib/api';
-import { FLAG_META, formatCell, formatNumber } from '../lib/format';
-
-/** v1's sCls status-pill palette, verbatim. Partially Delivered takes the
- *  Delivered pill because v1 marks any row with a GR as Delivered. */
-const STATUS_PILL: Record<string, string> = {
-  Delivered: 'sd',
-  'Partially Delivered': 'sd',
-  'PO-No GR': 'su',
-  'HOLD PO': 'shold',
-  'PO-Not Approved': 'sp',
-  'PO-Deleted': 'spdel',
-  'PR Approved-No PO': 'sn',
-  'Unapproved PR': 'sa',
-};
+import { FLAG_META, STATUS_PILL, formatCell, formatNumber, moneyCellText } from '../lib/format';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
 function agingStyle(days: number): React.CSSProperties | undefined {
@@ -22,12 +9,6 @@ function agingStyle(days: number): React.CSSProperties | undefined {
   return undefined;
 }
 
-/** v1's dd-modal value cell: >= 1M shown as 'x.x M', with a small ccy tag. */
-function moneyCellText(v: number): string {
-  return Math.abs(v) >= 1e6
-    ? (v / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' M'
-    : v.toLocaleString(undefined, { maximumFractionDigits: 0 });
-}
 
 /**
  * Drill modal.

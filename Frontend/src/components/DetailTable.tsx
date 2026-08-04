@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import { FLAG_META, formatCell, formatNumber } from '../lib/format';
+import {
+  FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
+} from '../lib/format';
+
+/** v1's AW per-column aging warn thresholds (amber above, red above 2x). */
+const AGE_WARN: Record<string, number> = {
+  praDays: 14, unrelDays: 14, sourcingAgingDays: 14, srcDays: 14,
+  poaDays: 14, delivDays: 30, e2eDays: 60,
+};
 
 /**
  * Detail table — v1's pg-dt, all 41 columns.
@@ -344,7 +352,7 @@ export function DetailTable({
 
         {data && data.totalCount > 0 && (
           <div className="table-wrap dt-scroll">
-            <table className="data">
+            <table className="data dd-tbl">
               <thead>
                 <tr>
                   <th />
@@ -399,7 +407,7 @@ export function DetailTable({
               </thead>
               <tbody>
                 {rows.map((r, i) => (
-                  <tr key={i}>
+                  <tr key={i} className={rowClass(String(r['status'] ?? ''), i)}>
                     <td className="dt-flags">
                       {((r['flags'] as string[]) ?? []).map((f) => {
                         const m = FLAG_META[f];
@@ -410,11 +418,72 @@ export function DetailTable({
                         ) : null;
                       })}
                     </td>
-                    {shown.map((c) => (
-                      <td key={c.key} className={NUMERIC.has(c.type) ? 'num' : ''}>
-                        {formatCell(r[c.key], c.type, c.currency)}
-                      </td>
-                    ))}
+                    {shown.map((c) => {
+                      const v = r[c.key];
+                      // v1's status pill, colour-coded per lifecycle state.
+                      if (c.key === 'status' && v) {
+                        return (
+                          <td key={c.key}>
+                            <span className={'bs ' + (STATUS_PILL[String(v)] ?? 'sl')}>
+                              {String(v)}
+                            </span>
+                          </td>
+                        );
+                      }
+                      // v1's aging colouring — per-column warn thresholds (AW).
+                      const warn = AGE_WARN[c.key];
+                      if (warn !== undefined && v !== null && v !== undefined && v !== '') {
+                        return (
+                          <td key={c.key} className={'num ' + agingClass(Number(v), warn)}>
+                            {formatNumber(Number(v))}
+                          </td>
+                        );
+                      }
+                      // v1's GR/PR % colour: >=100 teal, >=50 amber, below red.
+                      if (c.key === 'grPrPct' && v !== null && v !== undefined && v !== '') {
+                        const n = Number(v);
+                        const cl = n >= 100 ? 'ag ok' : n >= 50 ? 'ag wn' : 'ag bd';
+                        return (
+                          <td key={c.key} className={'num ' + cl}>
+                            {formatNumber(n, 1)}%
+                          </td>
+                        );
+                      }
+                      // v1's next-approver cells: Approved gets the teal check.
+                      if ((c.key === 'prNextApprover' || c.key === 'poNextApprover') && v) {
+                        const t = String(v);
+                        return (
+                          <td key={c.key}>
+                            {t === 'Approved' ? (
+                              <span className="dt-appr-ok">{'\u2713'} Approved</span>
+                            ) : (
+                              <span className="dt-appr-next" title="Next approver in the release workflow">{t}</span>
+                            )}
+                          </td>
+                        );
+                      }
+                      // v1's value cells: compact M + small blue ccy tag; USD plain.
+                      if (c.type === 'money' && v !== null && v !== undefined && v !== '') {
+                        if (c.currency === 'USD') {
+                          return (
+                            <td key={c.key} className="num">
+                              {Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </td>
+                          );
+                        }
+                        const ccy = c.currency ?? String(r['currencyCode'] ?? 'IDR');
+                        return (
+                          <td key={c.key} className="num">
+                            {moneyCellText(Number(v))} <span className="dd-ccy">{ccy}</span>
+                          </td>
+                        );
+                      }
+                      return (
+                        <td key={c.key} className={NUMERIC.has(c.type) ? 'num' : ''}>
+                          {formatCell(v, c.type, c.currency)}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>

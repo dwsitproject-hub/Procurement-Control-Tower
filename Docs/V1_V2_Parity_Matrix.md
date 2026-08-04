@@ -133,7 +133,7 @@ Roughly **10–14 working days**, down from 18–24.
 | `op-e` | Urgent Open | 🔴 |
 | `op-f` | Avg Unreleased Age | 🔴 |
 | `op-upo` | Urgent PO (PO before PR) | ✅ `retro_po_rate` |
-| `op-nowbs` | Open PR w/o WBS | ⚠️ v2 has all-PR variant, not open-only |
+| `op-nowbs` | Open PR w/o WBS | ✅ `wbs_open_violations` — v1-exact since v28. v1's open rule reverse-engineered from `_noWbsViol` + `OPEN_ST` + the status derivation (any GR on the row ⇒ 'Delivered' ⇒ not open). v2: violation ∧ not deleted ∧ (no PO yet ∨ (a PO line in Not-Approved/Hold/No-GR ∧ NO linked line with any GR)). Full scope: v1 186 PRs / 599 items · v2 186 PRs / 594 items — the 5-item residue is v1 judging multi-PO items by its first file row's PO only, where v2 checks all linked lines. |
 
 ### 2.3 PR Analysis (pg-pr, 16 KPIs)
 

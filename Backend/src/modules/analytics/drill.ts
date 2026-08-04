@@ -321,6 +321,22 @@ const FILTERS: Record<string, Compiler> = {
   // On-Time vs Requested (D4): a line is evaluable only when both the receipt
   // and the requested date exist. Empty until EBAN-LFDAT reaches the export.
   otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.need_by_date IS NOT NULL`,
+  // v1's open definition (OPEN_ST + "any GR means Delivered"): a PR item is
+  // open while no PO exists, or while its POs are unapproved/held/awaiting GR
+  // AND no linked line has received ANY goods. Differs from scopeOpen, which
+  // treats partially-delivered items as still open (the v2 house definition).
+  openBeforeGr: (_v, a, _ps, grain) => {
+    if (grain !== 'pr_item') throw new Error('openBeforeGr is a PR-item filter');
+    return `(${a}.status IN ('Unapproved PR','PR Approved-No PO')
+             OR (EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                          WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+                            AND _pl.pr_no = ${a}.pr_no AND _pl.pr_item = ${a}.pr_item
+                            AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR'))
+                 AND NOT EXISTS (SELECT 1 FROM core.fact_po_line _pl2
+                          WHERE _pl2.dataset_version_id = ${a}.dataset_version_id
+                            AND _pl2.pr_no = ${a}.pr_no AND _pl2.pr_item = ${a}.pr_item
+                            AND _pl2.status IN ('Delivered','Partially Delivered'))))`;
+  },
 };
 
 export interface DrillPage {

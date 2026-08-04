@@ -134,7 +134,7 @@ export const PARITY_KPIS: KpiSpec[] = [
                  (SELECT sum(qty_requested) FROM ${PRI}
                    WHERE dataset_version_id = $1 AND NOT is_deleted) AS qty_pr
             FROM ${POL}
-           WHERE dataset_version_id = $1 AND receipt_date IS NOT NULL`,
+           WHERE dataset_version_id = $1/*F*/ AND receipt_date IS NOT NULL`,
     drill: { grain: 'po_line', filters: { hasReceipt: true } },
   },
   {
@@ -628,15 +628,28 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'compliant', prNoPo: true } },
   },
   {
-    // G6.4: v1's op-page card — WBS violations still open (no PO yet).
+    // G6.4, v1-exact: v1's op-page "Open PR w/o WBS" card. Open in v1's sense
+    // means no PO yet, or POs unapproved/held/awaiting GR with NO goods receipt
+    // anywhere on the item (v1 marks a row Delivered on ANY GR). Verified
+    // against v1 at full scope: 186 PRs exactly; 594 vs 599 items (v1 judges
+    // multi-PO items by its first file row only — see V1_V2_Parity_Matrix).
     id: 'wbs_open_violations',
     unit: 'count',
     sql: `SELECT count(*)::int AS value,
                  count(DISTINCT pr_no)::int AS numerator,
                  sum(total_value_idr) AS chip_value_idr
             FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
-             AND wbs_status = 'violation' AND po_line_count = 0`,
-    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'violation', prNoPo: true } },
+             AND wbs_status = 'violation'
+             AND (status IN ('Unapproved PR','PR Approved-No PO')
+                  OR (EXISTS (SELECT 1 FROM ${POL} _pl
+                               WHERE _pl.dataset_version_id = ${PRI}.dataset_version_id
+                                 AND _pl.pr_no = ${PRI}.pr_no AND _pl.pr_item = ${PRI}.pr_item
+                                 AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR'))
+                      AND NOT EXISTS (SELECT 1 FROM ${POL} _pl2
+                               WHERE _pl2.dataset_version_id = ${PRI}.dataset_version_id
+                                 AND _pl2.pr_no = ${PRI}.pr_no AND _pl2.pr_item = ${PRI}.pr_item
+                                 AND _pl2.status IN ('Delivered','Partially Delivered'))))`,
+    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'violation', openBeforeGr: true } },
   },
 ];
 

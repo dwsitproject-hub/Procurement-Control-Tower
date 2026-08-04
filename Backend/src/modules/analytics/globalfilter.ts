@@ -138,6 +138,11 @@ export function buildFilterClause(
  */
 export function injectFilter(sql: string, clause: Clause): string {
   if (clause.sql === '') return sql;
+  // A spec whose FIRST anchor is not its driving table (e.g. a scalar subquery
+  // in the SELECT list) marks the true injection point with /*F*/ — otherwise
+  // the filter would silently land on the wrong table.
+  const mark = sql.indexOf('/*F*/');
+  if (mark >= 0) return sql.slice(0, mark) + clause.sql + sql.slice(mark);
   const anchor = 'dataset_version_id = $1';
   const at = sql.indexOf(anchor);
   if (at < 0) {

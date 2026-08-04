@@ -33,6 +33,13 @@ export interface LiveKpi {
  * Derived from the spec's own drill grain where possible. The joined specs are
  * listed explicitly because an unqualified column would be ambiguous.
  */
+/**
+ * Charts that UNION two grains (PR stages + PO stages). One clause cannot
+ * filter both halves honestly; each half gets its own grain's clause injected
+ * at its own dataset_version_id anchor.
+ */
+const MIXED_GRAIN_CHARTS = new Set(['aging_severity_by_stage']);
+
 const JOINED_ALIAS: Record<string, { kind: FactKind; alias: string }> = {
   pr_po_price_variance: { kind: 'po_line', alias: 'pol.' },
   e2e_by_month: { kind: 'po_line', alias: 'pol.' },
@@ -170,18 +177,42 @@ export async function computeLiveChart(
   // A scope toggle on a GR-grain chart cannot be honored; returning null makes
   // the route fall back to the precomputed chart with its explicit
   // "filter NOT applied" note — honest, and already what the sweep expects.
-  let clause;
-  try {
-    clause = buildFilterClause(filter, kind, alias, 2);
-  } catch {
-    return null;
+  let sql: string;
+  let params: unknown[];
+  if (MIXED_GRAIN_CHARTS.has(chartId)) {
+    // Each UNION half is a single-table query on its own grain; its points'
+    // drill predicates carry that grain, so per-half clauses keep the
+    // chart-equals-drill guarantee intact under every filter.
+    let prClause; let polClause;
+    try {
+      prClause = buildFilterClause(filter, 'pr_item', '', 2);
+      polClause = buildFilterClause(filter, 'po_line', '', 2 + prClause.params.length);
+    } catch {
+      return null;
+    }
+    const anchor = 'dataset_version_id = $1';
+    const first = spec.sql.indexOf(anchor);
+    const second = spec.sql.indexOf(anchor, first + anchor.length);
+    if (first < 0 || second < 0) return null;
+    sql = spec.sql.slice(0, first + anchor.length) + prClause.sql
+      + spec.sql.slice(first + anchor.length, second + anchor.length) + polClause.sql
+      + spec.sql.slice(second + anchor.length);
+    params = [...prClause.params, ...polClause.params];
+  } else {
+    let clause;
+    try {
+      clause = buildFilterClause(filter, kind, alias, 2);
+    } catch {
+      return null;
+    }
+    sql = injectFilter(spec.sql, clause);
+    params = clause.params;
   }
-  const sql = injectFilter(spec.sql, clause);
 
   const r = await pool.query<{
     bucket_key: string; bucket_label: string; value: number | null;
     row_count: number; drill: Record<string, unknown>;
-  }>(sql, [versionId, ...clause.params]);
+  }>(sql, [versionId, ...params]);
 
   return {
     chartId: spec.chartId,

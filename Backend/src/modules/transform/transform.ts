@@ -392,6 +392,19 @@ export async function runTransform(
     const convDeliver = fx.table.toUsd(n(p.stillDeliverVal), ccy, docDate, fxPolicy);
     const convInvoice = fx.table.toUsd(n(p.stillInvoiceVal), ccy, docDate, fxPolicy);
 
+    // IDR equivalents for the display-currency toggle: document value verbatim
+    // for IDR lines; foreign lines convert USD -> IDR at the SAME period's IDR
+    // rate. No rate for the period => NULL (strict, never a blended guess).
+    const idrRate = fx.table.toUsd(1, 'IDR', docDate, fxPolicy).resolution.usdPerUnit;
+    const toIdr = (raw: number | null, usd: number | null): number | null => {
+      if (ccy === 'IDR') return raw;
+      if (usd === null || idrRate === null || idrRate === 0) return null;
+      return Math.round((usd / idrRate) * 100) / 100;
+    };
+    const orderIdr = toIdr(n(p.netOrderValue), conv.usd);
+    const deliverIdr = toIdr(n(p.stillDeliverVal), convDeliver.usd);
+    const invoiceIdr = toIdr(n(p.stillInvoiceVal), convInvoice.usd);
+
     const agg = grAgg.get(key) ?? null;
     const supplier = splitSupplier(p.supplierRaw);
     const bridge = bridgeByPoLine.get(key) ?? null;
@@ -522,6 +535,9 @@ export async function runTransform(
       priorityLabel(i(p.urgency)),
       s(p.infoRecord),
       needByDate,
+      orderIdr,
+      deliverIdr,
+      invoiceIdr,
     ]);
   }
 
@@ -960,7 +976,8 @@ const PO_COLS = [
   'gr_date_would_contaminate', 'status', 'aging_days', 'po_approval_days', 'sourcing_days',
   'delivery_days', 'delivery_vs_promise_days', 'is_retro_po', 'is_token_price', 'is_zero_price',
   'source_file_id', 'source_row', 'material_category', 'urgency', 'priority_label',
-  'info_record', 'need_by_date',
+  'info_record', 'need_by_date', 'net_order_value_idr', 'still_deliver_val_idr',
+  'still_invoice_val_idr',
 ] as const;
 
 const GR_COLS = [

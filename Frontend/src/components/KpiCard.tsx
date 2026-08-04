@@ -1,5 +1,5 @@
 import type { Kpi } from '../lib/api';
-import { DASH, formatKpi, formatNumber } from '../lib/format';
+import { DASH, formatKpi, formatMoney, formatNumber } from '../lib/format';
 
 /**
  * KPI card — the honesty rule in the UI.
@@ -23,7 +23,16 @@ function accentFor(kpi: Kpi): string {
   return CARD_PALETTE[h % CARD_PALETTE.length]!;
 }
 
-export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, label: string) => void }) {
+export function KpiCard({
+  kpi, onDrill, currency = 'USD',
+}: {
+  kpi: Kpi;
+  onDrill: (token: string, label: string) => void;
+  /** Display currency. Money cards switch only when the per-line-exact twin
+      exists (detail.value_idr / value_usd); otherwise they keep their basis
+      and say so — never a blended-rate guess. */
+  currency?: 'USD' | 'IDR';
+}) {
   if (kpi.status !== 'ok' || kpi.value === null) {
     return (
       <div className="kpi kpi--muted" title={kpi.statusReason ?? ''}>
@@ -34,6 +43,27 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
     );
   }
   const accent = accentFor(kpi);
+
+  // Display-currency twin (per-line-exact, computed in the spec).
+  const twinIdr = kpi.detail?.['value_idr'];
+  const twinUsd = kpi.detail?.['value_usd'];
+  let headline = formatKpi(kpi.value, kpi.unit);
+  let basisNote: string | null = null;
+  if (currency === 'IDR' && kpi.unit === 'usd') {
+    if (twinIdr !== null && twinIdr !== undefined) {
+      headline = formatMoney(Number(twinIdr), 'IDR');
+      basisNote = `= ${formatKpi(kpi.value, 'usd')}`;
+    } else {
+      basisNote = 'IDR view unavailable (unrated period) — showing USD';
+    }
+  } else if (currency === 'USD' && kpi.unit === 'idr') {
+    if (twinUsd !== null && twinUsd !== undefined) {
+      headline = formatMoney(Number(twinUsd), 'USD');
+      basisNote = `= ${formatKpi(kpi.value, 'idr')}`;
+    } else if (kpi.kpiId !== 'pr_pipeline_value') {
+      basisNote = 'USD view unavailable (unrated period) — showing IDR';
+    }
+  }
 
   const sub = subtitle(kpi);
 
@@ -55,9 +85,9 @@ export function KpiCard({ kpi, onDrill }: { kpi: Kpi; onDrill: (token: string, l
 
   const body = (
     <>
-      <div className="v">{formatKpi(kpi.value, kpi.unit)}</div>
+      <div className="v">{headline}</div>
       <div className="l">{kpi.title}</div>
-      <div className="s">{sub}{chips}</div>
+      <div className="s">{basisNote ? `${basisNote} · ` : ''}{sub}{chips}</div>
     </>
   );
 

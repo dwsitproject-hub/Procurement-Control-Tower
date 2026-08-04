@@ -46,7 +46,10 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'open_po_commitment',
     unit: 'usd',
     currencyBasis: 'usd_strict',
-    sql: `SELECT sum(still_deliver_val_usd) AS value, count(*)::int AS sample
+    sql: `SELECT sum(still_deliver_val_usd) AS value,
+                 CASE WHEN count(*) FILTER (WHERE still_deliver_val IS NOT NULL AND still_deliver_val_idr IS NULL) > 0
+                      THEN NULL ELSE sum(still_deliver_val_idr) END AS value_idr,
+                 count(*)::int AS sample
             FROM ${POL} WHERE dataset_version_id = $1
              AND NOT is_sto AND NOT is_deleted AND COALESCE(still_deliver_val,0) > 0`,
     drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true, hasOpenCommitment: true } },
@@ -55,7 +58,10 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'grir_value',
     unit: 'usd',
     currencyBasis: 'usd_strict',
-    sql: `SELECT sum(still_invoice_val_usd) AS value, count(*)::int AS sample
+    sql: `SELECT sum(still_invoice_val_usd) AS value,
+                 CASE WHEN count(*) FILTER (WHERE still_invoice_val IS NOT NULL AND still_invoice_val_idr IS NULL) > 0
+                      THEN NULL ELSE sum(still_invoice_val_idr) END AS value_idr,
+                 count(*)::int AS sample
             FROM ${POL} WHERE dataset_version_id = $1
              AND NOT is_sto AND NOT is_deleted
              AND COALESCE(still_deliver_qty,0) = 0 AND COALESCE(still_invoice_val,0) > 0`,
@@ -65,7 +71,10 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'delivered_not_invoiced',
     unit: 'usd',
     currencyBasis: 'usd_strict',
-    sql: `SELECT sum(still_invoice_val_usd) AS value, count(*)::int AS sample
+    sql: `SELECT sum(still_invoice_val_usd) AS value,
+                 CASE WHEN count(*) FILTER (WHERE still_invoice_val IS NOT NULL AND still_invoice_val_idr IS NULL) > 0
+                      THEN NULL ELSE sum(still_invoice_val_idr) END AS value_idr,
+                 count(*)::int AS sample
             FROM ${POL} WHERE dataset_version_id = $1
              AND NOT is_sto AND NOT is_deleted
              AND COALESCE(still_deliver_qty,0) = 0 AND COALESCE(still_invoice_val,0) > 0`,
@@ -82,6 +91,7 @@ export const PARITY_KPIS: KpiSpec[] = [
     sql: `SELECT CASE WHEN count(*) FILTER (WHERE total_value_idr IS NOT NULL AND total_value_usd IS NULL) > 0
                       THEN NULL ELSE sum(total_value_usd) END AS value,
                  sum(total_value_idr) AS idr_total,
+                 sum(total_value_idr) AS value_idr,
                  count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1
              AND NOT is_deleted AND po_line_count = 0`,
@@ -303,7 +313,9 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'total_po_amount',
     unit: 'usd',
     currencyBasis: 'usd_strict',
-    sql: `SELECT sum(net_order_value_usd) AS value, count(*)::int AS sample FROM ${POL}
+    sql: `SELECT sum(net_order_value_usd) AS value,
+                 CASE WHEN count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_idr IS NULL) > 0
+                      THEN NULL ELSE sum(net_order_value_idr) END AS value_idr, count(*)::int AS sample FROM ${POL}
            WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
     drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
   },
@@ -452,6 +464,9 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'idr',
     currencyBasis: 'idr_based',
     sql: `SELECT sum(total_value_idr) / NULLIF(count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0), 0) AS value,
+                 CASE WHEN count(*) FILTER (WHERE total_value_idr IS NOT NULL AND total_value_usd IS NULL) > 0
+                      THEN NULL
+                      ELSE sum(total_value_usd) / NULLIF(count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0), 0) END AS value_usd,
                  count(*) FILTER (WHERE COALESCE(total_value_idr,0) > 0)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted`,
     drill: { grain: 'pr_item', filters: { notDeleted: true, valuedIdr: true } },
@@ -462,6 +477,9 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'idr',
     currencyBasis: 'idr_based',
     sql: `SELECT sum(net_order_value) / NULLIF(count(DISTINCT po_no), 0) AS value,
+                 CASE WHEN count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_usd IS NULL) > 0
+                      THEN NULL
+                      ELSE sum(net_order_value_usd) / NULLIF(count(DISTINCT po_no), 0) END AS value_usd,
                  count(DISTINCT po_no)::int AS denominator, count(*)::int AS sample
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND currency_code = 'IDR'`,
     drill: { grain: 'po_line', filters: { notDeleted: true, currencyIs: 'IDR' } },
@@ -474,6 +492,9 @@ export const PARITY_KPIS: KpiSpec[] = [
     sql: `SELECT CASE WHEN count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_usd IS NULL) > 0
                       THEN NULL
                       ELSE sum(net_order_value_usd) / NULLIF(count(DISTINCT po_no), 0) END AS value,
+                 CASE WHEN count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_idr IS NULL) > 0
+                      THEN NULL
+                      ELSE sum(net_order_value_idr) / NULLIF(count(DISTINCT po_no), 0) END AS value_idr,
                  count(DISTINCT po_no)::int AS denominator, count(*)::int AS sample
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
     drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
@@ -496,6 +517,8 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'idr',
     currencyBasis: 'idr_based',
     sql: `SELECT sum(p.net_order_value) FILTER (WHERE p.currency_code = 'IDR') AS value,
+                 CASE WHEN count(*) FILTER (WHERE p.net_order_value IS NOT NULL AND p.net_order_value_usd IS NULL) > 0
+                      THEN NULL ELSE sum(p.net_order_value_usd) END AS value_usd,
                  count(*)::int AS sample
             FROM ${POL} p
            WHERE p.dataset_version_id = $1 AND NOT p.is_sto AND NOT p.is_deleted
@@ -779,6 +802,15 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST LIMIT 20`,
   },
   {
+    chartId: 'po_by_plant', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
+    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('plant', plant,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST LIMIT 20`,
+  },
+  {
     chartId: 'po_value_by_category', seriesKey: 'value', seriesLabel: 'Net order value (USD)', unit: 'usd',
     sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
                  COALESCE(material_category,'Other') AS bucket_label,
@@ -789,9 +821,28 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
   },
   {
+    chartId: 'po_value_by_category', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
+    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
+                 COALESCE(material_category,'Other') AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
+  },
+  {
     chartId: 'po_value_by_purch_org', seriesKey: 'value', seriesLabel: 'Net order value (USD)', unit: 'usd',
     sql: `SELECT purch_org AS bucket_key, purch_org AS bucket_label,
                  sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('purchOrg', purch_org,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST LIMIT 20`,
+  },
+  {
+    chartId: 'po_value_by_purch_org', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
+    sql: `SELECT purch_org AS bucket_key, purch_org AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
                    jsonb_build_object('purchOrg', purch_org,'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
@@ -810,6 +861,23 @@ export const PARITY_CHARTS: ChartSpec[] = [
                          CASE WHEN aging_days <= 30 THEN 1 WHEN aging_days <= 60 THEN 2
                               WHEN aging_days <= 90 THEN 3 WHEN aging_days <= 180 THEN 4 ELSE 5 END AS ord,
                          still_deliver_val_usd AS v
+                    FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+                      AND COALESCE(still_deliver_val,0) > 0) x
+           GROUP BY bk, ord ORDER BY ord`,
+  },
+  {
+    chartId: 'commitment_aging', seriesKey: 'value_idr', seriesLabel: 'Still to deliver (IDR)', unit: 'idr',
+    sql: `SELECT bk AS bucket_key, bk || ' days' AS bucket_label,
+                 sum(v)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('agingBand', bk,'notSto',true,'notDeleted',true,
+                                      'hasOpenCommitment',true)) AS drill
+            FROM (SELECT CASE WHEN aging_days <= 30 THEN '0-30' WHEN aging_days <= 60 THEN '31-60'
+                              WHEN aging_days <= 90 THEN '61-90' WHEN aging_days <= 180 THEN '91-180'
+                              ELSE '180+' END AS bk,
+                         CASE WHEN aging_days <= 30 THEN 1 WHEN aging_days <= 60 THEN 2
+                              WHEN aging_days <= 90 THEN 3 WHEN aging_days <= 180 THEN 4 ELSE 5 END AS ord,
+                         still_deliver_val_idr AS v
                     FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
                       AND COALESCE(still_deliver_val,0) > 0) x
            GROUP BY bk, ord ORDER BY ord`,
@@ -895,6 +963,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
     sql: `SELECT material_code AS bucket_key,
                  left(COALESCE(max(short_text), material_code), 40) AS bucket_label,
                  sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('materialCode', material_code,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND material_code IS NOT NULL
+           GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 15`,
+  },
+  {
+    chartId: 'top_materials_spend', seriesKey: 'value_idr', seriesLabel: 'Spend (IDR)', unit: 'idr',
+    sql: `SELECT material_code AS bucket_key,
+                 left(COALESCE(max(short_text), material_code), 40) AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
                    jsonb_build_object('materialCode', material_code,'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted

@@ -47,6 +47,7 @@ export function ChartPanel({
   filterQuery = '',
   onApplyFilter,
   variant = 'bar',
+  currency = 'USD',
 }: {
   chartId: string;
   onDrill: (token: string, label: string) => void;
@@ -60,6 +61,8 @@ export function ChartPanel({
   onApplyFilter?: (bucketKey: string, bucketLabel: string) => void;
   /** 'doughnut' renders v1's status-distribution donut; default is bars. */
   variant?: 'bar' | 'doughnut';
+  /** Money charts with an IDR twin series switch to it when 'IDR'. */
+  currency?: 'USD' | 'IDR';
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
@@ -81,6 +84,16 @@ export function ChartPanel({
       cancelled = true;
     };
   }, [chartId, filterQuery]);
+
+  // Display-currency twin series (seriesKey *_idr) — same rows, same drills.
+  const idrCount = (data?.series ?? []).filter((x) => x.key.endsWith('_idr')).length;
+  const hasTwin = idrCount > 0 && (data?.series ?? []).length > idrCount;
+  const shownSeries = !data
+    ? []
+    : hasTwin
+      ? data.series.filter((x) => (currency === 'IDR' ? x.key.endsWith('_idr') : !x.key.endsWith('_idr')))
+      : data.series;
+  const displayUnit = hasTwin && currency === 'IDR' ? 'idr' : data?.unit ?? 'count';
 
   useEffect(() => {
     if (!data || !canvas.current || data.buckets.length === 0) return;
@@ -148,7 +161,8 @@ export function ChartPanel({
             const el = meta.data[i];
             if (!el) return;
             const pos = el.tooltipPosition();
-            ctx.fillText(Number(v).toLocaleString('en-GB'), pos.x, pos.y);
+            const pct = ((Number(v) / total) * 100).toFixed(0);
+            ctx.fillText(`${Number(v).toLocaleString('en-GB')} (${pct}%)`, pos.x, pos.y);
           });
           ctx.restore();
         },
@@ -158,7 +172,7 @@ export function ChartPanel({
         c: { data: { labels: string[]; datasets: { data: number[]; backgroundColor: string[] }[] } },
       ) =>
         c.data.labels.map((l, i) => ({
-          text: `${l} — ${Number(c.data.datasets[0]!.data[i]).toLocaleString('en-GB')}`,
+          text: `${l} — ${Number(c.data.datasets[0]!.data[i]).toLocaleString('en-GB')} (${total > 0 ? ((Number(c.data.datasets[0]!.data[i]) / total) * 100).toFixed(0) : 0}%)`,
           fillStyle: c.data.datasets[0]!.backgroundColor[i],
           strokeStyle: c.data.datasets[0]!.backgroundColor[i],
           index: i,
@@ -173,11 +187,43 @@ export function ChartPanel({
       };
     }
 
+    // v1 prints the value above each bar; skipped when the chart is too dense
+    // to stay readable (values remain in the tooltip).
+    const barCount = data.buckets.length * shownSeries.length;
+    const barLabels = {
+      id: 'barLabels',
+      afterDatasetsDraw(c: {
+        ctx: CanvasRenderingContext2D;
+        data: { datasets: { data: (number | null)[] }[] };
+        getDatasetMeta: (i: number) => { data: { x: number; y: number }[]; hidden: boolean | null };
+      }) {
+        if (barCount > 24) return;
+        const ctx = c.ctx;
+        ctx.save();
+        ctx.font = '600 10px "Segoe UI", Arial, sans-serif';
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#64748B';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        c.data.datasets.forEach((ds, di) => {
+          const meta = c.getDatasetMeta(di);
+          if (meta.hidden) return;
+          ds.data.forEach((v, i) => {
+            if (v === null || v === undefined) return;
+            const el = meta.data[i];
+            if (!el) return;
+            ctx.fillText(formatKpi(Number(v), displayUnit), el.x, el.y - 2);
+          });
+        });
+        ctx.restore();
+      },
+    };
+
     chart.current = new ChartJS(canvas.current, {
       type: 'bar',
+      plugins: [barLabels as never],
       data: {
         labels,
-        datasets: data.series.map((s, i) => ({
+        datasets: shownSeries.map((s, i) => ({
           label: s.label,
           data: data.buckets.map((b) => {
             const p = s.points.find((x) => x.bucketKey === b.key);
@@ -186,7 +232,7 @@ export function ChartPanel({
           // Single-series priority charts colour each bucket like v1
           // (Emergency red ... Planned green); everything else keeps one hue.
           backgroundColor:
-            data.series.length === 1 && data.buckets.some((b) => PRIORITY_COLORS[b.label])
+            shownSeries.length === 1 && data.buckets.some((b) => PRIORITY_COLORS[b.label])
               ? data.buckets.map((b) => PRIORITY_COLORS[b.label] ?? PALETTE[0]!)
               : PALETTE[i % PALETTE.length],
           borderRadius: 3,
@@ -199,7 +245,7 @@ export function ChartPanel({
         onClick: (e, elements) => {
           const el = elements[0];
           if (!el) return;
-          const series = data.series[el.datasetIndex];
+          const series = shownSeries[el.datasetIndex];
           const bucket = data.buckets[el.index];
           if (!series || !bucket) return;
           // Alt/Shift-click cross-filters the page (v1 behaviour); plain click drills.
@@ -214,14 +260,14 @@ export function ChartPanel({
           }
         },
         plugins: {
-          legend: { display: data.series.length > 1, position: 'bottom', labels: { boxWidth: 12 } },
+          legend: { display: shownSeries.length > 1, position: 'bottom', labels: { boxWidth: 12 } },
           tooltip: {
             callbacks: {
               label: (ctx) => {
-                const series = data.series[ctx.datasetIndex];
+                const series = shownSeries[ctx.datasetIndex];
                 const bucket = data.buckets[ctx.dataIndex];
                 const p = series?.points.find((x) => x.bucketKey === bucket?.key);
-                const v = formatKpi(ctx.parsed.y, data.unit);
+                const v = formatKpi(ctx.parsed.y, displayUnit);
                 // Show the row count that the drill will return.
                 return `${series?.label}: ${v}${p ? ` (${p.rowCount.toLocaleString()} rows)` : ''}`;
               },
@@ -230,7 +276,7 @@ export function ChartPanel({
         },
         scales: {
           x: { grid: { display: false }, ticks: { maxRotation: 60, minRotation: 0, autoSkip: true } },
-          y: { beginAtZero: true, ticks: { callback: (v) => formatKpi(Number(v), data.unit) } },
+          y: { beginAtZero: true, ticks: { callback: (v) => formatKpi(Number(v), displayUnit) } },
         },
       },
     });
@@ -239,7 +285,7 @@ export function ChartPanel({
       chart.current?.destroy();
       chart.current = null;
     };
-  }, [data, onDrill, variant]);
+  }, [data, onDrill, variant, currency]);
 
   if (error) {
     return (

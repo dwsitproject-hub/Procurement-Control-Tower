@@ -210,6 +210,10 @@ export default function App() {
     try { return (localStorage.getItem('pct_theme') as ThemeMode) ?? 'auto'; } catch { return 'auto'; }
   });
   useEffect(() => { applyTheme(theme); }, [theme]);
+  const [currency, setCurrency] = useState<'USD' | 'IDR'>(() => {
+    try { return (localStorage.getItem('pct_currency') as 'USD' | 'IDR') ?? 'USD'; } catch { return 'USD'; }
+  });
+  useEffect(() => { try { localStorage.setItem('pct_currency', currency); } catch { /* private mode */ } }, [currency]);
 
   const onDrill = useCallback((token: string, label: string) => setDrill({ token, label }), []);
 
@@ -316,6 +320,13 @@ export default function App() {
         <span className="who">
           {me.displayName} · {me.roles.join(', ')}
         </span>
+        <button
+          className="tbtn"
+          title="Display currency: money cards and charts switch when an exact per-line conversion exists"
+          onClick={() => setCurrency(currency === 'USD' ? 'IDR' : 'USD')}
+        >
+          {currency === 'USD' ? '$ USD' : 'Rp IDR'}
+        </button>
         <a
           className="tbtn"
           href="/api/v1/snapshot"
@@ -474,7 +485,7 @@ export default function App() {
                         {rest.map(({ slot, kpi: k }) => (
                           <div key={slot} className={editing ? 'ly-slot' : undefined}>
                             {controls(slot)}
-                            <KpiCard kpi={k} onDrill={onDrill} />
+                            <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
                           </div>
                         ))}
                       </div>
@@ -497,7 +508,7 @@ export default function App() {
                               swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
                             />
                           )}
-                          <KpiCard kpi={k} onDrill={onDrill} />
+                          <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
                         </div>
                       ))}
                       {shownCustomKpis.map((spec) => (
@@ -551,7 +562,7 @@ export default function App() {
                         swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
                       />
                     )}
-                    <KpiCard kpi={k} onDrill={onDrill} />
+                    <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
                   </div>
                 ))}
                 {shownCustomKpis.map((spec) => (
@@ -579,6 +590,7 @@ export default function App() {
                   onDrill={onDrill}
                   filterQuery={gfQuery}
                   variant={DONUT_CHARTS.has(c) ? 'doughnut' : 'bar'}
+                  currency={currency}
                   onApplyFilter={
                     CHART_FILTER_DIM[c]
                       ? (bucketKey) => {

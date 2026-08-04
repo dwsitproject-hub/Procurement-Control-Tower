@@ -574,20 +574,26 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
 
   // PO value by month (STO excluded from spend)
   {
-    const r = await client.query<{ mk: string; usd: number | null; n: number }>(
+    const r = await client.query<{ mk: string; usd: number | null; idr: number | null; unrated_idr: number; n: number }>(
       `SELECT to_char(document_date, 'YYYY-MM') AS mk,
-              sum(net_order_value_usd) AS usd, count(*)::int AS n
+              sum(net_order_value_usd) AS usd,
+              sum(net_order_value_idr) AS idr,
+              count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_idr IS NULL)::int AS unrated_idr,
+              count(*)::int AS n
          FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
         GROUP BY 1 ORDER BY 1`,
       [versionId],
     );
-    r.rows.forEach((x, i) =>
+    r.rows.forEach((x, i) => {
+      // Must mirror the aggregate's WHERE exactly, or the drill over-counts.
+      const drill = { grain: 'po_line', filters: { monthKey: x.mk, notSto: true, notDeleted: true } };
       push('po_value_by_month', 'value', 'Net order value (USD)', x.mk, monthLabel(x.mk), i + 1,
-        x.usd, x.n, 'usd',
-        // Must mirror the aggregate's WHERE exactly, or the drill over-counts.
-        { grain: 'po_line', filters: { monthKey: x.mk, notSto: true, notDeleted: true } }),
-    );
+        x.usd, x.n, 'usd', drill);
+      // IDR display twin — same rows, same drill, strict per-line FX.
+      push('po_value_by_month', 'value_idr', 'Net order value (IDR)', x.mk, monthLabel(x.mk), i + 1,
+        x.unrated_idr > 0 ? null : x.idr, x.n, 'idr', drill);
+    });
   }
 
   // ordered vs received by PO month (STO included in delivery)
@@ -637,18 +643,27 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
 
   // top vendors by spend
   {
-    const r = await client.query<{ vendor_code: string | null; vendor_name: string | null; usd: number | null; n: number }>(
-      `SELECT vendor_code, max(vendor_name) AS vendor_name, sum(net_order_value_usd) AS usd, count(*)::int AS n
+    const r = await client.query<{
+      vendor_code: string | null; vendor_name: string | null; usd: number | null;
+      idr: number | null; unrated_idr: number; n: number;
+    }>(
+      `SELECT vendor_code, max(vendor_name) AS vendor_name, sum(net_order_value_usd) AS usd,
+              sum(net_order_value_idr) AS idr,
+              count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_idr IS NULL)::int AS unrated_idr,
+              count(*)::int AS n
          FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted AND vendor_code IS NOT NULL
         GROUP BY vendor_code ORDER BY usd DESC NULLS LAST LIMIT 15`,
       [versionId],
     );
-    r.rows.forEach((x, i) =>
+    r.rows.forEach((x, i) => {
+      const drill = { grain: 'po_line', filters: { vendorCode: x.vendor_code, notSto: true, notDeleted: true } };
       push('top_vendors_spend', 'spend', 'Spend (USD)', x.vendor_code ?? '?',
-        x.vendor_name ?? x.vendor_code ?? '?', i + 1, x.usd, x.n, 'usd',
-        { grain: 'po_line', filters: { vendorCode: x.vendor_code, notSto: true, notDeleted: true } }),
-    );
+        x.vendor_name ?? x.vendor_code ?? '?', i + 1, x.usd, x.n, 'usd', drill);
+      // IDR display twin — same rows, same drill, strict per-line FX.
+      push('top_vendors_spend', 'spend_idr', 'Spend (IDR)', x.vendor_code ?? '?',
+        x.vendor_name ?? x.vendor_code ?? '?', i + 1, x.unrated_idr > 0 ? null : x.idr, x.n, 'idr', drill);
+    });
   }
 
   // purchasing group workload

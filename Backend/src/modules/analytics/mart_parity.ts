@@ -169,10 +169,12 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'pr_item', filters: { status: 'PR Approved-No PO' } },
   },
   {
+    // Lines on hold, like v1's op-page card — the chips must sum to the
+    // headline. The distinct-document count rides along as the sub-detail.
     id: 'po_hold',
-    entityUnit: 'POs',
     unit: 'count',
-    sql: `SELECT count(DISTINCT po_no)::int AS value,
+    sql: `SELECT count(*)::int AS value,
+                 count(DISTINCT po_no)::int AS numerator,
                  count(*) FILTER (WHERE urgency <= 1)::int AS chip_emergency,
                  count(*) FILTER (WHERE urgency = 2)::int AS chip_urgent,
                  count(*) FILTER (WHERE COALESCE(urgency, 9) >= 3)::int AS chip_standard FROM ${POL}
@@ -235,11 +237,28 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'pr_item', filters: { unreleased: true, notDeleted: true } },
   },
   {
+    // v1's op-page "Open PR w/o WBS", v1-exact: AR-required violations that are
+    // open in v1's sense — no PO yet, or POs unapproved/held/awaiting GR with NO
+    // goods receipt anywhere on the item (v1 marks a row Delivered on ANY GR).
+    // Verified against v1 at full scope: 186 PRs exactly; 594 vs 599 items (v1
+    // judges multi-PO items by its first file row only — see V1_V2_Parity_Matrix).
     id: 'open_pr_no_wbs',
     unit: 'count',
-    sql: `SELECT count(*)::int AS value, count(DISTINCT pr_no)::int AS numerator FROM ${PRI}
-           WHERE dataset_version_id = $1 AND wbs_status = 'violation' AND status IN ${OPEN}`,
-    drill: { grain: 'pr_item', filters: { wbsStatus: 'violation', open: true } },
+    sql: `SELECT count(*)::int AS value,
+                 count(DISTINCT pr_no)::int AS numerator,
+                 sum(total_value_idr) AS chip_value_idr
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+             AND wbs_status = 'violation'
+             AND (status IN ('Unapproved PR','PR Approved-No PO')
+                  OR (EXISTS (SELECT 1 FROM ${POL} _pl
+                               WHERE _pl.dataset_version_id = ${PRI}.dataset_version_id
+                                 AND _pl.pr_no = ${PRI}.pr_no AND _pl.pr_item = ${PRI}.pr_item
+                                 AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR'))
+                      AND NOT EXISTS (SELECT 1 FROM ${POL} _pl2
+                               WHERE _pl2.dataset_version_id = ${PRI}.dataset_version_id
+                                 AND _pl2.pr_no = ${PRI}.pr_no AND _pl2.pr_item = ${PRI}.pr_item
+                                 AND _pl2.status IN ('Delivered','Partially Delivered'))))`,
+    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'violation', openBeforeGr: true } },
     worseWhenHigh: { warn: 1, crit: 100 },
   },
 
@@ -617,29 +636,14 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_line', filters: { notDeleted: true, poBeforePr: true } },
   },
   {
-    // The counter of Open PR w/o WBS: AR-required open items that DO carry one.
+    // The counter of Open PR w/o WBS: same v1-open rule, but the WBS is filled.
     id: 'open_pr_with_wbs',
     unit: 'count',
     sql: `SELECT count(*)::int AS value,
                  count(DISTINCT pr_no)::int AS numerator,
                  sum(total_value_idr) AS chip_value_idr
             FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
-             AND wbs_status = 'compliant' AND po_line_count = 0`,
-    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'compliant', prNoPo: true } },
-  },
-  {
-    // G6.4, v1-exact: v1's op-page "Open PR w/o WBS" card. Open in v1's sense
-    // means no PO yet, or POs unapproved/held/awaiting GR with NO goods receipt
-    // anywhere on the item (v1 marks a row Delivered on ANY GR). Verified
-    // against v1 at full scope: 186 PRs exactly; 594 vs 599 items (v1 judges
-    // multi-PO items by its first file row only — see V1_V2_Parity_Matrix).
-    id: 'wbs_open_violations',
-    unit: 'count',
-    sql: `SELECT count(*)::int AS value,
-                 count(DISTINCT pr_no)::int AS numerator,
-                 sum(total_value_idr) AS chip_value_idr
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
-             AND wbs_status = 'violation'
+             AND wbs_status = 'compliant'
              AND (status IN ('Unapproved PR','PR Approved-No PO')
                   OR (EXISTS (SELECT 1 FROM ${POL} _pl
                                WHERE _pl.dataset_version_id = ${PRI}.dataset_version_id
@@ -649,7 +653,7 @@ export const PARITY_KPIS: KpiSpec[] = [
                                WHERE _pl2.dataset_version_id = ${PRI}.dataset_version_id
                                  AND _pl2.pr_no = ${PRI}.pr_no AND _pl2.pr_item = ${PRI}.pr_item
                                  AND _pl2.status IN ('Delivered','Partially Delivered'))))`,
-    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'violation', openBeforeGr: true } },
+    drill: { grain: 'pr_item', filters: { notDeleted: true, wbsStatus: 'compliant', openBeforeGr: true } },
   },
 ];
 

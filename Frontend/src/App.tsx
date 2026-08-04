@@ -69,7 +69,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
     'po_not_delivered', 'open_items',
     'emergency_open', 'urgent_open', 'avg_unreleased_age', 'urgent_po_before_pr',
-    'retro_po_rate', 'open_pr_no_wbs', 'open_pr_with_wbs', 'wbs_open_violations',
+    'retro_po_rate', 'open_pr_no_wbs', 'open_pr_with_wbs',
     'commitment_over_60d',
   ],
   pr: [

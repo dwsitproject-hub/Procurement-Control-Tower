@@ -163,7 +163,7 @@ function subtitle(kpi: Kpi): string {
   if (kpi.kpiId === 'worst_approver_gap' && kpi.detail?.['worst_pic']) {
     parts.push(String(kpi.detail['worst_pic']));
   }
-  if (kpi.kpiId === 'wbs_open_violations' && kpi.detail?.['chip_value_idr']) {
+  if ((kpi.kpiId === 'open_pr_no_wbs' || kpi.kpiId === 'open_pr_with_wbs') && kpi.detail?.['chip_value_idr']) {
     parts.push(`${formatNumber(Number(kpi.numerator ?? 0))} PRs · ${(Number(kpi.detail['chip_value_idr']) / 1e9).toFixed(1)} B IDR`);
   }
 

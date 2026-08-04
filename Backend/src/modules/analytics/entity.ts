@@ -493,6 +493,29 @@ export async function materialDetail(
     params,
   );
 
+  // v1's material-360 line chart: unit price (= spend / qty, per line, IDR
+  // lines only) averaged per month, one series per top-6 vendor by amount.
+  const priceByVendor = await query<{ code: string | null; name: string | null; mk: string; price: number | null; n: number }>(
+    `WITH v6 AS (
+       SELECT pol.vendor_code, max(pol.vendor_name) AS vendor_name,
+              sum(pol.net_order_value) AS amt
+         FROM core.fact_po_line pol
+        WHERE ${where} AND pol.material_code = ${mp}
+          AND pol.currency_code = 'IDR' AND NOT pol.is_sto AND NOT pol.is_token_price
+        GROUP BY pol.vendor_code ORDER BY amt DESC NULLS LAST LIMIT 6)
+     SELECT pol.vendor_code AS code, max(v6.vendor_name) AS name,
+            to_char(pol.document_date,'YYYY-MM') AS mk,
+            avg(pol.net_order_value / NULLIF(pol.order_qty, 0)) AS price,
+            count(*)::int AS n
+       FROM core.fact_po_line pol
+       JOIN v6 ON v6.vendor_code = pol.vendor_code
+      WHERE ${where} AND pol.material_code = ${mp}
+        AND pol.currency_code = 'IDR' AND NOT pol.is_sto AND NOT pol.is_token_price
+        AND pol.order_qty > 0 AND pol.document_date IS NOT NULL
+      GROUP BY pol.vendor_code, 3 ORDER BY 3`,
+    [...params],
+  );
+
   const vendorShare = await query<{ code: string | null; name: string | null; usd: number | null; n: number }>(
     `SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
             sum(pol.net_order_value_usd) AS usd, count(*)::int AS n
@@ -540,6 +563,9 @@ export async function materialDetail(
       soleSource: head.vendors === 1,
     },
     priceHistory: priceHistory.map((x) => ({ monthKey: x.mk, avgUnitPrice: x.avg_price, lines: x.n })),
+    priceByVendor: priceByVendor.map((x) => ({
+      vendorCode: x.code, vendorName: x.name, monthKey: x.mk, unitPrice: x.price, lines: x.n,
+    })),
     vendorShare: vendorShare.map((x) => ({ vendorCode: x.code, vendorName: x.name, usd: x.usd, lines: x.n })),
     areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, lines: x.n })),
     poHistory: decorate(poHistory),
@@ -780,4 +806,46 @@ export async function requisitionerDemand(
   return {
     rows: raw.map(({ unrated, ...r }) => ({ ...r, valueUsd: unrated > 0 ? null : r.valueUsd })),
   };
+}
+
+// ─────────────────────────── v1's PO-page top-spend tables (items 1-2, 4 Aug)
+
+export type TopMaterialRow = {
+  materialCode: string;
+  description: string | null;
+  lines: number;
+  qty: number | null;
+  spendUsd: number | null;
+  spendIdr: number | null;
+  lastPo: string | null;
+};
+
+export async function topMaterialsSpend(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  limit = 10,
+): Promise<{ rows: TopMaterialRow[]; totalUsd: number | null }> {
+  const { where, params } = scoped(versionId, scope, 'pol');
+  const rows = await query<TopMaterialRow>(
+    `SELECT pol.material_code AS "materialCode",
+            left(max(pol.short_text), 60) AS description,
+            count(*)::int AS lines,
+            sum(pol.order_qty)::float AS qty,
+            sum(pol.net_order_value_usd)::float AS "spendUsd",
+            sum(pol.net_order_value_idr)::float AS "spendIdr",
+            to_char(max(pol.document_date), 'YYYY-MM-DD') AS "lastPo"
+       FROM core.fact_po_line pol
+      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
+        AND pol.material_code IS NOT NULL AND pol.material_code <> ''
+      GROUP BY 1 ORDER BY sum(pol.net_order_value_usd) DESC NULLS LAST
+      LIMIT ${Math.min(Math.max(limit, 1), 50)}`,
+    params,
+  );
+  const tot = await queryOne<{ usd: number | null }>(
+    `SELECT sum(pol.net_order_value_usd)::float AS usd
+       FROM core.fact_po_line pol
+      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted`,
+    params,
+  );
+  return { rows, totalUsd: tot?.usd ?? null };
 }

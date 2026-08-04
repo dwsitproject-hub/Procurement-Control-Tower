@@ -11,6 +11,7 @@ import {
 } from './components/GlobalFilterBar';
 import { MaterialsTab, VendorsTab } from './components/EntityViews';
 import { PrTables } from './components/PrTables';
+import { PoTables } from './components/PoTables';
 import { AdminTab } from './components/AdminTab';
 import { CustomTab } from './components/CustomTab';
 import { CoupaTab } from './components/CoupaTab';
@@ -121,10 +122,10 @@ const TAB_CHARTS: Record<Tab, string[]> = {
     'pr_approval_distribution', 'monthly_pr_no_po', 'pr_by_plant', 'wbs_by_plant',
   ],
   po: [
-    'po_value_by_month', 'top_vendors_spend', 'po_value_by_category', 'po_by_plant',
-    'po_value_by_purch_org', 'purch_group_workload', 'sourcing_by_priority',
-    'po_approval_by_priority', 'po_approval_distribution', 'sourcing_by_category',
-    'commitment_aging', 'top_materials_spend',
+    'po_amount_by_area', 'po_amount_by_matcat', 'po_value_by_month', 'po_value_by_category',
+    'po_by_plant', 'po_value_by_purch_org', 'po_value_by_pgrp', 'pr_status_by_pgrp',
+    'sourcing_by_priority', 'po_approval_by_priority', 'po_approval_distribution',
+    'sourcing_by_category', 'commitment_aging',
   ],
   delivery: [
     'delivery_ordered_vs_received', 'delivery_by_category', 'delivery_by_priority',
@@ -162,7 +163,7 @@ const EXEC_SECTIONS: { title: string; ids: string[] }[] = [
 ];
 
 // v1's status donut; every other chart stays a bar.
-const DONUT_CHARTS = new Set(['status_mix']);
+const DONUT_CHARTS = new Set(['status_mix', 'po_amount_by_area', 'po_value_by_pgrp']);
 
 // Cards that render v1's wide layout (value left, breakdown rows right).
 const TAB_WIDE_IDS: Partial<Record<Tab, string[]>> = {
@@ -653,6 +654,9 @@ export default function App() {
 
             {/* v1's PR-page tables: approval bottlenecks + requisitioner demand. */}
             {tab === 'pr' && <PrTables onDrill={onDrill} />}
+
+            {/* v1's PO-page top-spend tables with Vendor/Material 360 popups. */}
+            {tab === 'po' && <PoTables onDrill={onDrill} />}
 
             {/* v1's "Open Items Detail" table: the open rows themselves, with
                 the detail facets (category / priority / mat cat / plant) and a

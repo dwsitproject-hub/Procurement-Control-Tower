@@ -191,6 +191,13 @@ const FILTERS: Record<string, Compiler> = {
       '15-30': [14, 30],
       '31-60': [30, 60],
       '60+': [60, null],
+      // Six PO-approval bands (4 Aug 2026); same-day gets its own bucket.
+      '0d': [null, 0],
+      '1-3d': [0, 3],
+      '4-7d': [3, 7],
+      '8-14d': [7, 14],
+      '15-30d': [14, 30],
+      '>30d': [30, null],
     };
     const r = UPPER[o.bucket ?? ''];
     if (!r) throw new Error(`unknown distribution bucket: ${String(o.bucket)}`);
@@ -299,6 +306,26 @@ const FILTERS: Record<string, Compiler> = {
                 AND ${a}.document_date < _pr.requisition_date)`,
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
   requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
+  // Purchasing group, blank-aware: the charts bucket blanks as 'N/A'/'(none)'.
+  purchGrp: (v, a, ps) => {
+    const g = String(v);
+    if (g === 'N/A' || g === '(none)') {
+      return `(${a}.purch_group IS NULL OR btrim(${a}.purch_group) = '')`;
+    }
+    return `btrim(${a}.purch_group) = ${p(ps, g)}`;
+  },
+  // The pgrp-share donut's 'Others' slice: everything outside the top groups.
+  purchGrpNotIn: (v, a, ps) => {
+    const arr = (Array.isArray(v) ? v : [v]).map(String);
+    const named = arr.filter((x) => x !== 'N/A' && x !== '(none)');
+    const parts: string[] = [];
+    if (named.length > 0) parts.push(`NOT (btrim(COALESCE(${a}.purch_group,'')) = ANY(${p(ps, named)}))`);
+    if (arr.length !== named.length) parts.push(`NOT (${a}.purch_group IS NULL OR btrim(${a}.purch_group) = '')`);
+    return parts.length > 0 ? `(${parts.join(' AND ')})` : 'TRUE';
+  },
+  // Area roll-up (v1's Master_Area): dim_plant.area, else the raw plant code.
+  areaIs: (v, a, ps) =>
+    `COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${a}.plant), ${a}.plant) = ${p(ps, String(v))}`,
   foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
   // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause
   // EXACTLY — a converted PR item's own status never reaches 'Delivered', so

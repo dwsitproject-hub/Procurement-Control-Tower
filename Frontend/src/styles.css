@@ -587,3 +587,6 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 
 /* v1's PR-page table panels. */
 .pr-tbl-h { margin: 0 0 .5rem; font-size: .78rem; color: var(--heading); }
+
+/* PO-page top-spend tables: totals row. */
+.po-tbl-total td { font-weight: 700; border-top: 2px solid var(--border); }

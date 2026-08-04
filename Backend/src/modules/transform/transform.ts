@@ -44,6 +44,7 @@ import {
   type WbsConfig,
 } from '@pct/rules';
 import { insertMany, query } from '../../db/client.js';
+import { PLANT_AREA } from './area_map.js';
 import type { RuleSnapshot } from '../admin/rules.js';
 
 // ─────────────────────────────────────────────────────────────────── typing
@@ -873,6 +874,18 @@ export async function runTransform(
      ON CONFLICT (plant) DO NOTHING`,
     [versionId],
   );
+
+  // Area roll-up (v1's Master_Area): applied every ingest so a re-seeded or
+  // fresh database always carries it.
+  {
+    const entries = Object.entries(PLANT_AREA);
+    await client.query(
+      `UPDATE core.dim_plant dp SET area = m.area
+         FROM (SELECT unnest($1::text[]) AS plant, unnest($2::text[]) AS area) m
+        WHERE dp.plant = m.plant AND (dp.area IS DISTINCT FROM m.area)`,
+      [entries.map((e) => e[0]), entries.map((e) => e[1])],
+    );
+  }
 
   await client.query(
     `INSERT INTO core.dim_material_group (material_group, category)

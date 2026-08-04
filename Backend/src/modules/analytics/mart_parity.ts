@@ -696,6 +696,12 @@ interface ChartSpec {
   sql: string;
 }
 
+/** Six PO-approval bands (user decision 4 Aug 2026), same-day first. */
+const APPR6_BUCKET = `CASE WHEN d <= 0 THEN '0d' WHEN d <= 3 THEN '1-3d' WHEN d <= 7 THEN '4-7d'
+                           WHEN d <= 14 THEN '8-14d' WHEN d <= 30 THEN '15-30d' ELSE '>30d' END`;
+const APPR6_ORDER = `CASE WHEN d <= 0 THEN 1 WHEN d <= 3 THEN 2 WHEN d <= 7 THEN 3
+                          WHEN d <= 14 THEN 4 WHEN d <= 30 THEN 5 ELSE 6 END`;
+
 /** v1's four Open-Items age bands, ordered oldest-first like v1. */
 const AGE4_BUCKET = `CASE WHEN aging_days > 90 THEN '>90' WHEN aging_days > 30 THEN '31-90'
                           WHEN aging_days > 15 THEN '15-30' ELSE '0-15' END`;
@@ -945,15 +951,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2 ORDER BY 1`,
   },
   {
+    // Buckets per user decision 4 Aug 2026: 0d / 1-3d / 4-7d / 8-14d / 15-30d
+    // / >30d - same-day approvals get their own bar.
     chartId: 'po_approval_distribution', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
-    sql: `SELECT ${DIST_BUCKETS} AS bucket_key, ${DIST_BUCKETS} || ' days' AS bucket_label,
+    sql: `SELECT ${APPR6_BUCKET} AS bucket_key, ${APPR6_BUCKET} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
                    jsonb_build_object('notSto',true,'distBucket',
-                     jsonb_build_object('measure','po_approval','bucket', ${DIST_BUCKETS}))) AS drill
+                     jsonb_build_object('measure','po_approval','bucket', ${APPR6_BUCKET}))) AS drill
             FROM (SELECT po_approval_days AS d FROM ${POL}
                    WHERE dataset_version_id = $1 AND po_approval_days IS NOT NULL AND NOT is_sto) x
-           GROUP BY 1,2, ${DIST_ORDER} ORDER BY ${DIST_ORDER}`,
+           GROUP BY 1,2, ${APPR6_ORDER} ORDER BY ${APPR6_ORDER}`,
   },
   {
     chartId: 'sourcing_by_category', seriesKey: 'days', seriesLabel: 'Median sourcing (days)', unit: 'days',
@@ -1154,6 +1162,100 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
               AND material_code IS NOT NULL
            GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 15`,
+  },
+  // ── v1's ch-po-plant: PO Amount by Area (doughnut; Master_Area roll-up) ──
+  {
+    chartId: 'po_amount_by_area', seriesKey: 'value', seriesLabel: 'Amount (USD)', unit: 'usd',
+    sql: `SELECT COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant) AS bucket_key,
+                 COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant) AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('areaIs', COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
+  },
+  {
+    chartId: 'po_amount_by_area', seriesKey: 'value_idr', seriesLabel: 'Amount (IDR)', unit: 'idr',
+    sql: `SELECT COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant) AS bucket_key,
+                 COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant) AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('areaIs', COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
+  },
+  // ── v1's ch-po-matval: PO Amount by Material Category ──
+  {
+    chartId: 'po_amount_by_matcat', seriesKey: 'value', seriesLabel: 'Amount (USD)', unit: 'usd',
+    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
+                 COALESCE(material_category,'Other') AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
+  },
+  {
+    chartId: 'po_amount_by_matcat', seriesKey: 'value_idr', seriesLabel: 'Amount (IDR)', unit: 'idr',
+    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
+                 COALESCE(material_category,'Other') AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
+  },
+  // ── v1's ch-po-pgrp: PR Status by Purchasing Group. Outstanding counts PR
+  //    items awaiting a PO under the PR's OWN group (blank groups excluded,
+  //    like v1's '?' filter); Converted counts PO lines under the PO List's
+  //    group - who actually processed it - with blanks in a visible N/A
+  //    bucket, never borrowing the PR's group. ──
+  {
+    chartId: 'pr_status_by_pgrp', seriesKey: 'outstanding', seriesLabel: 'Outstanding (No PO)', unit: 'count',
+    sql: `SELECT btrim(purch_group) AS bucket_key, btrim(purch_group) AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('status','PR Approved-No PO','purchGrp', btrim(purch_group))) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND status = 'PR Approved-No PO'
+             AND btrim(COALESCE(purch_group,'')) <> ''
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_status_by_pgrp', seriesKey: 'converted', seriesLabel: 'Converted to PO', unit: 'count',
+    sql: `SELECT COALESCE(NULLIF(btrim(purch_group),''),'N/A') AS bucket_key,
+                 COALESCE(NULLIF(btrim(purch_group),''),'N/A') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('statusIn', jsonb_build_array('PO-No GR','Delivered','Partially Delivered'),
+                                      'purchGrp', COALESCE(NULLIF(btrim(purch_group),''),'N/A'))) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1
+             AND status IN ('PO-No GR','Delivered','Partially Delivered')
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-po-pgpie: PO Value by Purchasing Group - share of IDR spend
+  //    (doughnut; IDR document-currency lines only, top 8 + Others). ──
+  {
+    chartId: 'po_value_by_pgrp', seriesKey: 'value', seriesLabel: 'Spend (IDR)', unit: 'idr',
+    sql: `WITH g AS (
+            SELECT COALESCE(NULLIF(btrim(purch_group),''),'(none)') AS grp,
+                   sum(net_order_value)::numeric AS val, count(*)::int AS n
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND currency_code = 'IDR' AND NOT is_deleted
+             GROUP BY 1),
+          r AS (SELECT g.*, row_number() OVER (ORDER BY val DESC NULLS LAST) AS rk FROM g),
+          top AS (SELECT * FROM r WHERE rk <= 8)
+          SELECT grp AS bucket_key, grp AS bucket_label, val AS value, n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('currencyIs','IDR','notDeleted',true,'purchGrp',grp)) AS drill
+            FROM top
+          UNION ALL
+          SELECT 'Others','Others', sum(val), sum(n)::int,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('currencyIs','IDR','notDeleted',true,
+                                      'purchGrpNotIn', (SELECT jsonb_agg(grp) FROM top)))
+            FROM r WHERE rk > 8
+          HAVING count(*) > 0
+          ORDER BY 3 DESC NULLS LAST`,
   },
 ];
 

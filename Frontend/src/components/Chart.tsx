@@ -20,6 +20,30 @@ const PRIORITY_COLORS: Record<string, string> = {
   '04-Planned': '#4CAF50',
   '(unlabelled)': '#94a3b8',
 };
+// v1's MC2 material-category palette + the six PO-approval bands - any
+// single-series bar chart whose bucket labels match gets per-bar colours.
+const CATEGORY_COLORS: Record<string, string> = {
+  Service: '#7C3AED',
+  'Spare Parts-General': '#2E75B6',
+  'Spare Parts-Factory': '#0D9488',
+  Chemical: '#ED7D31',
+  'Packing Material': '#DB2777',
+  'Fuel & Lubricant': '#F59E0B',
+  Fertilizer: '#4CAF50',
+  'Raw Product Liquid': '#1F3864',
+  'Raw Product Solid': '#374151',
+  'Finished Goods': '#9333EA',
+  Other: '#94a3b8',
+  // PO approval bands: same-day teal, escalating to dark red past a month.
+  '0d': '#0D9488',
+  '1-3d': '#4CAF50',
+  '4-7d': '#F59E0B',
+  '8-14d': '#ED7D31',
+  '15-30d': '#dc2626',
+  '>30d': '#7f1d1d',
+};
+const BAR_COLORS: Record<string, string> = { ...PRIORITY_COLORS, ...CATEGORY_COLORS };
+
 // v1's PR Status Distribution donut colours, keyed by status.
 const STATUS_COLORS: Record<string, string> = {
   Delivered: '#4CAF50',
@@ -102,7 +126,7 @@ export function ChartPanel({
     const labels = data.buckets.map((b) => b.label);
 
     if (variant === 'doughnut') {
-      const series = data.series[0];
+      const series = shownSeries[0];
       if (!series) return;
       const values = data.buckets.map((b) => series.points.find((x) => x.bucketKey === b.key)?.value ?? 0);
       // Chart.js's per-type generics fight a union of bar|doughnut through one
@@ -162,7 +186,10 @@ export function ChartPanel({
             if (!el) return;
             const pos = el.tooltipPosition();
             const pct = ((Number(v) / total) * 100).toFixed(0);
-            ctx.fillText(`${Number(v).toLocaleString('en-GB')} (${pct}%)`, pos.x, pos.y);
+            const txt = displayUnit === 'count'
+              ? Number(v).toLocaleString('en-GB')
+              : formatKpi(Number(v), displayUnit);
+            ctx.fillText(`${txt} (${pct}%)`, pos.x, pos.y);
           });
           ctx.restore();
         },
@@ -172,7 +199,9 @@ export function ChartPanel({
         c: { data: { labels: string[]; datasets: { data: number[]; backgroundColor: string[] }[] } },
       ) =>
         c.data.labels.map((l, i) => ({
-          text: `${l} — ${Number(c.data.datasets[0]!.data[i]).toLocaleString('en-GB')} (${total > 0 ? ((Number(c.data.datasets[0]!.data[i]) / total) * 100).toFixed(0) : 0}%)`,
+          text: `${l} — ${displayUnit === 'count'
+            ? Number(c.data.datasets[0]!.data[i]).toLocaleString('en-GB')
+            : formatKpi(Number(c.data.datasets[0]!.data[i]), displayUnit)} (${total > 0 ? ((Number(c.data.datasets[0]!.data[i]) / total) * 100).toFixed(0) : 0}%)`,
           fillStyle: c.data.datasets[0]!.backgroundColor[i],
           strokeStyle: c.data.datasets[0]!.backgroundColor[i],
           index: i,
@@ -232,8 +261,8 @@ export function ChartPanel({
           // Single-series priority charts colour each bucket like v1
           // (Emergency red ... Planned green); everything else keeps one hue.
           backgroundColor:
-            shownSeries.length === 1 && data.buckets.some((b) => PRIORITY_COLORS[b.label])
-              ? data.buckets.map((b) => PRIORITY_COLORS[b.label] ?? PALETTE[0]!)
+            shownSeries.length === 1 && data.buckets.some((b) => BAR_COLORS[b.label])
+              ? data.buckets.map((b) => BAR_COLORS[b.label] ?? PALETTE[0]!)
               : PALETTE[i % PALETTE.length],
           borderRadius: 3,
         })),

@@ -1,6 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  CategoryScale, Chart as ChartJS, Legend, LineController, LineElement,
+  LinearScale, PointElement, Tooltip,
+} from 'chart.js';
 import { api } from '../lib/api';
-import { DASH, FLAG_META, formatDate, formatMoney, formatNumber } from '../lib/format';
+
+ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
+import { DASH, FLAG_META, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
 
 /**
  * W3 — Vendor 360 and Material Group views (v1's pg-v360 / pg-mg / mx-modal).
@@ -259,7 +265,7 @@ function VendorOtdBars({ onOpenVendor }: { onOpenVendor: (code: string) => void 
   );
 }
 
-function VendorModal({
+export function VendorModal({
   code, onClose, onDrill,
 }: { code: string; onClose: () => void; onDrill: (t: string, l: string) => void }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
@@ -574,12 +580,21 @@ export function MaterialModal({
                 <Bio label="Group / category" value={`${d.materialGroup ?? DASH} · ${d.category ?? DASH}`} />
               </div>
 
+              {/* v1's material-360: per-vendor unit-price trend + two share donuts. */}
+              <div className="ent-mini" style={{ marginTop: '.6rem' }}>
+                <div className="ent-h" style={{ marginTop: 0 }}>Unit price by month — top vendors (IDR lines)</div>
+                <PriceTrend rows={d.priceByVendor ?? []} />
+                <p className="note" style={{ marginBottom: 0 }}>
+                  Showing top {Math.min(6, d.kpis.vendorCount)} of {d.kpis.vendorCount} vendors by amount.
+                  Unit price = Net Price ÷ Price Unit (i.e. Spend ÷ Order Qty), deduped per PO line, averaged per month.
+                </p>
+              </div>
               <TwoCol
-                left={<MiniBars title="Avg unit price by month (IDR lines, STO/token excluded)" rows={d.priceHistory.map((x: any) => ({ label: x.monthKey, value: x.avgUnitPrice, count: x.lines }))} />}
-                right={<MiniBars title="Vendor share of spend (USD)" rows={d.vendorShare.map((x: any) => ({ label: x.vendorName ?? x.vendorCode ?? '(plant)', value: x.usd, count: x.lines }))} money />}
+                left={<AreaDonut title="Suppliers / Vendors — share of PO amount (USD)" rows={d.vendorShare.map((x: any) => ({ plant: x.vendorCode, plantName: `${x.vendorCode ?? ''} ${x.vendorName ?? ''}`.trim() || '(plant)', usd: x.usd }))} />}
+                right={<AreaDonut title="Areas purchased — share of PO amount (USD)" rows={d.areaShare ?? []} />}
               />
 
-              <h4 className="ent-h">PO history <span className="muted">(newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
+              <h4 className="ent-h">Purchase Orders for this material <span className="muted">· {formatNumber(d.kpis.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
               <PoHistoryTable rows={d.poHistory} vendor />
             </>
           )}
@@ -620,6 +635,52 @@ function AreaDonut({ title, rows }: { title: string; rows: Record<string, any>[]
       </div>
     </div>
   );
+}
+
+/** v1's material-360 unit-price trend: one line per top-6 vendor (IDR). */
+function PriceTrend({ rows }: { rows: Record<string, any>[] }) {
+  const canvas = useRef<HTMLCanvasElement | null>(null);
+  const chart = useRef<ChartJS | null>(null);
+  useEffect(() => {
+    if (!canvas.current || rows.length === 0) return;
+    const months = [...new Set(rows.map((r) => String(r.monthKey)))].sort();
+    const vendors = [...new Set(rows.map((r) => String(r.vendorCode)))];
+    const COLORS = ['#2E75B6', '#0D9488', '#ED7D31', '#7C3AED', '#e11d48', '#ca8a04'];
+    chart.current?.destroy();
+    chart.current = new ChartJS(canvas.current, {
+      type: 'line',
+      data: {
+        labels: months,
+        datasets: vendors.map((vc, i) => {
+          const name = rows.find((r) => r.vendorCode === vc)?.vendorName ?? vc;
+          return {
+            label: `${vc} ${String(name).slice(0, 26)}`,
+            data: months.map((m) => {
+              const hit = rows.find((r) => r.vendorCode === vc && r.monthKey === m);
+              return hit ? Number(hit.unitPrice) : null;
+            }),
+            borderColor: COLORS[i % COLORS.length],
+            backgroundColor: COLORS[i % COLORS.length],
+            spanGaps: true,
+            tension: 0.3,
+            pointRadius: 3,
+          };
+        }),
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: true, position: 'top', labels: { boxWidth: 10, font: { size: 9 } } },
+        },
+        scales: { y: { title: { display: true, text: 'Unit price (IDR)' } } },
+      },
+    }) as unknown as ChartJS;
+    return () => { chart.current?.destroy(); chart.current = null; };
+  }, [rows]);
+  if (rows.length === 0) return <p className="note">No IDR unit-price history to chart.</p>;
+  return <div style={{ height: 240 }}><canvas ref={canvas} /></div>;
 }
 
 function Bio({ label, value, title }: { label: string; value: string; title?: string }) {
@@ -674,7 +735,7 @@ function SimpleTable({ head, rows }: { head: string[]; rows: (string | null)[][]
 function PoHistoryTable({ rows, vendor = false }: { rows: Record<string, any>[]; vendor?: boolean }) {
   return (
     <div className="table-wrap" style={{ maxHeight: '340px', overflow: 'auto' }}>
-      <table className="data">
+      <table className="data dd-tbl">
         <thead>
           <tr>
             <th /><th>PO</th><th>Item</th><th>Date</th>
@@ -708,7 +769,7 @@ function PoHistoryTable({ rows, vendor = false }: { rows: Record<string, any>[];
               <td>{r2.currencyCode}</td>
               <td className="num">{formatMoney(r2.netOrderValue)}</td>
               <td className="num">{formatMoney(r2.netOrderValueUsd, 'USD')}</td>
-              <td>{r2.status}</td>
+              <td><span className={'bs ' + (STATUS_PILL[String(r2.status)] ?? 'sl')}>{r2.status}</span></td>
               <td>{formatDate(r2.receiptDate)}</td>
             </tr>
           ))}

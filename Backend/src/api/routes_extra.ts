@@ -13,7 +13,7 @@ import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill
 import { sessionFingerprint } from '../modules/auth/session.js';
 import {
   approverBottlenecks, materialDetail, materialGroupPage, requisitionerDemand,
-  vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
+  topMaterialsSpend, vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
 } from '../modules/analytics/entity.js';
 import {
   exclusionOptions, fxTable, loadExclusions, mappingStatus, saveExclusions, saveMapping,
@@ -108,6 +108,21 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         ),
       },
     });
+  }));
+
+  // ── v1's PO-page top-spend tables (aggregates only, so viewer role) ──
+  r.get('/api/v1/entity/top-vendors-spend', role('viewer', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await version();
+    const out = await vendorList(v.id, ctx.scope, '', Math.min(Number(req.query.limit ?? 10), 50));
+    res.json({ datasetVersionId: v.id, totalVendors: out.totalVendors, rows: out.rows });
+  }));
+
+  r.get('/api/v1/entity/top-materials-spend', role('viewer', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await version();
+    const out = await topMaterialsSpend(v.id, ctx.scope, Number(req.query.limit ?? 10));
+    res.json({ datasetVersionId: v.id, ...out });
   }));
 
   // ── v1's PR Analysis tables: approval bottlenecks + requisitioner demand ──

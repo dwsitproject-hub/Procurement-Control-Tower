@@ -268,6 +268,12 @@ function FxPanel() {
         Rates are stored per dataset version — a re-published bundle with a corrected rate file never
         changes figures already published.
       </p>
+      <p className="note">
+        <strong>Period basis:</strong> a PO with a booked Coupa invoice converts at its <strong>invoice
+        date</strong>'s period (latest invoice; voided/draft excluded); a PO without one converts at its{' '}
+        <strong>PO document date</strong>'s period. Each line's <code>fx_basis</code> records which date
+        fed the rate. New invoices affect figures at the next recompute.
+      </p>
     </div>
   );
 }

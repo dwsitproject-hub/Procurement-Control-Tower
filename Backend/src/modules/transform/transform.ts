@@ -99,6 +99,8 @@ export interface TransformMetrics {
   unratedCurrencies: string[];
   excludedPoLines: number;
   excludedPrItems: number;
+  /** PO lines whose FX period came from a Coupa invoice date (basis rule). */
+  invoiceDatedFxLines: number;
 }
 
 export interface TransformResult {
@@ -330,6 +332,30 @@ export async function runTransform(
   }
   const danglingKeys = new Set(linkage.dangling.map((d) => `${d.poNo}|${d.poItem}`));
 
+  // ── FX date basis (decision 4 Aug 2026) ──
+  // A PO with a booked invoice converts at the INVOICE date's period; without
+  // one, at the PO document date's period. Invoices live only in the Coupa
+  // operational store (SAP feeds carry none), joined back via the sap-po-no
+  // cross-reference. Where the store is empty or unlinked, every line falls
+  // back to the PO date — exactly the prior behaviour. Voided and draft
+  // invoices do not count; multiple invoices use the latest invoice date.
+  const invoiceDateByPo = new Map<string, string>();
+  try {
+    const invRes = await client.query<{ sap_po_no: string; inv_date: string }>(
+      `SELECT pl.sap_po_no, max(i.invoice_date)::text AS inv_date
+         FROM ops.coupa_invoice_line il
+         JOIN ops.coupa_invoice i ON i.id = il.invoice_id
+         JOIN ops.coupa_po_line pl ON pl.po_number = il.po_number
+        WHERE pl.sap_po_no IS NOT NULL AND i.invoice_date IS NOT NULL
+          AND COALESCE(i.status, '') NOT IN ('voided', 'draft')
+        GROUP BY pl.sap_po_no`,
+    );
+    for (const r of invRes.rows) invoiceDateByPo.set(r.sap_po_no, r.inv_date);
+  } catch {
+    // ops schema absent (pre-Coupa database) — PO-date basis throughout.
+  }
+  let invoiceDatedLines = 0;
+
   // ─────────────────────────────────────────────────── build PO line rows
 
   const poFactRows: unknown[][] = [];
@@ -387,15 +413,19 @@ export async function runTransform(
 
     const ccy = normCurrency(p.currencyCode);
     const docDate = s(p.documentDate);
-    const conv = fx.table.toUsd(n(p.netOrderValue), ccy, docDate, fxPolicy);
+    // Invoice-date FX basis when the PO is invoiced; PO-date otherwise.
+    const invoiceDate = poNo !== null ? invoiceDateByPo.get(poNo) ?? null : null;
+    const fxDate = invoiceDate ?? docDate;
+    if (invoiceDate !== null) invoiceDatedLines += 1;
+    const conv = fx.table.toUsd(n(p.netOrderValue), ccy, fxDate, fxPolicy);
     if (ccy !== null && conv.resolution.usdPerUnit === null) unrated.add(ccy);
-    const convDeliver = fx.table.toUsd(n(p.stillDeliverVal), ccy, docDate, fxPolicy);
-    const convInvoice = fx.table.toUsd(n(p.stillInvoiceVal), ccy, docDate, fxPolicy);
+    const convDeliver = fx.table.toUsd(n(p.stillDeliverVal), ccy, fxDate, fxPolicy);
+    const convInvoice = fx.table.toUsd(n(p.stillInvoiceVal), ccy, fxDate, fxPolicy);
 
     // IDR equivalents for the display-currency toggle: document value verbatim
     // for IDR lines; foreign lines convert USD -> IDR at the SAME period's IDR
     // rate. No rate for the period => NULL (strict, never a blended guess).
-    const idrRate = fx.table.toUsd(1, 'IDR', docDate, fxPolicy).resolution.usdPerUnit;
+    const idrRate = fx.table.toUsd(1, 'IDR', fxDate, fxPolicy).resolution.usdPerUnit;
     const toIdr = (raw: number | null, usd: number | null): number | null => {
       if (ccy === 'IDR') return raw;
       if (usd === null || idrRate === null || idrRate === 0) return null;
@@ -497,7 +527,9 @@ export async function runTransform(
       convInvoice.usd,
       conv.resolution.year,
       conv.resolution.month,
-      conv.resolution.basis,
+      conv.resolution.basis === null
+        ? null
+        : `${conv.resolution.basis}${invoiceDate !== null ? '+invoice_date' : '+po_date'}`,
       docDate,
       deliveryDate,
       deliveryDate !== null && docDate !== null ? deliveryDate === docDate : null,
@@ -889,6 +921,7 @@ export async function runTransform(
     unratedCurrencies: [...unrated],
     excludedPoLines,
     excludedPrItems,
+    invoiceDatedFxLines: invoiceDatedLines,
   };
 
   // `contaminated` counts lines where a naive earliest-any-movement date WOULD

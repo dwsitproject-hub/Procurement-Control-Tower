@@ -109,15 +109,27 @@ export function ChartPanel({
     };
   }, [chartId, filterQuery]);
 
+  // Annotation series (key label_*) are never drawn as bars: their per-bucket
+  // values ride in the bar labels and tooltips (e.g. amount per category).
+  const allSeries = data?.series ?? [];
+  const mainSeries = allSeries.filter((x) => !x.key.startsWith('label_'));
+  const annSeriesAll = allSeries.filter((x) => x.key.startsWith('label_'));
   // Display-currency twin series (seriesKey *_idr) — same rows, same drills.
-  const idrCount = (data?.series ?? []).filter((x) => x.key.endsWith('_idr')).length;
-  const hasTwin = idrCount > 0 && (data?.series ?? []).length > idrCount;
+  const idrCount = mainSeries.filter((x) => x.key.endsWith('_idr')).length;
+  const hasTwin = idrCount > 0 && mainSeries.length > idrCount;
   const shownSeries = !data
     ? []
     : hasTwin
-      ? data.series.filter((x) => (currency === 'IDR' ? x.key.endsWith('_idr') : !x.key.endsWith('_idr')))
-      : data.series;
+      ? mainSeries.filter((x) => (currency === 'IDR' ? x.key.endsWith('_idr') : !x.key.endsWith('_idr')))
+      : mainSeries;
   const displayUnit = hasTwin && currency === 'IDR' ? 'idr' : data?.unit ?? 'count';
+  // The annotation honours the currency toggle on its own.
+  const annSeries = annSeriesAll.length === 0
+    ? undefined
+    : currency === 'IDR'
+      ? annSeriesAll.find((x) => x.key.endsWith('_idr')) ?? annSeriesAll[0]
+      : annSeriesAll.find((x) => !x.key.endsWith('_idr')) ?? annSeriesAll[0];
+  const annUnit = annSeries?.key.endsWith('_idr') ? 'idr' : 'usd';
 
   useEffect(() => {
     if (!data || !canvas.current || data.buckets.length === 0) return;
@@ -240,7 +252,13 @@ export function ChartPanel({
             if (v === null || v === undefined) return;
             const el = meta.data[i];
             if (!el) return;
-            ctx.fillText(formatKpi(Number(v), displayUnit), el.x, el.y - 2);
+            let txt = formatKpi(Number(v), displayUnit);
+            if (annSeries && c.data.datasets.length === 1) {
+              const bucket = data.buckets[i];
+              const av = bucket ? annSeries.points.find((x) => x.bucketKey === bucket.key)?.value : null;
+              if (av !== null && av !== undefined) txt += ` · ${formatKpi(Number(av), annUnit)}`;
+            }
+            ctx.fillText(txt, el.x, el.y - 2);
           });
         });
         ctx.restore();
@@ -297,8 +315,14 @@ export function ChartPanel({
                 const bucket = data.buckets[ctx.dataIndex];
                 const p = series?.points.find((x) => x.bucketKey === bucket?.key);
                 const v = formatKpi(ctx.parsed.y, displayUnit);
+                const av = annSeries && bucket
+                  ? annSeries.points.find((x) => x.bucketKey === bucket.key)?.value
+                  : null;
+                const ann = av === null || av === undefined
+                  ? ''
+                  : ` · ${annSeries!.label} ${formatKpi(Number(av), annUnit)}`;
                 // Show the row count that the drill will return.
-                return `${series?.label}: ${v}${p ? ` (${p.rowCount.toLocaleString()} rows)` : ''}`;
+                return `${series?.label}: ${v}${ann}${p ? ` (${p.rowCount.toLocaleString()} rows)` : ''}`;
               },
             },
           },

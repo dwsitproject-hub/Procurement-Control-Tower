@@ -1121,6 +1121,29 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
+  // Annotation series (label_*): not drawn as bars - the per-category PR
+  // valuation rides in the bar labels and tooltips, in both currencies so the
+  // display toggle picks the right one (user ask 5 Aug 2026).
+  {
+    chartId: 'items_by_category', seriesKey: 'label_amount', seriesLabel: 'Value (USD)', unit: 'usd',
+    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
+                 COALESCE(material_category,'Other') AS bucket_label,
+                 sum(total_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY count(*) DESC`,
+  },
+  {
+    chartId: 'items_by_category', seriesKey: 'label_amount_idr', seriesLabel: 'Value (IDR)', unit: 'idr',
+    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
+                 COALESCE(material_category,'Other') AS bucket_label,
+                 sum(total_value_idr)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY count(*) DESC`,
+  },
   {
     chartId: 'e2e_by_category', seriesKey: 'days', seriesLabel: 'Avg E2E (days)', unit: 'days',
     // Grouped by the PO line's own category (not the PR's) so the po_line-grain

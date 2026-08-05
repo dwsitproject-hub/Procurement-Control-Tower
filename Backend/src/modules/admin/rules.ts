@@ -22,6 +22,9 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   'freshness.ageing_days': 3,
   'freshness.stale_days': 7,
   'kpi.min_sample': 30,
+  // Coupa exchange-rate API as a second FX source (009): OFF until the admin
+  // enables it — staging carries test rates that must not touch real figures.
+  'fx.coupa_source_enabled': false,
   // Coupa poller (TECH_04 §3.4). Credentials are env-only, never here.
   'coupa.sync_enabled': false,
   'coupa.sync_interval_minutes': 10,

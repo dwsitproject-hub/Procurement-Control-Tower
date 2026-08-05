@@ -154,3 +154,20 @@ Admin tab gets a **Coupa panel**: enable toggle, interval field, per-object stat
 | C3 | `poller.ts` + rule_config keys + Admin panel + "Sync now" | Interval honored; lock prevents overlap; failure surfaces in banner + audit |
 | C4 | Sourcing + Invoice/Payment marts, tabs, drill specs | Sweep extended to Coupa specs: 0 mismatches; empty-state honest when sync disabled |
 | C5 | Soak: 5-min interval for 48h on staging | No watermark drift; token refresh stable; memory flat |
+
+## Exchange rates as a second FX source (added 5 Aug 2026, payload doc v3.0)
+
+`GET /api/exchange_rates` syncs into `ops.coupa_exchange_rate` (migration 009)
+under the same watermark mechanism as the other objects.
+
+At transform time the two FX sources compete per currency pair and calendar
+month: the SAP rate-conversion excel (timed by its file's `source_mtime`) vs
+the newest Coupa rate in that month (timed by its `updated-at`). Whichever
+record was updated most recently wins; pairs/months the excel lacks are added
+from Coupa. Metrics: `coupaFxCandidates` / `coupaFxAdded` / `coupaFxReplaced`.
+
+**Gated by `fx.coupa_source_enabled` (default OFF, Admin → Coupa panel).**
+Staging (kpn-test) carries test rates (e.g. USD→IDR 17.8 instead of ~16,800):
+with the gate open they inflated PR Pipeline from $86.5M to $76B in one
+recompute. Enable only where Coupa carries real rates.
+

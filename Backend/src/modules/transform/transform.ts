@@ -102,6 +102,11 @@ export interface TransformMetrics {
   excludedPrItems: number;
   /** PO lines whose FX period came from a Coupa invoice date (basis rule). */
   invoiceDatedFxLines: number;
+  /** Coupa exchange-rate API merge (009): candidate pairs, months added where
+   *  the excel had no rate, and excel rates replaced by a newer Coupa rate. */
+  coupaFxCandidates: number;
+  coupaFxAdded: number;
+  coupaFxReplaced: number;
 }
 
 export interface TransformResult {
@@ -180,7 +185,9 @@ export async function runTransform(
   if (asOfDate === null) throw new Error('cannot derive an as-of date: no PO or GR dates present');
 
   // ── FX table ──
-  const fx = buildFx(fxRows, poRows, asOfDate);
+  const coupaFxEnabled =
+    rules['fx.coupa_source_enabled'] === true || rules['fx.coupa_source_enabled'] === 'true';
+  const fx = await buildFx(fxRows, poRows, asOfDate, batchId, coupaFxEnabled);
 
   // ── create the version and its partitions ──
   const verIns = await client.query<{ id: string }>(
@@ -939,6 +946,9 @@ export async function runTransform(
     excludedPoLines,
     excludedPrItems,
     invoiceDatedFxLines: invoiceDatedLines,
+    coupaFxCandidates: fx.coupaFx.candidates,
+    coupaFxAdded: fx.coupaFx.added,
+    coupaFxReplaced: fx.coupaFx.replaced,
   };
 
   // `contaminated` counts lines where a naive earliest-any-movement date WOULD
@@ -957,11 +967,18 @@ export async function runTransform(
 
 // ─────────────────────────────────────────────────────────────────────── FX
 
-function buildFx(
+async function buildFx(
   fxRows: StagedRow[],
   poRows: StagedRow[],
   asOfDate: string,
-): { table: FxTable; rates: ReturnType<typeof buildFxTable>; yearResolved: number | null } {
+  batchId: number,
+  coupaEnabled: boolean,
+): Promise<{
+  table: FxTable;
+  rates: ReturnType<typeof buildFxTable>;
+  yearResolved: number | null;
+  coupaFx: { candidates: number; added: number; replaced: number };
+}> {
   // The reference rate file's Month column has NO year. Anchor it from the data
   // range rather than v1's hardcoded year 2000.
   let minDate = asOfDate;
@@ -989,8 +1006,65 @@ function buildFx(
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
 
+  // ── second FX source: Coupa's exchange-rate API (009) ──
+  // Per currency pair and calendar month, the excel row and the newest Coupa
+  // rate compete; whichever record was updated most recently wins. The excel
+  // side is timed by its file's source_mtime — if that is unknown, the excel
+  // keeps its rate (the conservative, pre-009 behaviour).
+  const coupaFx = { candidates: 0, added: 0, replaced: 0 };
+  try {
+    if (!coupaEnabled) throw new Error('disabled');
+    const mtimeRow = await query<{ mt: string | null }>(
+      `SELECT max(source_mtime)::text AS mt FROM ingest.batch_file
+        WHERE batch_id = $1 AND detected_feed = 'fx'`,
+      [batchId],
+    );
+    const excelMtime = mtimeRow[0]?.mt ?? null;
+
+    const rows = await query<{
+      from_c: string; to_c: string; rate: number; rate_date: string; updated_at: string | null;
+    }>(
+      `SELECT from_currency AS from_c, to_currency AS to_c, rate::float AS rate,
+              rate_date::text AS rate_date, updated_at::text AS updated_at
+         FROM ops.coupa_exchange_rate
+        WHERE rate_date IS NOT NULL AND rate > 0`,
+    );
+
+    // Newest rate per (from, to, year, month): latest rate_date, then updated_at.
+    const best = new Map<string, { from: string; to: string; rate: number; year: number; month: number; rateDate: string; updatedAt: string | null }>();
+    for (const r of rows) {
+      const from = normCurrency(r.from_c);
+      const to = normCurrency(r.to_c);
+      if (from === null || to === null) continue;
+      const y = Number(r.rate_date.slice(0, 4));
+      const m = Number(r.rate_date.slice(5, 7));
+      const k = `${from}|${to}|${y}|${m}`;
+      const cur = best.get(k);
+      if (!cur || r.rate_date > cur.rateDate ||
+          (r.rate_date === cur.rateDate && String(r.updated_at ?? '') > String(cur.updatedAt ?? ''))) {
+        best.set(k, { from, to, rate: r.rate, year: y, month: m, rateDate: r.rate_date, updatedAt: r.updated_at });
+      }
+    }
+    coupaFx.candidates = best.size;
+
+    const excelIdx = new Map<string, number>();
+    raw.forEach((r, idx) => excelIdx.set(`${r.from}|${r.to}|${r.year}|${r.month}`, idx));
+    for (const [k, c] of best) {
+      const at = excelIdx.get(k);
+      if (at === undefined) {
+        raw.push({ from: c.from, to: c.to, rate: c.rate, year: c.year, month: c.month });
+        coupaFx.added += 1;
+      } else if (excelMtime !== null && c.updatedAt !== null && c.updatedAt > excelMtime) {
+        raw[at] = { ...raw[at]!, rate: c.rate };
+        coupaFx.replaced += 1;
+      }
+    }
+  } catch {
+    // ops schema absent (fresh install before migration 009) — excel only.
+  }
+
   const rates = buildFxTable(raw);
-  return { table: new FxTable(rates), rates, yearResolved: anchor.ambiguous ? null : year };
+  return { table: new FxTable(rates), rates, yearResolved: anchor.ambiguous ? null : year, coupaFx };
 }
 
 // ─────────────────────────────────────────────────────────── column orders

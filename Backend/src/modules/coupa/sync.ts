@@ -23,6 +23,7 @@ export const COUPA_OBJECTS = [
   'purchase_orders',
   'receiving_transactions',
   'invoices',
+  'exchange_rates',
 ] as const;
 export type CoupaObject = (typeof COUPA_OBJECTS)[number];
 
@@ -260,7 +261,23 @@ const PROJECT: Record<CoupaObject, (rows: Row[]) => Promise<number>> = {
   purchase_orders: projectPurchaseOrders,
   receiving_transactions: projectReceipts,
   invoices: projectInvoices,
+  exchange_rates: projectExchangeRates,
 };
+
+async function projectExchangeRates(rows: Row[]): Promise<number> {
+  return upsert(
+    'ops.coupa_exchange_rate',
+    ['id', 'rate', 'rate_date', 'from_currency', 'to_currency', 'created_at', 'updated_at'],
+    rows
+      .filter((r) => s(obj(r['from-currency'])['code']) !== null && s(obj(r['to-currency'])['code']) !== null)
+      .map((r) => [
+        Number(r['id']), n(r['rate']), d(r['rate-date']),
+        s(obj(r['from-currency'])['code']), s(obj(r['to-currency'])['code']),
+        s(r['created-at']), s(r['updated-at']),
+      ]),
+    'id',
+  );
+}
 
 // ── the sync run ─────────────────────────────────────────────────────────────
 

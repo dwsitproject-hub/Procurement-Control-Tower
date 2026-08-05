@@ -299,6 +299,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         enabled: rules['coupa.sync_enabled'] === true || rules['coupa.sync_enabled'] === 'true',
         intervalMinutes: Number(rules['coupa.sync_interval_minutes'] ?? 10),
         lookbackMinutes: Number(rules['coupa.lookback_minutes'] ?? 15),
+        fxSourceEnabled:
+          rules['fx.coupa_source_enabled'] === true || rules['fx.coupa_source_enabled'] === 'true',
       },
       status,
       counts,
@@ -306,8 +308,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   }));
 
   r.put('/api/v1/admin/coupa/config', role('admin', async (req, res, ctx) => {
-    const bdy = (req.body ?? {}) as { enabled?: unknown; intervalMinutes?: unknown };
+    const bdy = (req.body ?? {}) as { enabled?: unknown; intervalMinutes?: unknown; fxSourceEnabled?: unknown };
     const enabled = bdy.enabled === true;
+    const fxSourceEnabled = bdy.fxSourceEnabled === true;
     // The backend owns the clamp: the PRD requirement is 5-10 minutes, the
     // panel offers 5-60; anything outside is corrected, not rejected.
     const interval = Math.min(Math.max(Number(bdy.intervalMinutes ?? 10) || 10, 5), 60);
@@ -315,6 +318,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     for (const [key, value] of [
       ['coupa.sync_enabled', enabled],
       ['coupa.sync_interval_minutes', interval],
+      ['fx.coupa_source_enabled', fxSourceEnabled],
     ] as const) {
       await query(
         `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)

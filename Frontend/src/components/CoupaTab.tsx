@@ -24,6 +24,7 @@ interface WatermarkRow {
 export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [enabled, setEnabled] = useState(false);
+  const [fxEnabled, setFxEnabled] = useState(false);
   const [interval, setIntervalMin] = useState(10);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -33,6 +34,7 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
       .then((x) => {
         setD(x);
         setEnabled(x.config.enabled);
+        setFxEnabled(x.config.fxSourceEnabled === true);
         setIntervalMin(x.config.intervalMinutes);
       })
       .catch((e: Error) => setMsg(e.message));
@@ -46,7 +48,7 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
     setMsg(null);
     try {
       const out = await api.put<{ enabled: boolean; intervalMinutes: number }>(
-        '/api/v1/admin/coupa/config', { enabled, intervalMinutes: interval },
+        '/api/v1/admin/coupa/config', { enabled, intervalMinutes: interval, fxSourceEnabled: fxEnabled },
       );
       setMsg(`Saved — ${out.enabled ? `polling every ${out.intervalMinutes} min` : 'polling disabled'}.`);
       load();
@@ -82,8 +84,8 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
     <div className="panel">
       <h2>🔄 Coupa sync <span className="muted">— {d.configured ? d.host : 'not configured'}</span></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
-        The poller pulls sourcing events, POs, receipts and invoices (payments ride inside invoices)
-        incrementally by <code>updated-at</code> watermark. Data lands in the Coupa tab; the SAP
+        The poller pulls sourcing events, POs, receipts, invoices (payments ride inside invoices)
+        and exchange rates incrementally by <code>updated-at</code> watermark. Data lands in the Coupa tab; the SAP
         pipeline and its dataset versions are untouched.
         {!d.configured && ' Set COUPA_BASE_URL / COUPA_CLIENT_ID / COUPA_CLIENT_SECRET on the backend to enable.'}
       </p>
@@ -93,6 +95,13 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
           <label className="dt-check">
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
             Scheduled sync
+          </label>
+          <label
+            className="dt-check"
+            title="When on, Coupa's exchange-rate API competes with the SAP rate file: per currency pair and month, whichever record was updated most recently wins at the next recompute. Leave OFF while this environment syncs staging test rates."
+          >
+            <input type="checkbox" checked={fxEnabled} onChange={(e) => setFxEnabled(e.target.checked)} />
+            Use Coupa FX rates
           </label>
           <label className="cu-field">Interval (minutes, 5–60)
             <input

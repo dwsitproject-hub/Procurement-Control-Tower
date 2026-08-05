@@ -14,7 +14,7 @@ import { PrTables } from './components/PrTables';
 import { PoTables } from './components/PoTables';
 import { AdminTab } from './components/AdminTab';
 import { CustomTab } from './components/CustomTab';
-import { CoupaTab } from './components/CoupaTab';
+import { CoupaInvoicesTab, CoupaSourcingTab } from './components/CoupaPages';
 import { CustomKpiCard, CustomChartPanel } from './components/CustomTab';
 import { OverviewCard } from './components/OverviewCards';
 import {
@@ -23,7 +23,7 @@ import {
 
 type Tab =
   | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
-  | 'vendors' | 'materials' | 'coupa' | 'detail' | 'custom' | 'admin' | 'datacheck';
+  | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
 // v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
 const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: string }[] }[] = [
@@ -44,7 +44,8 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
       { id: 'governance', label: 'Governance', icon: '🏛️' },
       { id: 'vendors', label: 'Vendor 360', icon: '🏆' },
       { id: 'materials', label: 'Material Group', icon: '🧱' },
-      { id: 'coupa', label: 'Coupa', icon: '🔗' },
+      { id: 'coupa_src', label: 'Sourcing', icon: '🛒' },
+      { id: 'coupa_inv', label: 'Invoices & Payment', icon: '🧾' },
     ],
   },
   {
@@ -107,7 +108,8 @@ const TAB_KPIS: Record<Tab, string[]> = {
   ],
   vendors: [],
   materials: [],
-  coupa: [],
+  coupa_src: [],
+  coupa_inv: [],
   detail: [],
   custom: [],
   admin: [],
@@ -135,7 +137,8 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   governance: ['wbs_by_plant', 'unapproved_by_category'],
   vendors: [],
   materials: [],
-  coupa: [],
+  coupa_src: [],
+  coupa_inv: [],
   detail: [],
   custom: [],
   admin: [],
@@ -415,8 +418,10 @@ export default function App() {
           <VendorsTab onDrill={onDrill} />
         ) : tab === 'materials' ? (
           <MaterialsTab onDrill={onDrill} />
-        ) : tab === 'coupa' ? (
-          <CoupaTab />
+        ) : tab === 'coupa_src' ? (
+          <CoupaSourcingTab />
+        ) : tab === 'coupa_inv' ? (
+          <CoupaInvoicesTab />
         ) : tab === 'custom' ? (
           <CustomTab onDrill={onDrill} />
         ) : tab === 'admin' ? (

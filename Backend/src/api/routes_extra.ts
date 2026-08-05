@@ -349,6 +349,147 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   // The Coupa tab's data: sourcing + invoice/payment aggregates WITH the rows
   // behind them in one payload. Figures and their rows travel together until
   // Coupa grains join the drill-token machinery (C4b).
+  // ── Coupa Sourcing page (modelled on Coupa Analytics 1013/1012) ──────────
+  r.get('/api/v1/coupa/sourcing', role('analyst', async (_req, res) => {
+    const [kpis] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS events,
+              count(*) FILTER (WHERE state NOT IN ('complete','canceled','template'))::int AS open_events,
+              count(*) FILTER (WHERE state = 'complete')::int AS completed,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (end_time - submit_time))/86400.0)
+                FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days,
+              sum(planned_savings) FILTER (WHERE currency = 'IDR') AS planned_savings_idr,
+              count(*) FILTER (WHERE planned_savings IS NOT NULL AND currency <> 'IDR')::int AS savings_other_ccy
+         FROM ops.coupa_sourcing_event WHERE state <> 'template'`,
+    );
+    const [bids] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS responses,
+              count(DISTINCT quote_request_id)::int AS events_with_bids,
+              count(DISTINCT supplier_name)::int AS suppliers,
+              round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event,
+              count(*) FILTER (WHERE awarded)::int AS awarded
+         FROM ops.coupa_supplier_response WHERE state = 'submitted'`,
+    );
+    const eventsByMonth = await query(
+      `SELECT to_char(created_at,'YYYY-MM') AS mk, count(*)::int AS events,
+              count(*) FILTER (WHERE state = 'complete')::int AS completed
+         FROM ops.coupa_sourcing_event
+        WHERE state <> 'template' AND created_at IS NOT NULL
+        GROUP BY 1 ORDER BY 1`,
+    );
+    // Coupa's 'Spend by Commodity / Supplier and Event Type': awarded bid
+    // amounts, IDR documents only (strict - other currencies are counted, not
+    // converted, because the ops store has no per-line FX equivalents).
+    const byCommodity = await query(
+      `SELECT COALESCE(e.commodity,'(none)') AS commodity,
+              count(*)::int AS awarded_bids,
+              sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
+              count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
+         FROM ops.coupa_supplier_response r
+         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+        WHERE r.awarded
+        GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+    );
+    const bySupplier = await query(
+      `SELECT r.supplier_name,
+              count(*)::int AS awarded_bids,
+              sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
+              count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
+         FROM ops.coupa_supplier_response r
+         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+        WHERE r.awarded AND r.supplier_name IS NOT NULL
+        GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+    );
+    // Coupa's Sourcing Data Table (1012), response grain.
+    const dataTable = await query(
+      `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
+              e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
+              r.supplier_name, r.awarded, r.submitted_at, r.total_amount,
+              COALESCE(NULLIF(r.currency,''), e.currency) AS currency
+         FROM ops.coupa_supplier_response r
+         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+        ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
+        LIMIT 200`,
+    );
+    const wm = await query(
+      `SELECT object, last_updated_at, last_run_at, last_status FROM ops.coupa_watermark
+        WHERE object IN ('quote_requests') ORDER BY object`,
+    );
+    res.json({ configured: coupaConfigured(), kpis, bids, eventsByMonth, byCommodity, bySupplier, dataTable, watermarks: wm });
+  }));
+
+  // ── Coupa Invoices & Payment page (modelled on Coupa Analytics 3148) ─────
+  r.get('/api/v1/coupa/invoices', role('analyst', async (_req, res) => {
+    const [kpis] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS invoices,
+              count(*) FILTER (WHERE paid)::int AS paid_count,
+              count(*) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft'))::int AS open_count,
+              sum(gross_total) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft') AND currency = 'IDR') AS open_idr,
+              sum(gross_total) FILTER (WHERE status NOT IN ('voided','draft') AND currency = 'IDR') AS gross_idr,
+              sum(tax_amount) FILTER (WHERE status NOT IN ('voided','draft') AND currency = 'IDR') AS tax_idr,
+              count(*) FILTER (WHERE currency <> 'IDR')::int AS other_ccy,
+              count(DISTINCT currency)::int AS currencies,
+              avg((payment_date::date - invoice_date)::numeric)
+                FILTER (WHERE paid AND payment_date IS NOT NULL AND invoice_date IS NOT NULL) AS avg_days_to_pay
+         FROM ops.coupa_invoice`,
+    );
+    const [pay] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS payments,
+              sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr,
+              count(*) FILTER (WHERE p.sap_payment_doc IS NOT NULL)::int AS with_sap_doc
+         FROM ops.coupa_payment p
+         JOIN ops.coupa_invoice i ON i.id = p.invoice_id`,
+    );
+    const invoicesByMonth = await query(
+      `SELECT to_char(invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
+              count(*) FILTER (WHERE paid)::int AS paid,
+              sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr
+         FROM ops.coupa_invoice WHERE invoice_date IS NOT NULL
+        GROUP BY 1 ORDER BY 1`,
+    );
+    const paymentsByMonth = await query(
+      `SELECT to_char(p.payment_date,'YYYY-MM') AS mk, count(*)::int AS payments,
+              sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr
+         FROM ops.coupa_payment p
+         JOIN ops.coupa_invoice i ON i.id = p.invoice_id
+        WHERE p.payment_date IS NOT NULL
+        GROUP BY 1 ORDER BY 1`,
+    );
+    const statusMix = await query(
+      `SELECT status, count(*)::int AS n FROM ops.coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
+    );
+    const topSuppliers = await query(
+      `SELECT supplier_name, count(*)::int AS invoices,
+              sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr,
+              count(*) FILTER (WHERE paid)::int AS paid,
+              count(*) FILTER (WHERE currency <> 'IDR')::int AS other_ccy
+         FROM ops.coupa_invoice
+        WHERE supplier_name IS NOT NULL
+        GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+    );
+    const recentInvoices = await query(
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
+              i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
+              (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+         FROM ops.coupa_invoice i
+        ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
+    );
+    const recentPayments = await query(
+      `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc,
+              i.invoice_number, i.supplier_name, i.currency
+         FROM ops.coupa_payment p
+         JOIN ops.coupa_invoice i ON i.id = p.invoice_id
+        ORDER BY p.payment_date DESC NULLS LAST LIMIT 50`,
+    );
+    const wm = await query(
+      `SELECT object, last_updated_at, last_run_at, last_status FROM ops.coupa_watermark
+        WHERE object IN ('invoices') ORDER BY object`,
+    );
+    res.json({
+      configured: coupaConfigured(), kpis, pay, invoicesByMonth, paymentsByMonth,
+      statusMix, topSuppliers, recentInvoices, recentPayments, watermarks: wm,
+    });
+  }));
+
   r.get('/api/v1/coupa/summary', role('analyst', async (_req, res) => {
     const [sourcing] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS events,

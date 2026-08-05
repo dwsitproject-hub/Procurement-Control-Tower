@@ -31,28 +31,82 @@ interface VendorRow {
   openExposureUsd: number | null;
 }
 
+/** DetailTable's pager, shared by the Vendor-360 tables (5 Aug 2026). */
+function EntPager({
+  total, page, pageSize, onPage, onPageSize,
+}: {
+  total: number; page: number; pageSize: number;
+  onPage: (p: number) => void; onPageSize: (n: 50 | 100 | 200) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const nums: number[] = [];
+  for (let i = 0; i < pages; i += 1) {
+    if (i === 0 || i === pages - 1 || Math.abs(i - page) <= 2) nums.push(i);
+  }
+  return (
+    <div className="dt-pager">
+      <label className="dt-check">
+        Rows per page
+        <select
+          className="ly-swap"
+          value={pageSize}
+          onChange={(e) => onPageSize(Number(e.target.value) as 50 | 100 | 200)}
+        >
+          <option value={50}>50</option>
+          <option value={100}>100</option>
+          <option value={200}>200</option>
+        </select>
+      </label>
+      <span className="dt-pages">
+        <button className="dt-btn" disabled={page === 0} onClick={() => onPage(page - 1)}>‹ Prev</button>
+        {nums.map((n2, idx) => (
+          <span key={n2}>
+            {idx > 0 && nums[idx - 1] !== n2 - 1 && <span className="muted">…</span>}
+            <button
+              className="dt-btn"
+              aria-current={n2 === page ? 'page' : undefined}
+              style={n2 === page ? { borderColor: 'var(--accent)', fontWeight: 700 } : {}}
+              onClick={() => onPage(n2)}
+            >
+              {n2 + 1}
+            </button>
+          </span>
+        ))}
+        <button className="dt-btn" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next ›</button>
+        <span className="muted">page {page + 1} of {formatNumber(pages)}</span>
+      </span>
+    </div>
+  );
+}
+
 export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string) => void }) {
   const [rows, setRows] = useState<VendorRow[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [open, setOpen] = useState<string | null>(null);
+  const [openMaterial, setOpenMaterial] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  // v1's Vendor 360 has three faces: ranking, the vendors×materials×month
-  // pivot, and the all-vendors on-time/late chart (G3.1/G3.2).
-  const [view, setView] = useState<'top' | 'pivot' | 'otd'>('top');
+  // Two table faces (ranking + vendors×months); the on-time/late chart sits
+  // in its own panel below (user decision 5 Aug 2026).
+  const [view, setView] = useState<'top' | 'pivot'>('top');
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
     return () => clearTimeout(t);
   }, [search]);
 
+  // A new search or page size restarts from the first page.
+  useEffect(() => { setPage(0); }, [debounced, pageSize]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     api
       .get<{ totalVendors: number; rows: VendorRow[] }>(
-        `/api/v1/entity/vendors?limit=50${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`,
+        `/api/v1/entity/vendors?limit=${pageSize}&offset=${page * pageSize}${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`,
       )
       .then((d) => {
         if (cancelled) return;
@@ -64,16 +118,17 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
     return () => {
       cancelled = true;
     };
-  }, [debounced]);
+  }, [debounced, page, pageSize]);
 
   return (
+    <>
     <div className="panel">
       <div className="dt-toolbar">
-        {(['top', 'pivot', 'otd'] as const).map((v) => (
+        {(['top', 'pivot'] as const).map((v) => (
           <button key={v} className="dt-btn" aria-pressed={view === v}
             style={view === v ? { borderColor: 'var(--accent)', fontWeight: 600 } : {}}
             onClick={() => setView(v)}>
-            {v === 'top' ? 'Top vendors' : v === 'pivot' ? 'Vendors × months' : 'On-time vs late'}
+            {v === 'top' ? 'Top vendors' : 'Vendors × months'}
           </button>
         ))}
         <input
@@ -90,16 +145,16 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
       </div>
 
       {view === 'pivot' ? (
-        <VendorPivot search={debounced} onOpenVendor={setOpen} />
-      ) : view === 'otd' ? (
-        <VendorOtdBars onOpenVendor={setOpen} />
+        <VendorPivot search={debounced} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
       ) : loading ? (
         <div className="center-msg"><div className="spinner" />Loading vendors…</div>
       ) : (
+        <>
         <div className="table-wrap dt-scroll">
-          <table className="data">
+          <table className="data dd-tbl">
             <thead>
               <tr>
+                <th className="num">No</th>
                 <th>Vendor</th><th>Code</th>
                 <th style={{ textAlign: 'right' }}>POs</th>
                 <th style={{ textAlign: 'right' }}>Lines</th>
@@ -112,8 +167,13 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.vendorCode} className="ent-row" onClick={() => setOpen(r.vendorCode)}>
+              {rows.map((r, i) => (
+                <tr
+                  key={r.vendorCode}
+                  className={`ent-row ${i % 2 ? '' : 're'}`}
+                  onClick={() => setOpen(r.vendorCode)}
+                >
+                  <td className="num muted">{page * pageSize + i + 1}</td>
                   <td>{r.vendorName}</td>
                   <td className="muted">{r.vendorCode}</td>
                   <td className="num">{formatNumber(r.poCount)}</td>
@@ -131,29 +191,48 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
             </tbody>
           </table>
         </div>
+        {total > 0 && (
+          <EntPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
+        )}
+        </>
       )}
-
-      {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} />}
     </div>
+
+    {/* On-time vs late in its own panel below (user decision 5 Aug 2026). */}
+    <div className="panel" style={{ marginTop: '1rem' }}>
+      <h3 className="pr-tbl-h">On-time vs late — GR vs PO delivery date, per vendor</h3>
+      <VendorOtdBars onOpenVendor={setOpen} />
+    </div>
+
+    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} />}
+    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} />}
+    </>
   );
 }
 
 // ─────────────────────────── vendors × materials × month pivot (G3.1)
 
 function VendorPivot({
-  search, onOpenVendor,
-}: { search: string; onOpenVendor: (code: string) => void }) {
+  search, onOpenVendor, onOpenMaterial,
+}: {
+  search: string;
+  onOpenVendor: (code: string) => void;
+  onOpenMaterial: (code: string) => void;
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
-  const [limit, setLimit] = useState(40);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
   const [expanded, setExpanded] = useState<Record<string, Record<string, any>[] | 'loading'>>({});
 
+  useEffect(() => { setPage(0); }, [search, pageSize]);
+
   useEffect(() => {
-    const q = new URLSearchParams({ limit: String(limit) });
+    const q = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) });
     if (search) q.set('q', search);
     api.get<Record<string, any>>(`/api/v1/entity/vendor-pivot?${q.toString()}`)
       .then(setD)
       .catch(() => setD(null));
-  }, [search, limit]);
+  }, [search, page, pageSize]);
 
   const toggle = (code: string) => {
     if (expanded[code]) {
@@ -179,7 +258,7 @@ function VendorPivot({
     <>
       <p className="note" style={{ marginTop: 0 }}>{d.note}</p>
       <div className="table-wrap dt-scroll">
-        <table className="data">
+        <table className="data dd-tbl">
           <thead>
             <tr>
               <th>Vendor / material (USD)</th>
@@ -188,9 +267,9 @@ function VendorPivot({
             </tr>
           </thead>
           <tbody>
-            {d.rows.map((r: any) => (
+            {d.rows.map((r: any, ri: number) => (
               <>
-                <tr key={r.code} className="ent-row">
+                <tr key={r.code} className={`ent-row ${ri % 2 ? '' : 're'}`}>
                   <td>
                     <button className="cu-link" onClick={() => toggle(r.code)} title="Expand materials">
                       {expanded[r.code] ? '▾' : '▸'}
@@ -209,7 +288,16 @@ function VendorPivot({
                 {Array.isArray(expanded[r.code]) &&
                   (expanded[r.code] as Record<string, any>[]).map((m: any) => (
                     <tr key={`${r.code}|${m.code}`}>
-                      <td className="muted" style={{ paddingLeft: '2rem' }}>{m.code} {m.descr ? `· ${m.descr}` : ''}</td>
+                      <td className="muted" style={{ paddingLeft: '2rem' }}>
+                        <button
+                          className="cu-link"
+                          title="Open Material 360"
+                          onClick={() => onOpenMaterial(String(m.code))}
+                        >
+                          {m.code}
+                        </button>
+                        {m.descr ? ` · ${m.descr}` : ''}
+                      </td>
                       {months.map((mk) => <td key={mk} className="num muted">{cell(m.byMonth[mk])}</td>)}
                       <td className="num muted">{cell(m.total)}</td>
                     </tr>
@@ -226,10 +314,11 @@ function VendorPivot({
           </tfoot>
         </table>
       </div>
-      {d.rows.length < d.totalVendors && (
-        <button className="btn secondary" style={{ marginTop: '.6rem' }} onClick={() => setLimit((l) => l + 40)}>
-          Load more vendors ({formatNumber(d.rows.length)} of {formatNumber(d.totalVendors)})
-        </button>
+      {d.totalVendors > 0 && (
+        <EntPager
+          total={d.totalVendors} page={page} pageSize={pageSize}
+          onPage={setPage} onPageSize={setPageSize}
+        />
       )}
     </>
   );

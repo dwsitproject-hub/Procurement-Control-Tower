@@ -59,6 +59,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       ctx.scope,
       String(req.query.q ?? ''),
       Math.min(Number(req.query.limit ?? 50), 200),
+      Math.max(Number(req.query.offset ?? 0), 0),
     );
     res.json({ datasetVersionId: v.id, asOfDate: v.asOfDate, ...out });
   }));

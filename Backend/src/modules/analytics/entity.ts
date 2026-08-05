@@ -40,6 +40,7 @@ export async function vendorList(
   scope: readonly ScopeEntry[],
   search: string,
   limit: number,
+  offset = 0,
 ): Promise<{ totalVendors: number; rows: VendorRow[] }> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -79,7 +80,7 @@ export async function vendorList(
       WHERE ${where}${searchSql} AND pol.vendor_code IS NOT NULL AND NOT pol.is_sto
       GROUP BY pol.vendor_code
       ORDER BY spend_usd DESC NULLS LAST
-      LIMIT $${params.length}`,
+      LIMIT $${params.length} OFFSET $${(params.push(offset), params.length)}`,
     params,
   );
 

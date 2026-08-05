@@ -144,7 +144,36 @@ docker compose -f compose.yml up -d
    — expect `mismatches=0 errors=0` (pass `--password` if you already
    rotated the admin credential).
 
-## 6. Updating staging (each release)
+## 6. Enable DWS Hub SSO (optional, second login path)
+
+The app supports two login paths side by side: local credentials and DWS Hub
+OIDC (Authorization Code + PKCE, public client — implemented per
+SSO-TARGET-APP-INTEGRATION.md, both SP- and IdP-initiated flows).
+
+1. **Register with the Hub admin** (Hub → Admin → Applications):
+   - Redirect URI: `http://172.28.92.56:3050/auth/oidc/callback` — must match
+     byte-for-byte; it goes through the FE proxy, never an internal port.
+   - Client type: public / PKCE. There is **no client secret** — don't ask.
+   - Collect the assigned `client_id`.
+2. **Verify reachability from the BE server** (token exchange is
+   server-to-server):
+   `curl -s https://<hub-host>/api/sso/.well-known/openid-configuration`
+3. **Uncomment and fill the OIDC block** in `/opt/pct/staging.env`, then
+   `docker compose -f /opt/pct/compose.yml up -d api`. Boot logs show either
+   `OIDC discovery loaded — DWS Hub SSO available` or a warning.
+4. **Test both flows** (the guide's biggest gotcha is the second one):
+   - SP-initiated: login page → "Sign in with DWS Hub" → authenticate → back
+     in, signed in.
+   - IdP-initiated: click the app's tile **in the Hub dashboard** → same
+     result (the Hub passes `code_verifier` to the callback).
+5. First SSO login creates the user as `viewer` with an **empty data scope** —
+   an admin must grant scope before they see any data. Nothing is inferred
+   from the email domain.
+
+If the Hub is down, the login page automatically hides the SSO button
+(the probe gets 503, not a redirect) and local login is unaffected.
+
+## 7. Updating staging (each release)
 
 ```bash
 # workstation

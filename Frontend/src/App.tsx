@@ -713,10 +713,12 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
   const [ssoEnabled, setSsoEnabled] = useState(false);
 
   useEffect(() => {
-    // The login route is gated on complete OIDC configuration, so probing it
-    // tells us whether to offer the SSO button at all.
+    // The login route redirects (302) only when OIDC is configured AND the
+    // Hub is reachable; 404 = not configured, 503 = Hub down. Offer the button
+    // only for a real redirect, so users never click a dead SSO link.
+    // (redirect:'manual' surfaces a redirect as an opaqueredirect, status 0.)
     fetch('/auth/oidc/login', { method: 'HEAD', redirect: 'manual' })
-      .then((r) => setSsoEnabled(r.status !== 404))
+      .then((r) => setSsoEnabled(r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)))
       .catch(() => setSsoEnabled(false));
   }, []);
 

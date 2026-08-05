@@ -16,7 +16,7 @@ import { KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
 import { loadEnv } from '../config/env.js';
 import { healthCheck, query, queryOne } from '../db/client.js';
 import {
-  AuthError, buildAuthorizeUrl, handleOidcCallback, loadPrincipal, localLogin, oidcEnabled,
+  AuthError, buildAuthorizeUrl, ensureOidcReady, handleOidcCallback, loadPrincipal, localLogin, oidcEnabled,
   type Principal,
 } from '../modules/auth/auth.js';
 import {
@@ -175,11 +175,20 @@ export function buildRouter(): Router {
     if (!oidcEnabled()) {
       throw new HttpProblem(404, 'not-found', 'SSO is not configured in this environment');
     }
+    // Discovery may have failed at boot (Hub down / booted later): retry here,
+    // and answer 503 while it stays unreachable so the login page hides the
+    // SSO button instead of offering a dead link. Local login is unaffected.
+    if (!(await ensureOidcReady())) {
+      throw new HttpProblem(503, 'sso-unavailable', 'The DWS Hub is not reachable right now');
+    }
     res.redirect(302, buildAuthorizeUrl(req.query.returnTo as string | undefined));
   }));
 
   r.get('/auth/oidc/callback', pub(async (req, res) => {
     if (!oidcEnabled()) throw new HttpProblem(404, 'not-found', 'SSO is not configured');
+    if (!(await ensureOidcReady())) {
+      throw new HttpProblem(503, 'sso-unavailable', 'The DWS Hub is not reachable right now');
+    }
     const out = await handleOidcCallback(
       {
         code: req.query.code as string | undefined,

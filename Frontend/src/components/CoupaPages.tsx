@@ -11,7 +11,7 @@ ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip,
  * Coupa pages, split per user decision 5 Aug 2026 and modelled on Coupa's own
  * Analytics dashboards:
  *  - Sourcing        <- 1013 Sourcing Summary + 1012 Sourcing Details
- *  - Invoices & Payment <- 3148 Coupa Value Review - Invoice
+ *  - Invoicing & Payment <- 3148 Coupa Value Review - Invoice
  * All money figures are IDR document-currency only (the ops store carries no
  * FX equivalents); non-IDR documents are counted and said so, never converted.
  */
@@ -247,7 +247,7 @@ export function CoupaSourcingTab() {
   );
 }
 
-// ──────────────────────────────────────────────── Invoices & Payment page
+// ──────────────────────────────────────────────── Invoicing & Payment page
 
 const INV_PILL: Record<string, string> = {
   paid: 'sd', approved: 'su', pending_approval: 'sn', pending_receipt: 'sn',
@@ -260,10 +260,10 @@ export function CoupaInvoicesTab() {
   useEffect(() => {
     api.get<Record<string, any>>('/api/v1/coupa/invoices').then(setD).catch((e: Error) => setErr(e.message));
   }, []);
-  if (err) return <div className="panel"><h2>Invoices &amp; Payment</h2><p className="err">{err}</p></div>;
+  if (err) return <div className="panel"><h2>Invoicing &amp; Payment</h2><p className="err">{err}</p></div>;
   if (!d) return <div className="center-msg"><div className="spinner" />Loading Coupa invoices…</div>;
   if (!d.configured) {
-    return <div className="panel"><h2>Invoices &amp; Payment</h2><p className="note">Coupa is not configured on this environment — an administrator must set the backend COUPA_* variables (Admin tab).</p></div>;
+    return <div className="panel"><h2>Invoicing &amp; Payment</h2><p className="note">Coupa is not configured on this environment — an administrator must set the backend COUPA_* variables (Admin tab).</p></div>;
   }
   const k = d.kpis ?? {};
   const p2 = d.pay ?? {};

@@ -35,17 +35,18 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
     ],
   },
   {
+    // Menu order per user decision 5 Aug 2026 (follows the procure-to-pay flow).
     section: 'Analysis',
     items: [
       { id: 'pr', label: 'PR Analysis', icon: '📋' },
+      { id: 'coupa_src', label: 'Sourcing', icon: '🛒' },
       { id: 'po', label: 'PO Analysis', icon: '📦' },
       { id: 'delivery', label: 'Delivery', icon: '🚚' },
+      { id: 'coupa_inv', label: 'Invoicing & Payment', icon: '💳' },
       { id: 'approvals', label: 'Approvals', icon: '✅' },
-      { id: 'governance', label: 'Governance', icon: '🏛️' },
-      { id: 'vendors', label: 'Vendor 360', icon: '🏆' },
       { id: 'materials', label: 'Material Group', icon: '🧱' },
-      { id: 'coupa_src', label: 'Sourcing', icon: '🛒' },
-      { id: 'coupa_inv', label: 'Invoices & Payment', icon: '🧾' },
+      { id: 'vendors', label: 'Vendor 360', icon: '🏆' },
+      { id: 'governance', label: 'Governance', icon: '🏛️' },
     ],
   },
   {

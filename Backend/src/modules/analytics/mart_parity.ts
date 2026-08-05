@@ -1122,13 +1122,14 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   {
-    chartId: 'e2e_by_category', seriesKey: 'days', seriesLabel: 'Median end-to-end (days)', unit: 'days',
+    chartId: 'e2e_by_category', seriesKey: 'days', seriesLabel: 'Avg E2E (days)', unit: 'days',
     // Grouped by the PO line's own category (not the PR's) so the po_line-grain
     // drill opens exactly the aggregated rows. The two categories agree on all
     // but a handful of lines, and self-consistency wins over that nuance.
+    // Average basis like v1's ch-mge2 (5 Aug 2026).
     sql: `SELECT COALESCE(pol.material_category,'Other') AS bucket_key,
                  COALESCE(pol.material_category,'Other') AS bucket_label,
-                 percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.receipt_date - pri.requisition_date)::numeric AS value,
+                 avg(pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
                    jsonb_build_object('matCat', min(pol.material_category),

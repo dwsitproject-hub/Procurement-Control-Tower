@@ -22,7 +22,7 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 // v1's MC2 material-category palette + the six PO-approval bands - any
 // single-series bar chart whose bucket labels match gets per-bar colours.
-const CATEGORY_COLORS: Record<string, string> = {
+export const CATEGORY_COLORS: Record<string, string> = {
   Service: '#7C3AED',
   'Spare Parts-General': '#2E75B6',
   'Spare Parts-Factory': '#0D9488',

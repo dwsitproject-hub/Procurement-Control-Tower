@@ -612,21 +612,46 @@ export async function materialGroupPage(
 ): Promise<Record<string, unknown>> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
-  // Category summary (v1's mgt): items, value, per-stage cycle medians (G3.4).
-  const summary = await query<{
-    cat: string; lines: number; pos: number; usd: number | null;
-    med_src: number | null; med_appr: number | null; med_del: number | null;
+  // Category summary, v1's mgt exactly (5 Aug 2026): PR items + open share on
+  // the PR grain, the five stage AVERAGES split across their natural grains
+  // (PRA on PR items; SRC/POA/DLT/E2E on PO lines). Blank categories are
+  // dropped like v1's Boolean filter.
+  const priScoped = scoped(versionId, scope, 'pri');
+  const priSummary = await query<{
+    cat: string; items: number; open_n: number; avg_pra: number | null;
   }>(
-    `SELECT COALESCE(pol.material_category,'Other') AS cat, count(*)::int AS lines,
-            count(DISTINCT pol.po_no)::int AS pos, sum(pol.net_order_value_usd) AS usd,
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.sourcing_days) AS med_src,
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.po_approval_days) AS med_appr,
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.delivery_days) AS med_del
+    `SELECT pri.material_category AS cat, count(*)::int AS items,
+            count(*) FILTER (WHERE pri.status IN ('Unapproved PR','PR Approved-No PO')
+              OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                          WHERE _pl.dataset_version_id = pri.dataset_version_id
+                            AND _pl.pr_no = pri.pr_no AND _pl.pr_item = pri.pr_item
+                            AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')))::int AS open_n,
+            avg(pri.release_final_date - pri.requisition_date)
+              FILTER (WHERE pri.release_final_date - pri.requisition_date >= 0) AS avg_pra
+       FROM core.fact_pr_item pri
+      WHERE ${priScoped.where} AND NOT pri.is_deleted AND pri.material_category IS NOT NULL
+      GROUP BY 1`,
+    priScoped.params,
+  );
+  const polSummary = await query<{
+    cat: string; avg_src: number | null; avg_poa: number | null; avg_dlt: number | null; avg_e2e: number | null;
+  }>(
+    `SELECT pol.material_category AS cat,
+            avg(pol.sourcing_days) FILTER (WHERE pol.sourcing_days >= 0) AS avg_src,
+            avg(pol.po_approval_days) FILTER (WHERE pol.po_approval_days >= 0) AS avg_poa,
+            avg(pol.delivery_days) FILTER (WHERE pol.delivery_days >= 0) AS avg_dlt,
+            avg(pol.receipt_date - pri.requisition_date)
+              FILTER (WHERE pol.receipt_date - pri.requisition_date >= 0) AS avg_e2e
        FROM core.fact_po_line pol
+       LEFT JOIN core.fact_pr_item pri
+         ON pri.dataset_version_id = pol.dataset_version_id
+        AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
       WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
-      GROUP BY 1 ORDER BY usd DESC NULLS LAST`,
+        AND pol.material_category IS NOT NULL
+      GROUP BY 1`,
     params,
   );
+  const polByCat = new Map(polSummary.map((x) => [x.cat, x]));
 
   // Material Explorer (v1's mxt) over the FULL catalogue: category, material
   // group and search narrow it; limit/offset page it server-side.
@@ -660,13 +685,14 @@ export async function materialGroupPage(
 
   const pageParams = [...matParams, limit, offset];
   const materials = await query<{
-    code: string; descr: string; grp: string | null; lines: number; vendors: number;
-    qty: number | null; usd: number | null;
+    code: string; descr: string; grp: string | null; cat: string | null; lines: number;
+    vendors: number; qty: number | null; usd: number | null; idr: number | null;
   }>(
     `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
-            max(pol.material_group) AS grp, count(*)::int AS lines,
+            max(pol.material_group) AS grp, max(pol.material_category) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors,
-            sum(pol.order_qty) AS qty, sum(pol.net_order_value_usd) AS usd
+            sum(pol.order_qty) AS qty, sum(pol.net_order_value_usd) AS usd,
+            sum(pol.net_order_value_idr) AS idr
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND pol.material_code IS NOT NULL${extra}
       GROUP BY pol.material_code ORDER BY usd DESC NULLS LAST
@@ -674,69 +700,85 @@ export async function materialGroupPage(
     pageParams,
   );
 
-  // Volume leaders (v1's mg-vol) and sole-source (v1's mg-ss).
-  const volume = await query<{ code: string; descr: string; qty: number | null; unit: string | null }>(
-    `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
-            sum(pol.order_qty) AS qty, max(pol.order_unit) AS unit
-       FROM core.fact_po_line pol
-      WHERE ${where} AND NOT pol.is_sto AND pol.material_code IS NOT NULL
-      GROUP BY pol.material_code ORDER BY qty DESC NULLS LAST LIMIT 20`,
+  // v1's mg-vol: price volatility - CV% over MONTHLY average unit prices
+  // (spend/qty per line, IDR document-currency, STO/token excluded), needing
+  // >= 3 months of history; worst first, top 50.
+  const volatility = await query<{
+    code: string; descr: string; months: number; cv: number | null; spend_idr: number | null;
+  }>(
+    `WITH mo AS (
+       SELECT pol.material_code, max(pol.short_text) AS descr,
+              to_char(pol.document_date,'YYYY-MM') AS mk,
+              avg(pol.net_order_value / NULLIF(pol.order_qty, 0)) AS u,
+              sum(pol.net_order_value) AS spend
+         FROM core.fact_po_line pol
+        WHERE ${where} AND pol.currency_code = 'IDR' AND NOT pol.is_sto AND NOT pol.is_token_price
+          AND pol.net_order_value > 0 AND pol.order_qty > 0
+          AND pol.document_date IS NOT NULL
+          AND pol.material_code IS NOT NULL AND pol.material_code <> ''
+        GROUP BY pol.material_code, 3)
+     SELECT material_code AS code, left(max(descr), 60) AS descr, count(*)::int AS months,
+            (stddev_pop(u) / NULLIF(avg(u), 0) * 100)::float AS cv,
+            sum(spend)::float AS spend_idr
+       FROM mo GROUP BY 1 HAVING count(*) >= 3
+      ORDER BY 4 DESC NULLS LAST LIMIT 50`,
     params,
   );
 
   const soleSource = await query<{
-    code: string; descr: string; vendor: string | null; lines: number; usd: number | null;
+    code: string; descr: string; vendor: string | null; lines: number;
+    usd: number | null; idr: number | null;
   }>(
     `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
             max(pol.vendor_name) AS vendor, count(*)::int AS lines,
-            sum(pol.net_order_value_usd) AS usd
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND pol.material_code IS NOT NULL
       GROUP BY pol.material_code
      HAVING count(DISTINCT pol.vendor_code) = 1
-      ORDER BY usd DESC NULLS LAST LIMIT 50`,
+      ORDER BY idr DESC NULLS LAST LIMIT 50`,
     params,
   );
-
-  // Open items by category (v1 showed open exposure per group).
-  const open = await query<{ cat: string; n: number }>(
-    `SELECT COALESCE(pol.material_category,'Other') AS cat, count(*)::int AS n
-       FROM core.fact_po_line pol
-      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
-        AND pol.status IN ${OPEN_STATUSES}
-      GROUP BY 1`,
-    params,
-  );
-  const openByCat = new Map(open.map((o) => [o.cat, o.n]));
 
   return {
-    categories: summary.map((s2) => ({
-      category: s2.cat,
-      lines: s2.lines,
-      pos: s2.pos,
-      spendUsd: s2.usd,
-      medianSourcingDays: s2.med_src,
-      medianPoApprovalDays: s2.med_appr,
-      medianDeliveryDays: s2.med_del,
-      openLines: openByCat.get(s2.cat) ?? 0,
-    })),
+    categories: priSummary
+      .sort((a, b) => b.items - a.items)
+      .map((s2) => {
+        const pol2 = polByCat.get(s2.cat);
+        return {
+          category: s2.cat,
+          items: s2.items,
+          open: s2.open_n,
+          pctOpen: s2.items > 0 ? Math.round((s2.open_n / s2.items) * 1000) / 10 : 0,
+          avgPra: s2.avg_pra,
+          avgSrc: pol2?.avg_src ?? null,
+          avgPoa: pol2?.avg_poa ?? null,
+          avgDlt: pol2?.avg_dlt ?? null,
+          avgE2e: pol2?.avg_e2e ?? null,
+        };
+      }),
     materialGroups: groups.map((g) => g.grp),
     totalMaterials: matCount?.n ?? 0,
     materials: materials.map((m) => ({
       materialCode: m.code,
       description: m.descr,
       materialGroup: m.grp,
+      category: m.cat,
       lines: m.lines,
       vendors: m.vendors,
       qty: m.qty,
       spendUsd: m.usd,
+      spendIdr: m.idr,
       soleSource: m.vendors === 1,
     })),
-    volumeLeaders: volume.map((x) => ({ materialCode: x.code, description: x.descr, qty: x.qty, unit: x.unit })),
-    soleSource: soleSource.map((x) => ({
-      materialCode: x.code, description: x.descr, vendorName: x.vendor, lines: x.lines, spendUsd: x.usd,
+    priceVolatility: volatility.map((x) => ({
+      materialCode: x.code, description: x.descr, months: x.months, cvPct: x.cv, spendIdr: x.spend_idr,
     })),
-    caps: { materials: limit, volumeLeaders: 20, soleSource: 50 },
+    soleSource: soleSource.map((x) => ({
+      materialCode: x.code, description: x.descr, vendorName: x.vendor, lines: x.lines,
+      spendUsd: x.usd, spendIdr: x.idr,
+    })),
+    caps: { materials: limit, priceVolatility: 50, soleSource: 50 },
     pagination: { limit, offset },
   };
 }

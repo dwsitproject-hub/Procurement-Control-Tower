@@ -174,14 +174,15 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     );
     // v1's mgx drill: each category's counts open as rows (G3.4).
     const fp = sessionFingerprint(ctx.sid);
+    // The mgt summary counts PR items (v1's grain), so its drills do too.
     const categories = (out['categories'] as Record<string, unknown>[]).map((c) => ({
       ...c,
       drillAll: issueDrillToken(
-        { grain: 'po_line', filters: { notSto: true, notDeleted: true, matCat: c['category'] }, label: `${c['category']} — all PO lines` } as DrillPredicate,
+        { grain: 'pr_item', filters: { notDeleted: true, matCat: c['category'] }, label: `${c['category']} — all PR items` } as DrillPredicate,
         v.id, ctx.scope, fp,
       ),
       drillOpen: issueDrillToken(
-        { grain: 'po_line', filters: { notSto: true, notDeleted: true, matCat: c['category'], open: true }, label: `${c['category']} — open lines` } as DrillPredicate,
+        { grain: 'pr_item', filters: { notDeleted: true, matCat: c['category'], scopeOpen: true }, label: `${c['category']} — open items` } as DrillPredicate,
         v.id, ctx.scope, fp,
       ),
     }));

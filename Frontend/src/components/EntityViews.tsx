@@ -4,6 +4,7 @@ import {
   LinearScale, PointElement, Tooltip,
 } from 'chart.js';
 import { api } from '../lib/api';
+import { CATEGORY_COLORS, ChartPanel } from './Chart';
 
 ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
 import { DASH, FLAG_META, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
@@ -466,6 +467,12 @@ export function VendorModal({
 
 // ──────────────────────────────────────────────────────────── Materials tab
 
+
+/** v1's mgt aging colour: > 14d red, > 7d amber, else teal (all bold). */
+function mgtAg(v: number | null | undefined): string {
+  if (v === null || v === undefined) return 'num';
+  return 'num ag ' + (Number(v) > 14 ? 'bd' : Number(v) > 7 ? 'wn' : 'ok');
+}
 export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => void }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [category, setCategory] = useState<string>('');
@@ -494,60 +501,69 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
 
   return (
     <>
-      <div className="panel">
-        <h2>Categories</h2>
+      {/* v1's Analysis by Material Group charts, on top (5 Aug 2026). */}
+      <div className="chart-grid">
+        <ChartPanel chartId="items_by_category" onDrill={onDrill} />
+        <ChartPanel chartId="e2e_by_category" onDrill={onDrill} />
+      </div>
+
+      <div className="panel" style={{ marginTop: '1rem' }}>
+        <h3 className="pr-tbl-h">Summary by Material Category <span className="muted">— avg aging metrics (days)</span></h3>
         <div className="table-wrap">
-          <table className="data">
+          <table className="data dd-tbl">
             <thead>
               <tr>
                 <th>Category</th>
-                <th style={{ textAlign: 'right' }}>Lines</th>
-                <th style={{ textAlign: 'right' }}>POs</th>
-                <th style={{ textAlign: 'right' }}>Spend USD</th>
-                <th style={{ textAlign: 'right' }}>Sourcing med (d)</th>
-                <th style={{ textAlign: 'right' }}>PO appr med (d)</th>
-                <th style={{ textAlign: 'right' }}>Delivery med (d)</th>
-                <th style={{ textAlign: 'right' }}>Open lines</th>
+                <th className="num">Items</th>
+                <th className="num">Open</th>
+                <th className="num">%Open</th>
+                <th className="num">PRA avg</th>
+                <th className="num">SRC avg</th>
+                <th className="num">POA avg</th>
+                <th className="num">DLT avg</th>
+                <th className="num">E2E avg</th>
               </tr>
             </thead>
             <tbody>
-              {d.categories.map((c: any) => (
+              {d.categories.map((c: any, i: number) => (
                 <tr
                   key={c.category}
-                  className={`ent-row${category === c.category ? ' ent-row--sel' : ''}`}
+                  className={`ent-row ${i % 2 ? '' : 're'}${category === c.category ? ' ent-row--sel' : ''}`}
+                  title={`Click to filter the material list to ${c.category}`}
                   onClick={() => setCategory(category === c.category ? '' : c.category)}
                 >
-                  <td>{c.category}</td>
+                  <td style={{ fontWeight: 700, color: CATEGORY_COLORS[c.category] ?? 'inherit' }}>{c.category}</td>
                   <td className="num">
                     {c.drillAll ? (
-                      <button className="cu-link" onClick={(e) => { e.stopPropagation(); onDrill(c.drillAll, `${c.category} — all PO lines`); }}>
-                        {formatNumber(c.lines)}
+                      <button className="cu-link" onClick={(e) => { e.stopPropagation(); onDrill(c.drillAll, `${c.category} — all PR items`); }}>
+                        {formatNumber(c.items)}
                       </button>
-                    ) : formatNumber(c.lines)}
+                    ) : formatNumber(c.items)}
                   </td>
-                  <td className="num">{formatNumber(c.pos)}</td>
-                  <td className="num">{formatMoney(c.spendUsd, 'USD')}</td>
-                  <td className="num">{c.medianSourcingDays === null ? DASH : Math.round(c.medianSourcingDays)}</td>
-                  <td className="num">{c.medianPoApprovalDays === null || c.medianPoApprovalDays === undefined ? DASH : Math.round(c.medianPoApprovalDays)}</td>
-                  <td className="num">{c.medianDeliveryDays === null ? DASH : Math.round(c.medianDeliveryDays)}</td>
                   <td className="num">
                     {c.drillOpen ? (
-                      <button className="cu-link" onClick={(e) => { e.stopPropagation(); onDrill(c.drillOpen, `${c.category} — open lines`); }}>
-                        {formatNumber(c.openLines)}
+                      <button className="cu-link" style={{ color: 'var(--crit)', fontWeight: 700 }} onClick={(e) => { e.stopPropagation(); onDrill(c.drillOpen, `${c.category} — open items`); }}>
+                        {formatNumber(c.open)}
                       </button>
-                    ) : formatNumber(c.openLines)}
+                    ) : formatNumber(c.open)}
                   </td>
+                  <td className="num">{c.pctOpen}%</td>
+                  <td className={mgtAg(c.avgPra)}>{c.avgPra === null ? DASH : Number(c.avgPra).toFixed(1)}</td>
+                  <td className={mgtAg(c.avgSrc)}>{c.avgSrc === null ? DASH : Number(c.avgSrc).toFixed(1)}</td>
+                  <td className={mgtAg(c.avgPoa)}>{c.avgPoa === null ? DASH : Number(c.avgPoa).toFixed(1)}</td>
+                  <td className={mgtAg(c.avgDlt)}>{c.avgDlt === null ? DASH : Number(c.avgDlt).toFixed(1)}</td>
+                  <td className={mgtAg(c.avgE2e)}>{c.avgE2e === null ? DASH : Number(c.avgE2e).toFixed(1)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p className="note">STO and deleted lines excluded. Click a category to filter the material list; click a count to open its rows.</p>
+        <p className="note">PR items per category (deleted excluded); stage averages over non-negative spans. Click a category to filter the material list; click a count to open its rows.</p>
       </div>
 
       <div className="panel">
         <div className="dt-toolbar">
-          <h2 style={{ margin: 0 }}>Materials{category ? ` — ${category}` : ''}</h2>
+          <h3 className="pr-tbl-h" style={{ margin: 0 }}>Material Explorer — click a material for vendors, areas &amp; price history{category ? ` · ${category}` : ''}</h3>
           <select
             className="dt-search"
             style={{ flex: 'none', width: 160 }}
@@ -569,28 +585,30 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
           <span className="count">{formatNumber(d.totalMaterials)} materials match</span>
         </div>
         <div className="table-wrap dt-scroll">
-          <table className="data">
+          <table className="data dd-tbl">
             <thead>
               <tr>
-                <th>Material</th><th>Description</th><th>Group</th>
-                <th style={{ textAlign: 'right' }}>Lines</th>
+                <th>Material</th><th>Description</th><th>Mat Grp</th><th>Category</th>
                 <th style={{ textAlign: 'right' }}>Vendors</th>
-                <th style={{ textAlign: 'right' }}>Qty</th>
-                <th style={{ textAlign: 'right' }}>Spend USD</th>
-                <th>Sole source</th>
+                <th style={{ textAlign: 'right' }}>Lines</th>
+                <th style={{ textAlign: 'right' }}>Amount (M IDR)</th>
               </tr>
             </thead>
             <tbody>
-              {d.materials.map((m: any) => (
-                <tr key={m.materialCode} className="ent-row" onClick={() => setOpen(m.materialCode)}>
-                  <td>{m.materialCode}</td>
-                  <td className="muted">{m.description}</td>
+              {d.materials.map((m: any, i: number) => (
+                <tr
+                  key={m.materialCode}
+                  className={`ent-row ${i % 2 ? '' : 're'}`}
+                  title="Click for vendors, areas & price history"
+                  onClick={() => setOpen(m.materialCode)}
+                >
+                  <td style={{ fontWeight: 700, color: 'var(--blue)' }}>{m.materialCode}</td>
+                  <td>{m.description}</td>
                   <td>{m.materialGroup ?? DASH}</td>
+                  <td>{m.category ?? DASH}</td>
+                  <td className="num">{m.soleSource ? <span title="Sole source">🔴 1</span> : formatNumber(m.vendors)}</td>
                   <td className="num">{formatNumber(m.lines)}</td>
-                  <td className="num">{formatNumber(m.vendors)}</td>
-                  <td className="num">{formatNumber(m.qty, 1)}</td>
-                  <td className="num">{formatMoney(m.spendUsd, 'USD')}</td>
-                  <td>{m.soleSource ? '🔴 yes' : ''}</td>
+                  <td className="num">{m.spendIdr === null ? DASH : (Number(m.spendIdr) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
                 </tr>
               ))}
             </tbody>
@@ -604,26 +622,78 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
         )}
       </div>
 
-      <TwoCol
-        left={
-          <div className="panel">
-            <h2>Volume leaders</h2>
-            <SimpleTable
-              head={['Material', 'Description', 'Qty', 'Unit']}
-              rows={d.volumeLeaders.map((x: any) => [x.materialCode, x.description, formatNumber(x.qty, 1), x.unit ?? DASH])}
-            />
+      <div className="chart-grid" style={{ marginTop: '1rem' }}>
+        <div className="panel">
+          <h3 className="pr-tbl-h">Price Volatility — top 50 most erratic unit prices (CV%, IDR)</h3>
+          <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
+            <table className="data dd-tbl">
+              <thead>
+                <tr>
+                  <th>Material</th><th>Description</th>
+                  <th className="num">Volatility (CV%)</th>
+                  <th className="num">Months</th>
+                  <th className="num">Spend (M IDR)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(d.priceVolatility ?? []).length === 0 && (
+                  <tr><td colSpan={5} className="muted">Needs ≥3 months of unit-price history per material.</td></tr>
+                )}
+                {(d.priceVolatility ?? []).map((v: any, i: number) => (
+                  <tr
+                    key={v.materialCode}
+                    className={`ent-row ${i % 2 ? '' : 're'}`}
+                    title="Open material popup"
+                    onClick={() => setOpen(v.materialCode)}
+                  >
+                    <td style={{ fontWeight: 600, color: 'var(--blue)' }}>{v.materialCode}</td>
+                    <td>{v.description}</td>
+                    <td className="num" style={v.cvPct !== null && v.cvPct > 25 ? { color: 'var(--crit)', fontWeight: 700 } : { fontWeight: 700 }}>
+                      {v.cvPct === null ? DASH : `${Number(v.cvPct).toFixed(1)}%`}
+                    </td>
+                    <td className="num">{v.months}</td>
+                    <td className="num">{v.spendIdr === null ? DASH : (Number(v.spendIdr) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        }
-        right={
-          <div className="panel">
-            <h2>Sole-source materials <span className="muted">({d.soleSource.length} of cap {d.caps.soleSource})</span></h2>
-            <SimpleTable
-              head={['Material', 'Description', 'Only vendor', 'Lines', 'Spend USD']}
-              rows={d.soleSource.map((x: any) => [x.materialCode, x.description, x.vendorName ?? DASH, formatNumber(x.lines), formatMoney(x.spendUsd, 'USD')])}
-            />
+        </div>
+
+        <div className="panel">
+          <h3 className="pr-tbl-h">Single-Source Risk — top 50 by spend · click for material popup</h3>
+          <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
+            <table className="data dd-tbl">
+              <thead>
+                <tr>
+                  <th>Material</th><th>Description</th><th>Sole Vendor</th>
+                  <th className="num">Lines</th>
+                  <th className="num">Spend (M IDR)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(d.soleSource ?? []).length === 0 && (
+                  <tr><td colSpan={5} className="muted">No single-source materials found.</td></tr>
+                )}
+                {(d.soleSource ?? []).map((x: any, i: number) => (
+                  <tr
+                    key={x.materialCode}
+                    className={`ent-row ${i % 2 ? '' : 're'}`}
+                    title="Open material popup"
+                    onClick={() => setOpen(x.materialCode)}
+                  >
+                    <td style={{ fontWeight: 600, color: 'var(--blue)' }}>{x.materialCode}</td>
+                    <td>{x.description}</td>
+                    <td>{x.vendorName ?? DASH}</td>
+                    <td className="num">{formatNumber(x.lines)}</td>
+                    <td className="num">{x.spendIdr === null ? DASH : (Number(x.spendIdr) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        }
-      />
+        </div>
+      </div>
 
       {open && <MaterialModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} />}
     </>

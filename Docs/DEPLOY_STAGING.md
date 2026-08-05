@@ -41,30 +41,50 @@ deploy/env/secrets.staging.env.example  # Coupa credentials template
 - Note: all three hosts show "System restart required" from unattended
   upgrades — schedule reboots before go-live, not during this deployment.
 
-## 1. Build and ship the images (on the workstation)
+## 1. Build and ship the images (on the Windows workstation)
 
 Build once, ship the exact same bytes to both servers — no source code or
 toolchain on the servers.
+
+> **Working from Windows with PuTTY:** open a PuTTY session (as `root`) to
+> each server for the server-side commands; file transfer uses **`pscp`**
+> (installed with PuTTY — if it is not on PATH, call
+> `"C:\Program Files\PuTTY\pscp.exe"`). pscp prompts for the root password or
+> uses your PuTTY key/Pageant.
+
+Build (workstation, PowerShell or Git Bash):
 
 ```bash
 cd "D:/Claude/Procurement Dashboard"
 docker compose build api web
 docker tag pct-api pct-api:staging
 docker tag pct-web pct-web:staging
-docker save pct-api:staging | gzip > pct-api-staging.tar.gz
-docker save pct-web:staging | gzip > pct-web-staging.tar.gz
-scp pct-api-staging.tar.gz root@172.28.92.57:/opt/pct/
-scp pct-web-staging.tar.gz root@172.28.92.56:/opt/pct/
+docker save -o pct-api-staging.tar pct-api:staging
+docker save -o pct-web-staging.tar pct-web:staging
 ```
 
-(Create `/opt/pct` on each server first: `ssh root@<host> mkdir -p /opt/pct`.)
+Create the target folder on each server first (in its PuTTY window):
+`mkdir -p /opt/pct`
+
+Ship (workstation):
+
+```bash
+pscp pct-api-staging.tar root@172.28.92.57:/opt/pct/
+pscp pct-web-staging.tar root@172.28.92.56:/opt/pct/
+```
 
 ## 2. DB server — 172.28.92.60
 
+Ship the compose file (workstation):
+
 ```bash
-ssh root@172.28.92.60
-mkdir -p /opt/pct && cd /opt/pct
-# copy deploy/staging/db.compose.yml here as compose.yml (scp from workstation)
+pscp deploy/staging/db.compose.yml root@172.28.92.60:/opt/pct/compose.yml
+```
+
+In the PuTTY session on **172.28.92.60**:
+
+```bash
+cd /opt/pct
 printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -base64 24)" > db.env
 chmod 600 db.env
 docker compose -f compose.yml up -d
@@ -75,17 +95,22 @@ Keep `db.env` safe — its password goes into the BE `DATABASE_URL` next.
 
 ## 3. BE server — 172.28.92.57
 
+Ship the config files (workstation):
+
 ```bash
-ssh root@172.28.92.57
-mkdir -p /opt/pct/assets && cd /opt/pct
-docker load < pct-api-staging.tar.gz
-# copy from the workstation:
-#   deploy/staging/be.compose.yml        -> /opt/pct/compose.yml
-#   deploy/env/staging.env               -> /opt/pct/staging.env
-#   deploy/env/secrets.staging.env.example -> /opt/pct/secrets.staging.env (fill in)
+pscp deploy/staging/be.compose.yml root@172.28.92.57:/opt/pct/compose.yml
+pscp deploy/env/staging.env root@172.28.92.57:/opt/pct/staging.env
+pscp deploy/env/secrets.staging.env.example root@172.28.92.57:/opt/pct/secrets.staging.env
 ```
 
-Edit `/opt/pct/staging.env`:
+In the PuTTY session on **172.28.92.57**:
+
+```bash
+mkdir -p /opt/pct/assets && cd /opt/pct
+docker load -i pct-api-staging.tar
+```
+
+Edit `/opt/pct/staging.env` in the PuTTY session (e.g. `nano staging.env`):
 - `SESSION_SECRET` → paste output of `openssl rand -base64 48`
 - `DATABASE_URL`   → `postgres://pct:<password from db.env>@172.28.92.60:5436/pct`
 - **SSO (if the Hub registration is done):** uncomment the `OIDC_*` block and
@@ -95,16 +120,16 @@ Edit `/opt/pct/staging.env`:
 Fill `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials
 (`chmod 600` both env files).
 
-Put the SAP export files in the share stand-in (from the workstation):
+Put the SAP export files in the share stand-in (workstation):
 
 ```bash
-scp "Assets/"*.XLSX "Assets/"*.xlsx root@172.28.92.57:/opt/pct/assets/
+pscp "Assets/*.XLSX" "Assets/*.xlsx" root@172.28.92.57:/opt/pct/assets/
 ```
 
 (When the real Synology/CIFS share is available, mount it read-only at
 `/opt/pct/assets` instead — the compose file already mounts it `:ro`.)
 
-Start, migrate, seed, ingest:
+Start, migrate, seed, ingest (PuTTY session):
 
 ```bash
 cd /opt/pct
@@ -129,13 +154,18 @@ Expect `"outcome":"published"` with a dataset version id.
 
 ## 4. FE server — 172.28.92.56
 
+Ship the config files (workstation):
+
 ```bash
-ssh root@172.28.92.56
-mkdir -p /opt/pct && cd /opt/pct
-docker load < pct-web-staging.tar.gz
-# copy from the workstation:
-#   deploy/staging/fe.compose.yml -> /opt/pct/compose.yml
-#   deploy/nginx/staging.conf     -> /opt/pct/staging.conf
+pscp deploy/staging/fe.compose.yml root@172.28.92.56:/opt/pct/compose.yml
+pscp deploy/nginx/staging.conf root@172.28.92.56:/opt/pct/staging.conf
+```
+
+In the PuTTY session on **172.28.92.56**:
+
+```bash
+cd /opt/pct
+docker load -i pct-web-staging.tar
 docker compose -f compose.yml up -d
 ```
 
@@ -194,16 +224,18 @@ If the Hub is down, the login page automatically hides the SSO button
 # workstation
 docker compose build api web
 docker tag pct-api pct-api:staging && docker tag pct-web pct-web:staging
-docker save pct-api:staging | gzip > pct-api-staging.tar.gz    # scp to 57
-docker save pct-web:staging | gzip > pct-web-staging.tar.gz    # scp to 56
-# BE server
-docker load < pct-api-staging.tar.gz && docker compose -f /opt/pct/compose.yml up -d api
+docker save -o pct-api-staging.tar pct-api:staging
+docker save -o pct-web-staging.tar pct-web:staging
+pscp pct-api-staging.tar root@172.28.92.57:/opt/pct/
+pscp pct-web-staging.tar root@172.28.92.56:/opt/pct/
+# BE server (PuTTY session)
+docker load -i /opt/pct/pct-api-staging.tar && docker compose -f /opt/pct/compose.yml up -d api
 docker exec pct-api node dist/db/migrate.js   # idempotent
-# FE server
-docker load < pct-web-staging.tar.gz && docker compose -f /opt/pct/compose.yml up -d web
+# FE server (PuTTY session)
+docker load -i /opt/pct/pct-web-staging.tar && docker compose -f /opt/pct/compose.yml up -d web
 ```
 
-Rollback = keep the previous tarball and `docker load` it again. The database
+Rollback = keep the previous tar and `docker load -i` it again. The database
 never rolls back — migrations are additive and dataset versions immutable.
 
 ## Known staging caveats

@@ -166,8 +166,13 @@ the newest Coupa rate in that month (timed by its `updated-at`). Whichever
 record was updated most recently wins; pairs/months the excel lacks are added
 from Coupa. Metrics: `coupaFxCandidates` / `coupaFxAdded` / `coupaFxReplaced`.
 
-**Gated by `fx.coupa_source_enabled` (default OFF, Admin → Coupa panel).**
-Staging (kpn-test) carries test rates (e.g. USD→IDR 17.8 instead of ~16,800):
-with the gate open they inflated PR Pipeline from $86.5M to $76B in one
-recompute. Enable only where Coupa carries real rates.
+**Superseded 5 Aug 2026 (same day): no gate.** Per user decision, both sources
+feed ONE shared pair store, `ops.fx_rate_source` (migration 010): the SAP rate
+file upserts it at every ingest (timed by the file's `source_mtime`), the Coupa
+sync at every poll (timed by `updated-at`); per pair + period the most recently
+updated record wins. Provenance (source, source_updated_at) is carried into the
+versioned `core.fx_rate` and shown in the Admin FX table. Staging consequence,
+user-accepted: Coupa test rates fill periods the SAP file does not cover, so
+pre-2026 conversions (e.g. PR Pipeline ≈ $76 B) are wrong on staging and will
+correct themselves against production Coupa rates.
 

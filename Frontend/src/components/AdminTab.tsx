@@ -249,7 +249,7 @@ function FxPanel() {
       <div className="table-wrap" style={{ maxHeight: '300px', overflow: 'auto' }}>
         <table className="data">
           <thead>
-            <tr><th>Currency</th><th>Period</th><th style={{ textAlign: 'right' }}>USD per unit</th><th>Derivation</th><th>Pivot</th></tr>
+            <tr><th>Currency</th><th>Period</th><th style={{ textAlign: 'right' }}>USD per unit</th><th>Derivation</th><th>Pivot</th><th>Source</th><th>Updated</th></tr>
           </thead>
           <tbody>
             {d.rates.map((r: any, i: number) => (
@@ -259,6 +259,12 @@ function FxPanel() {
                 <td className="num">{Number(r.usdPerUnit).toLocaleString('en-GB', { maximumSignificantDigits: 8 })}</td>
                 <td>{r.derivation}</td>
                 <td>{r.pivotCurrency ?? DASH}</td>
+                <td>
+                  <span className={`bs ${r.source === 'coupa' ? 'su' : r.source === 'sap' ? 'sd' : r.source === 'mixed' ? 'sn' : 'sl'}`}>
+                    {r.source ?? 'sap'}
+                  </span>
+                </td>
+                <td>{r.sourceUpdatedAt ? String(r.sourceUpdatedAt).slice(0, 16) : DASH}</td>
               </tr>
             ))}
           </tbody>
@@ -267,6 +273,12 @@ function FxPanel() {
       <p className="note">
         Rates are stored per dataset version — a re-published bundle with a corrected rate file never
         changes figures already published.
+      </p>
+      <p className="note">
+        <strong>Two sources, one table:</strong> the SAP rate file and Coupa's exchange-rate API both
+        feed the shared FX store; for the same currency and period, whichever record was updated most
+        recently wins (SAP timed by its file's modified date, Coupa by its <code>updated-at</code>).
+        New rates take effect at the next recompute.
       </p>
       <p className="note">
         <strong>Period basis:</strong> a PO with a booked Coupa invoice converts at its <strong>invoice

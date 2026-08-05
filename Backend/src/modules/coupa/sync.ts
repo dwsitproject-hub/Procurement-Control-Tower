@@ -265,7 +265,7 @@ const PROJECT: Record<CoupaObject, (rows: Row[]) => Promise<number>> = {
 };
 
 async function projectExchangeRates(rows: Row[]): Promise<number> {
-  return upsert(
+  const n2 = await upsert(
     'ops.coupa_exchange_rate',
     ['id', 'rate', 'rate_date', 'from_currency', 'to_currency', 'created_at', 'updated_at'],
     rows
@@ -277,6 +277,28 @@ async function projectExchangeRates(rows: Row[]): Promise<number> {
       ]),
     'id',
   );
+  // Refresh the shared FX pair store (010): month-latest Coupa rate per pair,
+  // taking a slot only when more recently updated than what sits there.
+  await query(
+    `INSERT INTO ops.fx_rate_source
+       (from_currency, to_currency, period_year, period_month, rate, source, source_updated_at)
+     SELECT DISTINCT ON (upper(btrim(from_currency)), upper(btrim(to_currency)),
+                         date_part('year', rate_date)::int, date_part('month', rate_date)::int)
+            upper(btrim(from_currency)), upper(btrim(to_currency)),
+            date_part('year', rate_date)::int, date_part('month', rate_date)::smallint,
+            rate, 'coupa', updated_at
+       FROM ops.coupa_exchange_rate
+      WHERE rate_date IS NOT NULL AND rate > 0
+      ORDER BY upper(btrim(from_currency)), upper(btrim(to_currency)),
+               date_part('year', rate_date)::int, date_part('month', rate_date)::int,
+               rate_date DESC, updated_at DESC NULLS LAST
+     ON CONFLICT (from_currency, to_currency, period_year, period_month)
+     DO UPDATE SET rate = EXCLUDED.rate, source = 'coupa',
+                   source_updated_at = EXCLUDED.source_updated_at, updated_at = now()
+      WHERE fx_rate_source.source_updated_at IS NULL
+         OR EXCLUDED.source_updated_at > fx_rate_source.source_updated_at`,
+  );
+  return n2;
 }
 
 // ── the sync run ─────────────────────────────────────────────────────────────

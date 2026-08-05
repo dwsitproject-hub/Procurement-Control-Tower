@@ -89,7 +89,8 @@ export async function fxTable(versionId: number): Promise<{
 }> {
   const rates = await query<Record<string, unknown>>(
     `SELECT currency_code AS "currency", period_year AS "year", period_month AS "month",
-            usd_per_unit AS "usdPerUnit", derivation, pivot_currency AS "pivotCurrency"
+            usd_per_unit AS "usdPerUnit", derivation, pivot_currency AS "pivotCurrency",
+            source, source_updated_at::text AS "sourceUpdatedAt"
        FROM core.fx_rate WHERE dataset_version_id = $1
       ORDER BY currency_code, period_year, period_month`,
     [versionId],

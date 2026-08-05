@@ -20,6 +20,9 @@ export interface FxRate {
   readonly usdPerUnit: number;
   readonly derivation: FxDerivation;
   readonly pivotCurrency: string | null;
+  /** Where the raw pair came from: 'sap' | 'coupa' | 'mixed' (triangulated legs disagree). */
+  readonly source?: string | null;
+  readonly sourceUpdatedAt?: string | null;
 }
 
 export interface FxResolution {
@@ -140,6 +143,8 @@ export interface RawFxRow {
   readonly year: number;
   readonly month: number;
   readonly ratio?: number | null;
+  readonly source?: string | null;
+  readonly sourceUpdatedAt?: string | null;
 }
 
 /**
@@ -174,36 +179,38 @@ export function buildFxTable(rows: readonly RawFxRow[]): FxRate[] {
     if (!Number.isFinite(r.rate) || r.rate <= 0) continue;
     const v = eff(r);
     if (r.from === 'USD' && r.to !== 'USD') {
-      put({ currency: r.to, year: r.year, month: r.month, usdPerUnit: 1 / v, derivation: 'direct', pivotCurrency: null });
+      put({ currency: r.to, year: r.year, month: r.month, usdPerUnit: 1 / v, derivation: 'direct', pivotCurrency: null, source: r.source ?? null, sourceUpdatedAt: r.sourceUpdatedAt ?? null });
     } else if (r.to === 'USD' && r.from !== 'USD') {
-      put({ currency: r.from, year: r.year, month: r.month, usdPerUnit: v, derivation: 'inverted', pivotCurrency: null });
+      put({ currency: r.from, year: r.year, month: r.month, usdPerUnit: v, derivation: 'inverted', pivotCurrency: null, source: r.source ?? null, sourceUpdatedAt: r.sourceUpdatedAt ?? null });
     }
   }
 
   // Pass 3: triangulate cross pairs through any pivot that has a USD rate.
   // Index USD -> pivot rates per period.
-  const usdToPivot = new Map<string, number>();
+  const usdToPivot = new Map<string, { v: number; source: string | null }>();
   for (const r of rows) {
     if (!Number.isFinite(r.rate) || r.rate <= 0) continue;
     const v = eff(r);
-    if (r.from === 'USD' && r.to !== 'USD') usdToPivot.set(rateKey(r.to, r.year, r.month), v);
-    else if (r.to === 'USD' && r.from !== 'USD') usdToPivot.set(rateKey(r.from, r.year, r.month), 1 / v);
+    if (r.from === 'USD' && r.to !== 'USD') usdToPivot.set(rateKey(r.to, r.year, r.month), { v, source: r.source ?? null });
+    else if (r.to === 'USD' && r.from !== 'USD') usdToPivot.set(rateKey(r.from, r.year, r.month), { v: 1 / v, source: r.source ?? null });
   }
 
   for (const r of rows) {
     if (!Number.isFinite(r.rate) || r.rate <= 0) continue;
     if (r.from === 'USD' || r.to === 'USD') continue;
     const v = eff(r);
-    const pivotRate = usdToPivot.get(rateKey(r.to, r.year, r.month));
-    if (pivotRate !== undefined && pivotRate > 0) {
-      // rate is (to per from); pivotRate is (to per USD)
+    const pivot = usdToPivot.get(rateKey(r.to, r.year, r.month));
+    if (pivot !== undefined && pivot.v > 0) {
+      // rate is (to per from); pivot.v is (to per USD)
       put({
         currency: r.from,
         year: r.year,
         month: r.month,
-        usdPerUnit: v / pivotRate,
+        usdPerUnit: v / pivot.v,
         derivation: 'triangulated',
         pivotCurrency: r.to,
+        source: (r.source ?? null) === pivot.source ? (r.source ?? null) : 'mixed',
+        sourceUpdatedAt: r.sourceUpdatedAt ?? null,
       });
     }
   }

@@ -27,3 +27,8 @@ Assets/
 
 Docs/KPN - API Payload*.docx
 deploy/env/secrets.local.env
+# staging secrets - filled on servers, never committed
+deploy/env/secrets.staging.env
+deploy/staging/db.env
+deploy/staging/staging.env
+deploy/staging/secrets.staging.env

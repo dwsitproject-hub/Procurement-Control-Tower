@@ -30,6 +30,13 @@ deploy/env/secrets.staging.env.example  # Coupa credentials template
 - Security groups / firewalls must allow: **your office → 56:3050**,
   **56 → 57:4100**, **57 → 60:5436**, and **57 → kpn-test.coupahost.com:443**
   (Coupa) plus the SAP share if mounted.
+- **For DWS Hub SSO** (users get two login paths: local credentials AND the
+  Hub): the **browser → Hub** and the **BE server (57) → Hub** paths must both
+  be open — the token exchange is server-to-server. Register the app with the
+  Hub admin ahead of time (details in step 6): redirect URI
+  `http://172.28.92.56:3050/auth/oidc/callback`, public client / PKCE, and
+  collect the assigned `client_id`. SSO can also be enabled later without a
+  redeploy — it is env-only.
 - Docker + Compose v2 on all three servers (already present per `docker ps`).
 - Note: all three hosts show "System restart required" from unattended
   upgrades — schedule reboots before go-live, not during this deployment.
@@ -81,6 +88,9 @@ docker load < pct-api-staging.tar.gz
 Edit `/opt/pct/staging.env`:
 - `SESSION_SECRET` → paste output of `openssl rand -base64 48`
 - `DATABASE_URL`   → `postgres://pct:<password from db.env>@172.28.92.60:5436/pct`
+- **SSO (if the Hub registration is done):** uncomment the `OIDC_*` block and
+  fill the Hub hostname + `client_id` — see step 6. Leave it commented to ship
+  with local login only and enable SSO later.
 
 Fill `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials
 (`chmod 600` both env files).
@@ -139,12 +149,17 @@ docker compose -f compose.yml up -d
 4. Admin → Coupa: "Sync now" — every object reports `ok` (proves egress to
    kpn-test). Enable the scheduler (5–10 min) and "Save schedule".
 5. Admin → FX rates: `sap` and `coupa` source pills both present.
-6. Full verification from the workstation (card = drill on every figure):
+6. **Both login paths** (when SSO is enabled): the login page shows
+   "Sign in with DWS Hub" above the credential form — test the SP-initiated
+   flow (button) AND the IdP-initiated flow (the app's tile in the Hub
+   dashboard); both must land signed in. If the button is missing, the Hub was
+   unreachable from the BE server (boot log shows the discovery warning).
+7. Full verification from the workstation (card = drill on every figure):
    `npx tsx Backend/src/cli/sweep.ts --base http://172.28.92.56:3050`
    — expect `mismatches=0 errors=0` (pass `--password` if you already
    rotated the admin credential).
 
-## 6. Enable DWS Hub SSO (optional, second login path)
+## 6. Enable DWS Hub SSO (the second login path)
 
 The app supports two login paths side by side: local credentials and DWS Hub
 OIDC (Authorization Code + PKCE, public client — implemented per
@@ -197,6 +212,15 @@ never rolls back — migrations are additive and dataset versions immutable.
   would refuse production over HTTP). Before production: TLS at the FE,
   `NODE_ENV=production`, `SESSION_COOKIE_SECURE=true`, OIDC on, and the dev
   admin seed will refuse to run.
+- **SSO over HTTP works** only because the FE is a single origin (nginx
+  proxies `/auth/*`), keeping the session cookie first-party with
+  `SameSite=Lax` — the exact Option-A layout from
+  SSO-TARGET-APP-INTEGRATION.md step 2. Never point the Hub's redirect URI at
+  an internal port that bypasses the proxy, and confirm the Hub accepts an
+  `http://` redirect URI for this internal domain.
+- **First SSO login = viewer with an empty data scope.** Brief the admin: new
+  Hub users see the shell but zero data until Admin → Users grants scope.
+  Local and SSO identities are separate accounts unless deliberately mapped.
 - **Coupa staging FX rates are test junk** (USD→IDR ≈ 17.8): periods the SAP
   rate file covers are safe (SAP wins on recency), but uncovered periods
   convert at junk rates — e.g. PR Pipeline shows ≈ $76 B. Self-corrects

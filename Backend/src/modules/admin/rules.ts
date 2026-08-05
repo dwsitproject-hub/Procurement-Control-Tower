@@ -22,6 +22,11 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   'freshness.ageing_days': 3,
   'freshness.stale_days': 7,
   'kpi.min_sample': 30,
+  // Coupa poller (TECH_04 §3.4). Credentials are env-only, never here.
+  'coupa.sync_enabled': false,
+  'coupa.sync_interval_minutes': 10,
+  'coupa.lookback_minutes': 15,
+  'coupa.page_limit': 50,
 };
 
 /**

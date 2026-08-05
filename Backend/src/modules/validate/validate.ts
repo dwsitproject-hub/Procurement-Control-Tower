@@ -189,10 +189,10 @@ export async function checkStaged(batchId: number): Promise<Finding[]> {
         ruleId: 'V-M01',
         severity: 'CAVEAT',
         feed: 'pr',
-        message: `Requested delivery date is not distinct from release date (${pct.toFixed(2)}% of rows differ, expected >= 50%). The column is not a need-by date, so Demand Realism remains disabled. Fix: add SAP EBAN-LFDAT to the ME5A export variant (PRD 13.1.1).`,
+        message: `Requested delivery date is not distinct from release date (${pct.toFixed(2)}% of rows differ, expected >= 50%). The column is not a need-by date, so Demand Realism and On-Time vs Requested remain disabled. Fix: add SAP EBAN-LFDAT to the ME5A export variant (PRD 13.1.1).`,
         affectedRows: dv.total - dv.differing,
         measured: { expected: '>=50%', actual: `${pct.toFixed(2)}%`, total: dv.total, differing: dv.differing },
-        disablesKpis: ['demand_realism'],
+        disablesKpis: ['demand_realism', 'otd_vs_requested'],
         drillPredicate: null,
       });
     }
@@ -409,6 +409,19 @@ export function checkMetrics(m: TransformMetrics, rules: Record<string, unknown>
     disablesKpis: [],
     drillPredicate: null,
   });
+
+  if (m.excludedPoLines > 0 || m.excludedPrItems > 0) {
+    out.push({
+      ruleId: 'V-C01',
+      severity: 'WARNING',
+      feed: null,
+      message: `Exclusion config removed ${m.excludedPoLines} PO line(s) and ${m.excludedPrItems} PR item(s) from every view. Edit under Admin > Exclusions; changes apply on the next recompute.`,
+      affectedRows: m.excludedPoLines + m.excludedPrItems,
+      measured: { excludedPoLines: m.excludedPoLines, excludedPrItems: m.excludedPrItems },
+      disablesKpis: [],
+      drillPredicate: null,
+    });
+  }
 
   out.push({
     ruleId: 'V-B08',

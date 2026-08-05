@@ -17,6 +17,7 @@ import {
   checkFile, checkMetrics, checkStaged, disabledKpis, type Finding,
 } from '../validate/validate.js';
 import { classifyHeaders } from './classify.js';
+import { loadMappings } from '../admin/steward.js';
 import { REQUIRED_FEEDS } from './contracts.js';
 import { extractRow, readSheetFromBuffer } from './parse.js';
 import {
@@ -29,6 +30,12 @@ export interface IngestOptions {
   submittedBy?: string | null;
   /** Automatic batches publish immediately; manual batches wait for confirmation. */
   autoPublish?: boolean;
+  /**
+   * Re-process even when the bundle hash matches the published version. Needed
+   * when the transform's behaviour changed without the source changing —
+   * exclusion edits, new fact columns, rule updates.
+   */
+  force?: boolean;
   safety?: SafetyLimits;
   onProgress?: (stage: string, detail?: string) => void;
 }
@@ -80,7 +87,13 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     const buf = await opts.source.read(f.handle);
     assertMagicBytes(buf, f.displayName);
     const sheet = readSheetFromBuffer(buf);
-    const cls = classifyHeaders(sheet.headers);
+    // First pass identifies the feed; steward mappings are per feed, so a
+    // second pass applies them once the feed is known. Cheap (headers only).
+    let cls = classifyHeaders(sheet.headers);
+    if (cls.feed !== null) {
+      const mappings = await loadMappings(cls.feed);
+      if (mappings.size > 0) cls = classifyHeaders(sheet.headers, mappings);
+    }
     prepared.push({
       displayName: f.displayName,
       byteSize: f.byteSize,
@@ -94,13 +107,17 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   }
 
   // ── idempotency: identical bundle already published is a no-op ──
+  // Unless forced: a recompute after an exclusion or rule change must re-run
+  // the transform even though the source files are byte-identical.
   const bHash = bundleHash(prepared.map((p) => p.sha));
-  const already = await queryOne<{ id: string }>(
-    `SELECT id FROM ingest.batch WHERE bundle_hash = $1 AND state = 'PUBLISHED'`,
-    [bHash],
-  );
-  if (already) {
-    return { outcome: 'noop_unchanged', batchId: Number(already.id) };
+  if (!opts.force) {
+    const already = await queryOne<{ id: string }>(
+      `SELECT id FROM ingest.batch WHERE bundle_hash = $1 AND state = 'PUBLISHED'`,
+      [bHash],
+    );
+    if (already) {
+      return { outcome: 'noop_unchanged', batchId: Number(already.id) };
+    }
   }
 
   // ── completeness: a partial set does not start a batch ──
@@ -253,6 +270,15 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       await publishVersion(result.datasetVersionId, opts.submittedBy ?? null);
       timings.publishing = (Date.now() - pubStart) / 1000;
       timings.total = (Date.now() - t0) / 1000;
+      // A forced re-run reprocesses a byte-identical bundle, and only one batch
+      // per bundle hash may hold PUBLISHED (ux_batch_bundle_published). The old
+      // batch's version has just been superseded by the pointer swap above, so
+      // its state follows.
+      await query(
+        `UPDATE ingest.batch SET state = 'SUPERSEDED'
+          WHERE bundle_hash = $1 AND state = 'PUBLISHED' AND id <> $2`,
+        [bHash, batchId],
+      );
       await setState('PUBLISHED');
       await pruneOldVersions();
       return { outcome: 'published', batchId, datasetVersionId: result.datasetVersionId, findings };

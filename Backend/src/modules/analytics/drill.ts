@@ -18,6 +18,7 @@ import { query, queryOne } from '../../db/client.js';
 import {
   intersectScopes, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+import { compileCustomFilter } from './custom.js';
 
 const env = loadEnv();
 
@@ -113,6 +114,12 @@ const TABLES: Record<Grain, { table: string; alias: string; order: string; id: s
  */
 type Compiler = (v: unknown, alias: string, params: unknown[], grain: Grain) => string;
 
+const asInt = (v: unknown): number => {
+  const n = Number(v);
+  if (!Number.isInteger(n)) throw new Error(`expected an integer, got ${String(v)}`);
+  return n;
+};
+
 const p = (params: unknown[], v: unknown): string => {
   params.push(v);
   return `$${params.length}`;
@@ -138,9 +145,134 @@ function monthExpr(alias: string, grain: Grain): string {
 }
 
 const FILTERS: Record<string, Compiler> = {
+  // Filters the mart aggregates apply. Every predicate must carry the SAME
+  // filters as the query that produced its number — the omission of these two is
+  // what made 29 chart points drill to a higher count than they displayed.
+  notSto: (_v, a) => `NOT ${a}.is_sto`,
+  notDeleted: (_v, a) => `NOT ${a}.is_deleted`,
+  deletedOnly: (_v, a) => `${a}.is_deleted`,
+  hasOpenCommitment: (_v, a) => `COALESCE(${a}.still_deliver_val, 0) > 0`,
+  grirOpen: (_v, a) =>
+    `COALESCE(${a}.still_deliver_qty, 0) = 0 AND COALESCE(${a}.still_invoice_val, 0) > 0`,
+  urgencyLte: (v, a, ps) => `${a}.urgency <= ${p(ps, asInt(v))}`,
+  priorityLabel: (v, a, ps) =>
+    v === null ? `${a}.priority_label IS NULL` : `${a}.priority_label = ${p(ps, String(v))}`,
+  matCat: (v, a, ps) =>
+    v === null ? `${a}.material_category IS NULL` : `${a}.material_category = ${p(ps, String(v))}`,
+  prNoPo: (_v, a) => `${a}.po_line_count = 0`,
+  hasPo: (_v, a) => `${a}.po_line_count > 0`,
+  hasPr: (_v, a) => `${a}.pr_no IS NOT NULL`,
+  unreleased: (_v, a) => `${a}.release_final_date IS NULL`,
+  released: (_v, a) => `${a}.release_final_date IS NOT NULL`,
+  purchOrg: (v, a, ps) => `${a}.purch_org = ${p(ps, String(v))}`,
+  /**
+   * Histogram bucket. Without this every bar in a distribution chart drilled to
+   * the whole population, because the bucket range was in the aggregate's CASE
+   * expression but not in the stored predicate.
+   *
+   * Boundaries mirror the aggregate's CASE exactly, including that '0-3' catches
+   * negative values the way v1's buckets do.
+   */
+  distBucket: (v, a, ps) => {
+    const o = v as { measure?: string; bucket?: string };
+    const COL: Record<string, string> = {
+      pr_approval: `(${a}.release_final_date - ${a}.requisition_date)`,
+      po_approval: `${a}.po_approval_days`,
+      delivery: `${a}.delivery_days`,
+      aging: `${a}.aging_days`,
+    };
+    const col = COL[o.measure ?? ''];
+    if (!col) throw new Error(`unknown distribution measure: ${String(o.measure)}`);
+
+    const UPPER: Record<string, [number | null, number | null]> = {
+      '0-3': [null, 3],
+      '4-7': [3, 7],
+      '8-14': [7, 14],
+      '15-30': [14, 30],
+      '31-60': [30, 60],
+      '60+': [60, null],
+      // Six PO-approval bands (4 Aug 2026); same-day gets its own bucket.
+      '0d': [null, 0],
+      '1-3d': [0, 3],
+      '4-7d': [3, 7],
+      '8-14d': [7, 14],
+      '15-30d': [14, 30],
+      '>30d': [30, null],
+    };
+    const r = UPPER[o.bucket ?? ''];
+    if (!r) throw new Error(`unknown distribution bucket: ${String(o.bucket)}`);
+
+    const parts: string[] = [`${col} IS NOT NULL`];
+    if (r[0] !== null) parts.push(`${col} > ${p(ps, r[0])}`);
+    if (r[1] !== null) parts.push(`${col} <= ${p(ps, r[1])}`);
+    return `(${parts.join(' AND ')})`;
+  },
+  // ── global filters (W2) ──
+  // Merged into every predicate issued from a filtered figure, so a card and its
+  // drill can never disagree once a filter is applied.
+  companyCodeIn: (v, a, ps) => `${a}.company_code = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  plantIn: (v, a, ps) => `${a}.plant = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  purchOrgIn: (v, a, ps) => `${a}.purch_org = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  monthKeyIn: (v, a, ps, grain) =>
+    `${monthExpr(a, grain)} = ANY(${p(ps, (v as unknown[]).map(String))})`,
+
+  /**
+   * A lead-time chart only aggregates rows where its measure exists (a sourcing
+   * time needs a PR release; an approval time needs a release record). The
+   * predicate must say so too, or the drill returns every line and over-counts.
+   */
+  measureNotNull: (v, a) => {
+    const COL: Record<string, string> = {
+      sourcing: 'sourcing_days',
+      po_approval: 'po_approval_days',
+      delivery: 'delivery_days',
+    };
+    const col = COL[String(v)];
+    if (!col) throw new Error(`unknown measure: ${String(v)}`);
+    return `${a}.${col} IS NOT NULL`;
+  },
+  /**
+   * The cycle cards drop negative spans (a GR before the PO date is a data
+   * artefact, not a lead time), so their drills must too - 3,260 delivery
+   * and 639 sourcing spans are negative in the current extract.
+   */
+  measureNonNeg: (v, a) => {
+    const COL: Record<string, string> = {
+      sourcing: 'sourcing_days',
+      po_approval: 'po_approval_days',
+      delivery: 'delivery_days',
+    };
+    const col = COL[String(v)];
+    if (!col) throw new Error(`unknown measure: ${String(v)}`);
+    return `(${a}.${col} IS NOT NULL AND ${a}.${col} >= 0)`;
+  },
+  // cycle_e2e's population: received lines whose linked PR gives a
+  // non-negative requisition->receipt span.
+  e2eEvaluable: (_v, a) =>
+    `(${a}.receipt_date IS NOT NULL
+      AND EXISTS (SELECT 1 FROM core.fact_pr_item _pi
+                   WHERE _pi.dataset_version_id = ${a}.dataset_version_id
+                     AND _pi.pr_no = ${a}.pr_no AND _pi.pr_item = ${a}.pr_item
+                     AND ${a}.receipt_date - _pi.requisition_date >= 0))`,
+  // pr_approval_lead_time's population: approved release steps with a positive
+  // SAP lead, whose PR exists in the item feed.
+  apprLeadEvaluable: (_v, a) =>
+    `(${a}.approve_date IS NOT NULL AND ${a}.lead_days > 0
+      AND EXISTS (SELECT 1 FROM core.fact_pr_item _pi
+                   WHERE _pi.dataset_version_id = ${a}.dataset_version_id
+                     AND _pi.pr_no = ${a}.pr_no AND _pi.pr_item = ${a}.pr_item))`,
+  // worst_approver_gap's population: approved steps whose PR has a
+  // requisition date - the rows every PIC's gap is measured from.
+  gapEvaluable: (_v, a) =>
+    `(${a}.approve_date IS NOT NULL
+      AND EXISTS (SELECT 1 FROM core.fact_pr_item _pi
+                   WHERE _pi.dataset_version_id = ${a}.dataset_version_id
+                     AND _pi.pr_no = ${a}.pr_no AND _pi.pr_item = ${a}.pr_item
+                     AND _pi.requisition_date IS NOT NULL))`,
   status: (v, a, ps) => `${a}.status = ${p(ps, String(v))}`,
   statusIn: (v, a, ps) => `${a}.status = ANY(${p(ps, (v as unknown[]).map(String))})`,
   plant: (v, a, ps) => `${a}.plant = ${p(ps, String(v))}`,
+  companyCode: (v, a, ps) => `${a}.company_code = ${p(ps, String(v))}`,
   purchGroup: (v, a, ps) =>
     v === null ? `${a}.purch_group IS NULL` : `${a}.purch_group = ${p(ps, String(v))}`,
   vendorCode: (v, a, ps) => `${a}.vendor_code = ${p(ps, String(v))}`,
@@ -177,8 +309,11 @@ const FILTERS: Record<string, Compiler> = {
     void ps;
     return clause;
   },
+  // The full open set. Listing only the PO-side statuses made every PR-grain
+  // "open" drill under-count, because 'Unapproved PR' and 'PR Approved-No PO'
+  // were silently excluded.
   open: (_v, a) =>
-    `${a}.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`,
+    `${a}.status IN ('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`,
   hasReceipt: (v, a) => (v ? `${a}.receipt_date IS NOT NULL` : `${a}.receipt_date IS NULL`),
   movementType: (v, a, ps) => `${a}.movement_type = ${p(ps, String(v))}`,
   postingClass: (v, a, ps) => `${a}.posting_class = ${p(ps, String(v))}`,
@@ -187,6 +322,87 @@ const FILTERS: Record<string, Compiler> = {
   pending: (v, a) => (v ? `${a}.approve_date IS NULL` : `${a}.approve_date IS NOT NULL`),
   eindtEqualsDocdate: (v, a, ps) => `${a}.eindt_equals_docdate = ${p(ps, Boolean(v))}`,
   demandUnrealistic: (_v, a) => `${a}.need_by_date IS NOT NULL`,
+  hasInfoRecord: (v, a) => (v ? `${a}.info_record IS NOT NULL` : `${a}.info_record IS NULL`),
+  valuedIdr: (_v, a) => `COALESCE(${a}.total_value_idr, 0) > 0`,
+  // v1's four age bands (Open Items page). NULL aging never matches a band.
+  ageBand4: (v, a) => {
+    const ranges: Record<string, string> = {
+      '0-15': `${a}.aging_days <= 15`,
+      '15-30': `${a}.aging_days > 15 AND ${a}.aging_days <= 30`,
+      '31-90': `${a}.aging_days > 30 AND ${a}.aging_days <= 90`,
+      '>90': `${a}.aging_days > 90`,
+    };
+    const r = ranges[String(v)];
+    if (!r) throw new Error(`unknown ageBand4: ${String(v)}`);
+    return `(${r})`;
+  },
+  // v1's 'Urgent PO (PO before PR)': the PO document predates its requisition.
+  poBeforePr: (_v, a) =>
+    `EXISTS (SELECT 1 FROM core.fact_pr_item _pr
+              WHERE _pr.dataset_version_id = ${a}.dataset_version_id
+                AND _pr.pr_no = ${a}.pr_no AND _pr.pr_item = ${a}.pr_item
+                AND ${a}.document_date < _pr.requisition_date)`,
+  currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
+  requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
+  // Purchasing group, blank-aware: the charts bucket blanks as 'N/A'/'(none)'.
+  purchGrp: (v, a, ps) => {
+    const g = String(v);
+    if (g === 'N/A' || g === '(none)') {
+      return `(${a}.purch_group IS NULL OR btrim(${a}.purch_group) = '')`;
+    }
+    return `btrim(${a}.purch_group) = ${p(ps, g)}`;
+  },
+  // The pgrp-share donut's 'Others' slice: everything outside the top groups.
+  purchGrpNotIn: (v, a, ps) => {
+    const arr = (Array.isArray(v) ? v : [v]).map(String);
+    const named = arr.filter((x) => x !== 'N/A' && x !== '(none)');
+    const parts: string[] = [];
+    if (named.length > 0) parts.push(`NOT (btrim(COALESCE(${a}.purch_group,'')) = ANY(${p(ps, named)}))`);
+    if (arr.length !== named.length) parts.push(`NOT (${a}.purch_group IS NULL OR btrim(${a}.purch_group) = '')`);
+    return parts.length > 0 ? `(${parts.join(' AND ')})` : 'TRUE';
+  },
+  // Area roll-up (v1's Master_Area): dim_plant.area, else the raw plant code.
+  areaIs: (v, a, ps) =>
+    `COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${a}.plant), ${a}.plant) = ${p(ps, String(v))}`,
+  foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
+  // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause
+  // EXACTLY — a converted PR item's own status never reaches 'Delivered', so
+  // the PR grain consults its PO lines. Any drift here would break the
+  // card-equals-drill guarantee under scope.
+  scopeOpen: (_v, a, _ps, grain) =>
+    grain === 'pr_item'
+      ? `(${a}.status IN ('Unapproved PR','PR Approved-No PO')
+          OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                      WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+                        AND _pl.pr_no = ${a}.pr_no AND _pl.pr_item = ${a}.pr_item
+                        AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')))`
+      : `${a}.status IN ('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`,
+  scopeComplete: (_v, a, _ps, grain) =>
+    grain === 'pr_item'
+      ? `EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                  WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+                    AND _pl.pr_no = ${a}.pr_no AND _pl.pr_item = ${a}.pr_item
+                    AND _pl.status = 'Delivered')`
+      : `${a}.status = 'Delivered'`,
+  // On-Time vs Requested (D4): a line is evaluable only when both the receipt
+  // and the requested date exist. Empty until EBAN-LFDAT reaches the export.
+  otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.need_by_date IS NOT NULL`,
+  // v1's open definition (OPEN_ST + "any GR means Delivered"): a PR item is
+  // open while no PO exists, or while its POs are unapproved/held/awaiting GR
+  // AND no linked line has received ANY goods. Differs from scopeOpen, which
+  // treats partially-delivered items as still open (the v2 house definition).
+  openBeforeGr: (_v, a, _ps, grain) => {
+    if (grain !== 'pr_item') throw new Error('openBeforeGr is a PR-item filter');
+    return `(${a}.status IN ('Unapproved PR','PR Approved-No PO')
+             OR (EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                          WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+                            AND _pl.pr_no = ${a}.pr_no AND _pl.pr_item = ${a}.pr_item
+                            AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR'))
+                 AND NOT EXISTS (SELECT 1 FROM core.fact_po_line _pl2
+                          WHERE _pl2.dataset_version_id = ${a}.dataset_version_id
+                            AND _pl2.pr_no = ${a}.pr_no AND _pl2.pr_item = ${a}.pr_item
+                            AND _pl2.status IN ('Delivered','Partially Delivered'))))`;
+  },
 };
 
 export interface DrillPage {
@@ -198,19 +414,65 @@ export interface DrillPage {
   columns: { key: string; label: string; type: string; currency?: string }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
+  /**
+   * Value totals over the WHOLE drill population (not the page) — v1's dd-modal
+   * header. Only for money-bearing grains. usdSum obeys the strict-FX rule:
+   * null when any line's currency is unrated, with usdComplete saying so.
+   */
+  totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;
+  /**
+   * "Open in Detail tab" (v1's dd-modal button): the drill filters translated
+   * into Detail-table query params, with any untranslatable keys named so the
+   * UI can say the handoff is approximate rather than pretending.
+   */
+  detailHandoff: { params: Record<string, string>; unmapped: string[] } | null;
+}
+
+/** Drill-filter keys → detail-table query params. Anything absent is unmapped. */
+function detailHandoffFor(filters: Record<string, unknown>): DrillPage['detailHandoff'] {
+  const params: Record<string, string> = {};
+  const unmapped: string[] = [];
+  for (const [k, v] of Object.entries(filters)) {
+    switch (k) {
+      case 'status': params['status'] = String(v); break;
+      case 'matCat': params['matCat'] = String(v); break;
+      case 'plant': params['plant'] = String(v); break;
+      case 'plantIn': params['plant'] = (v as unknown[]).map(String).join(','); break;
+      case 'purchOrg': params['purchOrg'] = String(v); break;
+      case 'purchOrgIn': params['purchOrg'] = (v as unknown[]).map(String).join(','); break;
+      case 'purchGroup': params['purchGroup'] = String(v); break;
+      case 'companyCode': params['company'] = String(v); break;
+      case 'companyCodeIn': params['company'] = (v as unknown[]).map(String).join(','); break;
+      case 'priorityLabel': params['priority'] = String(v); break;
+      case 'notSto': if (v) params['excludeSto'] = 'true'; break;
+      case 'open': params['onlyOpen'] = 'true'; break;
+      case 'vendorCode': case 'materialCode': params['q'] = String(v); break;
+      case 'notDeleted': break; // detail excludes deleted by default
+      default: unmapped.push(k);
+    }
+  }
+  return { params, unmapped };
 }
 
 const COLUMNS: Record<Grain, DrillPage['columns']> = {
+  // v1's dd-modal column order. The PO columns come from the first linked PO
+  // line (blank while unsourced), exactly like v1's act rows; WBS violations
+  // surface as the § row flag rather than a column.
   pr_item: [
     { key: 'prNo', label: 'PR No', type: 'string' },
     { key: 'prItem', label: 'Item', type: 'int' },
     { key: 'shortText', label: 'Description', type: 'string' },
+    { key: 'materialCode', label: 'Material', type: 'string' },
+    { key: 'materialCategory', label: 'Mat Cat', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
-    { key: 'totalValueIdr', label: 'Value IDR', type: 'money', currency: 'IDR' },
-    { key: 'wbsStatus', label: 'WBS', type: 'enum' },
+    { key: 'vendorName', label: 'Supplier', type: 'string' },
+    { key: 'poNo', label: 'PO No', type: 'string' },
     { key: 'status', label: 'Status', type: 'enum' },
-    { key: 'requisitionDate', label: 'PR date', type: 'date' },
+    { key: 'documentDate', label: 'PO Date', type: 'date' },
+    { key: 'receiptDate', label: 'GR Date', type: 'date' },
     { key: 'agingDays', label: 'Aging (d)', type: 'int' },
+    { key: 'totalValueIdr', label: 'Value (doc ccy)', type: 'money', currency: 'IDR' },
+    { key: 'totalValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
   ],
   po_line: [
     { key: 'poNo', label: 'PO No', type: 'string' },
@@ -219,9 +481,8 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'shortText', label: 'Description', type: 'string' },
     { key: 'vendorName', label: 'Vendor', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
-    { key: 'netOrderValue', label: 'Value', type: 'money' },
-    { key: 'currencyCode', label: 'Ccy', type: 'string' },
-    { key: 'netOrderValueUsd', label: 'Value USD', type: 'money', currency: 'USD' },
+    { key: 'netOrderValue', label: 'Value (doc ccy)', type: 'money' },
+    { key: 'netOrderValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
     { key: 'status', label: 'Status', type: 'enum' },
     { key: 'documentDate', label: 'PO date', type: 'date' },
     { key: 'receiptDate', label: 'GR date', type: 'date' },
@@ -257,9 +518,13 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
 };
 
 const SELECTS: Record<Grain, string> = {
-  pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText", f.plant,
-            f.total_value_idr AS "totalValueIdr", f.wbs_status AS "wbsStatus", f.status,
-            f.requisition_date AS "requisitionDate", f.aging_days AS "agingDays"`,
+  pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText",
+            f.material_code AS "materialCode", f.material_category AS "materialCategory", f.plant,
+            fp.vendor_name AS "vendorName", fp.po_no AS "poNo", f.status,
+            fp.document_date AS "documentDate", fp.receipt_date AS "receiptDate",
+            f.aging_days AS "agingDays", f.total_value_idr AS "totalValueIdr",
+            f.total_value_usd AS "totalValueUsd",
+            f.requisition_date AS "requisitionDate", f.wbs_status AS "_wbs"`,
   po_line: `f.po_no AS "poNo", f.po_item AS "poItem", f.pr_no AS "prNo", f.short_text AS "shortText",
             f.vendor_name AS "vendorName", f.plant, f.net_order_value AS "netOrderValue",
             f.currency_code AS "currencyCode", f.net_order_value_usd AS "netOrderValueUsd",
@@ -277,6 +542,21 @@ const SELECTS: Record<Grain, string> = {
                f.amount, f.currency_code AS "currencyCode", f.approve_date AS "approveDate"`,
 };
 
+/**
+ * Page-query joins per grain. The PR grain borrows its first linked PO line so
+ * the drill shows v1's Supplier / PO No / PO Date / GR Date columns; LEFT
+ * LATERAL .. LIMIT 1 keeps the row count identical, and the count query never
+ * uses it.
+ */
+const PAGE_JOINS: Partial<Record<Grain, string>> = {
+  pr_item: `LEFT JOIN LATERAL (
+              SELECT _p.po_no, _p.vendor_name, _p.document_date, _p.receipt_date
+                FROM core.fact_po_line _p
+               WHERE _p.dataset_version_id = f.dataset_version_id
+                 AND _p.pr_no = f.pr_no AND _p.pr_item = f.pr_item
+               ORDER BY _p.po_no, _p.po_item LIMIT 1) fp ON true`,
+};
+
 export async function executeDrill(
   payload: TokenPayload,
   limit: number,
@@ -290,6 +570,12 @@ export async function executeDrill(
   where.push(scopeSql(sq, t.alias, params));
 
   for (const [k, v] of Object.entries(payload.filters ?? {})) {
+    // User-defined specs (W7) prefix their filters `custom:` and compile against
+    // their own whitelist, keeping this static one closed.
+    if (k.startsWith('custom:')) {
+      where.push(compileCustomFilter(k, v, t.alias, params, payload.grain));
+      continue;
+    }
     const compiler = FILTERS[k];
     if (!compiler) throw new Error(`unknown drill filter: ${k}`);
     where.push(compiler(v, t.alias, params, payload.grain));
@@ -297,15 +583,35 @@ export async function executeDrill(
 
   const whereSql = where.join(' AND ');
 
-  const countRow = await queryOne<{ n: number }>(
-    `SELECT count(*)::int AS n FROM ${t.table} ${t.alias} WHERE ${whereSql}`,
+  // Count and value totals in one pass. IDR sum is exact (document currency);
+  // the USD sum follows the strict no-silent-conversion rule.
+  const TOTAL_EXPR: Partial<Record<Grain, string>> = {
+    pr_item: `sum(${t.alias}.total_value_idr) AS idr_sum,
+              sum(${t.alias}.total_value_usd) AS usd_sum,
+              count(*) FILTER (WHERE ${t.alias}.total_value_idr IS NOT NULL AND ${t.alias}.total_value_idr <> 0
+                                 AND ${t.alias}.total_value_usd IS NULL)::int AS unrated`,
+    po_line: `sum(${t.alias}.net_order_value) FILTER (WHERE ${t.alias}.currency_code = 'IDR') AS idr_sum,
+              sum(${t.alias}.net_order_value_usd) AS usd_sum,
+              count(*) FILTER (WHERE ${t.alias}.net_order_value IS NOT NULL AND ${t.alias}.net_order_value_usd IS NULL)::int AS unrated`,
+  };
+  const totalExpr = TOTAL_EXPR[payload.grain];
+  const countRow = await queryOne<{ n: number; idr_sum: number | null; usd_sum: number | null; unrated: number }>(
+    `SELECT count(*)::int AS n${totalExpr ? `, ${totalExpr}` : ''}
+       FROM ${t.table} ${t.alias} WHERE ${whereSql}`,
     params,
   );
   const total = countRow?.n ?? 0;
+  const totals = totalExpr && countRow
+    ? {
+        idrSum: countRow.idr_sum === null ? null : Number(countRow.idr_sum),
+        usdSum: countRow.unrated > 0 || countRow.usd_sum === null ? null : Number(countRow.usd_sum),
+        usdComplete: countRow.unrated === 0,
+      }
+    : null;
 
   const pageParams = [...params, limit, offset];
   const rows = await query<Record<string, unknown>>(
-    `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias}
+    `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
       WHERE ${whereSql} ORDER BY ${t.order}
       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
     pageParams,
@@ -319,7 +625,8 @@ export async function executeDrill(
     if (r['_exempt']) flags.push('releaseExempt');
     if (r['_link'] === 'dangling') flags.push('danglingLink');
     if (payload.grain === 'po_line' && r['_link'] === null) flags.push('directPo');
-    for (const k of ['_sto', '_token', '_exempt', '_link']) delete r[k];
+    if (r['_wbs'] === 'violation') flags.push('wbsViolation');
+    for (const k of ['_sto', '_token', '_exempt', '_link', '_wbs']) delete r[k];
     return { ...r, flags };
   });
 
@@ -339,6 +646,12 @@ export async function executeDrill(
     columns: COLUMNS[payload.grain],
     rows: decorated,
     nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
+    totals,
+    // Detail rows are PR×PO grain; only pr/po drills translate meaningfully.
+    detailHandoff:
+      payload.grain === 'po_line' || payload.grain === 'pr_item'
+        ? detailHandoffFor(payload.filters ?? {})
+        : null,
   };
 }
 

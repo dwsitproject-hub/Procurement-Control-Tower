@@ -36,6 +36,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   get: <T>(p: string) => request<T>('GET', p),
   post: <T>(p: string, b?: unknown) => request<T>('POST', p, b),
+  put: <T>(p: string, b?: unknown) => request<T>('PUT', p, b),
 };
 
 // ─────────────────────────────────────────────────────────────────── types
@@ -63,6 +64,7 @@ export interface DatasetCurrent {
   datasetVersionId: number | null;
   state?: string;
   message?: string;
+  prDateRange?: { from: string; to: string } | null;
   asOfDate: string;
   asOfSource: string;
   publishedAt: string;
@@ -116,6 +118,8 @@ export interface DrillPage {
   columns: { key: string; label: string; type: string; currency?: string }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
+  totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;
+  detailHandoff: { params: Record<string, string>; unmapped: string[] } | null;
 }
 
 export interface Finding {

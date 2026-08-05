@@ -1,0 +1,54 @@
+# Staging DB server (172.28.92.60). Publishes 5436 on the private IP only,
+# like the other databases on this host. Password comes from ./db.env:
+#   POSTGRES_PASSWORD=<generate one: openssl rand -base64 24>
+name: pct
+
+services:
+  postgres:
+    image: postgres:16.4-bookworm
+    container_name: pct-postgres
+    restart: unless-stopped
+    env_file:
+      - ./db.env
+    environment:
+      POSTGRES_DB: pct
+      POSTGRES_USER: pct
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      TZ: Asia/Jakarta
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - max_connections=100
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - default_statistics_target=200
+      - -c
+      - enable_partition_pruning=on
+      - -c
+      - enable_partitionwise_join=on
+      - -c
+      - enable_partitionwise_aggregate=on
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "172.28.92.60:5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pct -d pct"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    shm_size: 512mb
+
+volumes:
+  pgdata:

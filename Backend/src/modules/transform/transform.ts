@@ -22,6 +22,8 @@ import {
   grCompletionPct,
   isSto,
   isTokenPrice,
+  materialCategory,
+  priorityLabel,
   isZeroPriceAnomaly,
   lookupMovement,
   normCurrency,
@@ -42,6 +44,7 @@ import {
   type WbsConfig,
 } from '@pct/rules';
 import { insertMany, query } from '../../db/client.js';
+import { PLANT_AREA } from './area_map.js';
 import type { RuleSnapshot } from '../admin/rules.js';
 
 // ─────────────────────────────────────────────────────────────────── typing
@@ -95,6 +98,13 @@ export interface TransformMetrics {
   fxCurrencies: number;
   fxYearResolved: number | null;
   unratedCurrencies: string[];
+  excludedPoLines: number;
+  excludedPrItems: number;
+  /** PO lines whose FX period came from a Coupa invoice date (basis rule). */
+  invoiceDatedFxLines: number;
+  /** Shared FX pair store (010): pair-months in use per source. */
+  fxSourceSap: number;
+  fxSourceCoupa: number;
 }
 
 export interface TransformResult {
@@ -129,6 +139,25 @@ export async function runTransform(
     loadStaged(batchId, 'fx'),
   ]);
 
+  // Category overrides are reference data an administrator can extend, so they
+  // are read from the database rather than hardcoded as v1 did.
+  const mgOverrideRows = await query<{ material_group: string; category: string | null }>(
+    `SELECT material_group, category FROM core.dim_material_group WHERE category IS NOT NULL`,
+  );
+  const mgOverrides: Record<string, string> = {};
+  for (const r of mgOverrideRows) mgOverrides[r.material_group] = r.category as string;
+
+  // Exclusions (W6, v1's cfg-modal): excluded rows are not loaded into the
+  // facts at all, so every KPI, chart, drill and detail row agrees by
+  // construction. Staging keeps them for lineage. Applying a change means a
+  // recompute, and the UI says so.
+  const exDocTypes = new Set(((rules['exclusions.doc_types'] as string[] | undefined) ?? []).map(String));
+  const exPurchGroups = new Set(((rules['exclusions.purch_groups'] as string[] | undefined) ?? []).map(String));
+  const exPurchOrgs = new Set(((rules['exclusions.purch_orgs'] as string[] | undefined) ?? []).map(String));
+  let excludedPoLines = 0;
+  let excludedPrItems = 0;
+  const excludedPoKeys = new Set<string>();
+
   const stoSuffix = rules['sto.doctype_suffix'] as string;
   const fxPolicy = rules['fx.policy'] as FxPolicy;
   const releasePolicy = rules['release.no_strategy_policy'] as NoReleaseStrategyPolicy;
@@ -154,7 +183,7 @@ export async function runTransform(
   if (asOfDate === null) throw new Error('cannot derive an as-of date: no PO or GR dates present');
 
   // ── FX table ──
-  const fx = buildFx(fxRows, poRows, asOfDate);
+  const fx = await buildFx(fxRows, poRows, asOfDate, batchId);
 
   // ── create the version and its partitions ──
   const verIns = await client.query<{ id: string }>(
@@ -198,6 +227,8 @@ export async function runTransform(
     plant: s(r.payload.plant),
     purchOrg: s(r.payload.purchOrg),
     docType: s(r.payload.docType),
+    apprLeadDays: i(r.payload.apprLeadDays),
+    gapLeadDays: i(r.payload.gapLeadDays),
   }));
   const filled = fillReleaseContinuations(releaseRaw);
 
@@ -307,6 +338,30 @@ export async function runTransform(
   }
   const danglingKeys = new Set(linkage.dangling.map((d) => `${d.poNo}|${d.poItem}`));
 
+  // ── FX date basis (decision 4 Aug 2026) ──
+  // A PO with a booked invoice converts at the INVOICE date's period; without
+  // one, at the PO document date's period. Invoices live only in the Coupa
+  // operational store (SAP feeds carry none), joined back via the sap-po-no
+  // cross-reference. Where the store is empty or unlinked, every line falls
+  // back to the PO date — exactly the prior behaviour. Voided and draft
+  // invoices do not count; multiple invoices use the latest invoice date.
+  const invoiceDateByPo = new Map<string, string>();
+  try {
+    const invRes = await client.query<{ sap_po_no: string; inv_date: string }>(
+      `SELECT pl.sap_po_no, max(i.invoice_date)::text AS inv_date
+         FROM ops.coupa_invoice_line il
+         JOIN ops.coupa_invoice i ON i.id = il.invoice_id
+         JOIN ops.coupa_po_line pl ON pl.po_number = il.po_number
+        WHERE pl.sap_po_no IS NOT NULL AND i.invoice_date IS NOT NULL
+          AND COALESCE(i.status, '') NOT IN ('voided', 'draft')
+        GROUP BY pl.sap_po_no`,
+    );
+    for (const r of invRes.rows) invoiceDateByPo.set(r.sap_po_no, r.inv_date);
+  } catch {
+    // ops schema absent (pre-Coupa database) — PO-date basis throughout.
+  }
+  let invoiceDatedLines = 0;
+
   // ─────────────────────────────────────────────────── build PO line rows
 
   const poFactRows: unknown[][] = [];
@@ -327,6 +382,17 @@ export async function runTransform(
     const key = `${poNo}|${poItem}`;
 
     const docType = s(p.docType);
+
+    if (
+      (docType !== null && exDocTypes.has(docType)) ||
+      exPurchGroups.has(s(p.purchGroup) ?? '') ||
+      exPurchOrgs.has(s(p.purchOrg) ?? '')
+    ) {
+      excludedPoLines += 1;
+      excludedPoKeys.add(key);
+      continue;
+    }
+
     const sto = isSto(docType, stoSuffix);
     if (sto) {
       stoLines += 1;
@@ -353,10 +419,27 @@ export async function runTransform(
 
     const ccy = normCurrency(p.currencyCode);
     const docDate = s(p.documentDate);
-    const conv = fx.table.toUsd(n(p.netOrderValue), ccy, docDate, fxPolicy);
+    // Invoice-date FX basis when the PO is invoiced; PO-date otherwise.
+    const invoiceDate = poNo !== null ? invoiceDateByPo.get(poNo) ?? null : null;
+    const fxDate = invoiceDate ?? docDate;
+    if (invoiceDate !== null) invoiceDatedLines += 1;
+    const conv = fx.table.toUsd(n(p.netOrderValue), ccy, fxDate, fxPolicy);
     if (ccy !== null && conv.resolution.usdPerUnit === null) unrated.add(ccy);
-    const convDeliver = fx.table.toUsd(n(p.stillDeliverVal), ccy, docDate, fxPolicy);
-    const convInvoice = fx.table.toUsd(n(p.stillInvoiceVal), ccy, docDate, fxPolicy);
+    const convDeliver = fx.table.toUsd(n(p.stillDeliverVal), ccy, fxDate, fxPolicy);
+    const convInvoice = fx.table.toUsd(n(p.stillInvoiceVal), ccy, fxDate, fxPolicy);
+
+    // IDR equivalents for the display-currency toggle: document value verbatim
+    // for IDR lines; foreign lines convert USD -> IDR at the SAME period's IDR
+    // rate. No rate for the period => NULL (strict, never a blended guess).
+    const idrRate = fx.table.toUsd(1, 'IDR', fxDate, fxPolicy).resolution.usdPerUnit;
+    const toIdr = (raw: number | null, usd: number | null): number | null => {
+      if (ccy === 'IDR') return raw;
+      if (usd === null || idrRate === null || idrRate === 0) return null;
+      return Math.round((usd / idrRate) * 100) / 100;
+    };
+    const orderIdr = toIdr(n(p.netOrderValue), conv.usd);
+    const deliverIdr = toIdr(n(p.stillDeliverVal), convDeliver.usd);
+    const invoiceIdr = toIdr(n(p.stillInvoiceVal), convInvoice.usd);
 
     const agg = grAgg.get(key) ?? null;
     const supplier = splitSupplier(p.supplierRaw);
@@ -372,12 +455,16 @@ export async function runTransform(
     // PR-level context for status: is the parent PR deleted / released?
     let prDeleted = false;
     let prReleased = true;
+    // Requested delivery date carried over from the linked PR (D4). NULL until
+    // the ME5A export gains a genuine need-by column — see V-M01.
+    let needByDate: string | null = null;
     if (bridge) {
       const pr = prByKey.get(`${bridge.prNo}|${bridge.prItem}`);
       if (pr) {
         prDeleted = (s(pr.deletionIndicator) ?? '').toLowerCase() === 'true';
         const appr = derivePrApproval(releaseByPrItem.get(`${bridge.prNo}|${bridge.prItem}`) ?? []);
         prReleased = appr.fullyReleased;
+        needByDate = s(pr.needByDate);
       }
     }
 
@@ -446,7 +533,9 @@ export async function runTransform(
       convInvoice.usd,
       conv.resolution.year,
       conv.resolution.month,
-      conv.resolution.basis,
+      conv.resolution.basis === null
+        ? null
+        : `${conv.resolution.basis}${invoiceDate !== null ? '+invoice_date' : '+po_date'}`,
       docDate,
       deliveryDate,
       deliveryDate !== null && docDate !== null ? deliveryDate === docDate : null,
@@ -479,6 +568,14 @@ export async function runTransform(
       zeroP,
       r.batch_file_id,
       r.source_row,
+      materialCategory(s(p.materialGroup), mgOverrides),
+      i(p.urgency),
+      priorityLabel(i(p.urgency)),
+      s(p.infoRecord),
+      needByDate,
+      orderIdr,
+      deliverIdr,
+      invoiceIdr,
     ]);
   }
 
@@ -494,6 +591,11 @@ export async function runTransform(
     const prItem = i(p.prItem);
     if (prNo === null || prItem === null) continue;
     const key = `${prNo}|${prItem}`;
+
+    if (exPurchGroups.has(s(p.purchGroup) ?? '') || exPurchOrgs.has(s(p.purchOrg) ?? '')) {
+      excludedPrItems += 1;
+      continue;
+    }
 
     const appr = derivePrApproval(releaseByPrItem.get(key) ?? []);
     const deleted = (s(p.deletionIndicator) ?? '').toLowerCase() === 'true';
@@ -562,10 +664,12 @@ export async function runTransform(
       wbs === 'violation' || wbs === 'compliant',
       wbs,
       poCount,
-      poCount > 0 ? st.status : st.status,
+      st.status,
       agingDays(asOfDate, reqDate),
       r.batch_file_id,
       r.source_row,
+      materialCategory(s(p.materialGroup), mgOverrides),
+      priorityLabel(i(p.urgency)),
     ]);
   }
 
@@ -585,6 +689,7 @@ export async function runTransform(
 
     const rule = lookupMovement(mvt);
     if (rule === null) continue; // already recorded as a BLOCKER
+    if (excludedPoKeys.has(`${poNo}|${poItem}`)) continue;
     if (!poByKey.has(`${poNo}|${poItem}`)) grOrphans += 1;
 
     const rawQty = n(p.qtyEntry);
@@ -638,6 +743,8 @@ export async function runTransform(
       (r.plant ?? '').slice(0, 2) || null,
       r.purchOrg,
       r.rowNumber,
+      r.apprLeadDays ?? null,
+      r.gapLeadDays ?? null,
     ]);
   }
 
@@ -697,6 +804,8 @@ export async function runTransform(
     r.usdPerUnit,
     r.derivation,
     r.pivotCurrency,
+    r.source ?? null,
+    r.sourceUpdatedAt ?? null,
   ]);
 
   // ─────────────────────────────────────────────────────────────── persist
@@ -720,6 +829,74 @@ export async function runTransform(
         AND pri.dataset_version_id = $1
         AND pol.pr_no = pri.pr_no AND pol.pr_item = pri.pr_item
         AND pri.release_final_date IS NOT NULL`,
+    [versionId],
+  );
+
+  // ── conformed dimensions ──
+  // Type-1 upserts. Descriptive only: every attribute that affects a figure is
+  // denormalised onto the fact, so a renamed vendor never changes a published
+  // number. dim_plant names come from seeded reference data and are preserved.
+  await client.query(
+    `INSERT INTO core.dim_vendor (vendor_code, vendor_name, first_seen, last_seen)
+     SELECT vendor_code, max(vendor_name), min(document_date), max(document_date)
+       FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND vendor_code IS NOT NULL
+      GROUP BY vendor_code
+     ON CONFLICT (vendor_code) DO UPDATE
+       SET vendor_name = EXCLUDED.vendor_name,
+           first_seen  = LEAST(core.dim_vendor.first_seen, EXCLUDED.first_seen),
+           last_seen   = GREATEST(core.dim_vendor.last_seen, EXCLUDED.last_seen)`,
+    [versionId],
+  );
+
+  await client.query(
+    `INSERT INTO core.dim_material (material_code, description, material_group, base_uom, first_seen, last_seen)
+     SELECT material_code, max(short_text), max(material_group), max(order_unit),
+            min(document_date), max(document_date)
+       FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND material_code IS NOT NULL
+      GROUP BY material_code
+     ON CONFLICT (material_code) DO UPDATE
+       SET description = EXCLUDED.description, material_group = EXCLUDED.material_group,
+           last_seen = GREATEST(core.dim_material.last_seen, EXCLUDED.last_seen)`,
+    [versionId],
+  );
+
+  await client.query(
+    `INSERT INTO core.dim_doc_type (doc_type, is_sto)
+     SELECT DISTINCT doc_type, is_sto FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND doc_type IS NOT NULL
+     ON CONFLICT (doc_type) DO UPDATE SET is_sto = EXCLUDED.is_sto`,
+    [versionId],
+  );
+
+  // Plants seen in the data but absent from the seeded name list: register them
+  // so they appear in filters, with the code as a placeholder name.
+  await client.query(
+    `INSERT INTO core.dim_plant (plant, company_code, plant_name)
+     SELECT DISTINCT plant, left(plant, 2), plant FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND plant IS NOT NULL AND plant <> ''
+     ON CONFLICT (plant) DO NOTHING`,
+    [versionId],
+  );
+
+  // Area roll-up (v1's Master_Area): applied every ingest so a re-seeded or
+  // fresh database always carries it.
+  {
+    const entries = Object.entries(PLANT_AREA);
+    await client.query(
+      `UPDATE core.dim_plant dp SET area = m.area
+         FROM (SELECT unnest($1::text[]) AS plant, unnest($2::text[]) AS area) m
+        WHERE dp.plant = m.plant AND (dp.area IS DISTINCT FROM m.area)`,
+      [entries.map((e) => e[0]), entries.map((e) => e[1])],
+    );
+  }
+
+  await client.query(
+    `INSERT INTO core.dim_material_group (material_group, category)
+     SELECT DISTINCT material_group, material_category FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND material_group IS NOT NULL
+     ON CONFLICT (material_group) DO NOTHING`,
     [versionId],
   );
 
@@ -764,6 +941,11 @@ export async function runTransform(
     fxCurrencies: new Set(fx.rates.map((r) => r.currency)).size,
     fxYearResolved: fx.yearResolved,
     unratedCurrencies: [...unrated],
+    excludedPoLines,
+    excludedPrItems,
+    invoiceDatedFxLines: invoiceDatedLines,
+    fxSourceSap: fx.sourceCounts.sap,
+    fxSourceCoupa: fx.sourceCounts.coupa,
   };
 
   // `contaminated` counts lines where a naive earliest-any-movement date WOULD
@@ -782,11 +964,17 @@ export async function runTransform(
 
 // ─────────────────────────────────────────────────────────────────────── FX
 
-function buildFx(
+async function buildFx(
   fxRows: StagedRow[],
   poRows: StagedRow[],
   asOfDate: string,
-): { table: FxTable; rates: ReturnType<typeof buildFxTable>; yearResolved: number | null } {
+  batchId: number,
+): Promise<{
+  table: FxTable;
+  rates: ReturnType<typeof buildFxTable>;
+  yearResolved: number | null;
+  sourceCounts: { sap: number; coupa: number };
+}> {
   // The reference rate file's Month column has NO year. Anchor it from the data
   // range rather than v1's hardcoded year 2000.
   let minDate = asOfDate;
@@ -803,26 +991,95 @@ function buildFx(
   const anchor = anchorYear([...new Set(ordinals)], minDate, asOfDate);
   const year = anchor.year ?? Number(asOfDate.slice(0, 4));
 
-  const raw = fxRows
+  const excelRaw = fxRows
     .map((r) => {
       const from = normCurrency(r.payload.from);
       const to = normCurrency(r.payload.to);
       const rate = n(r.payload.rate);
       const month = parseMonthOrdinal(r.payload.period);
-      if (from === null || to === null || rate === null || month === null) return null;
+      if (from === null || to === null || rate === null || rate <= 0 || month === null) return null;
       return { from, to, rate, year, month };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
 
+  // ── the shared FX pair store (010) ──
+  // Both sources upsert the same table; per pair+period the record updated
+  // most recently wins. The SAP side is timed by the rate file's source_mtime
+  // (a same-source re-ingest with the same mtime still refreshes its own row).
+  let raw: (typeof excelRaw[number] & { source?: string | null; sourceUpdatedAt?: string | null })[] = excelRaw;
+  const sourceCounts = { sap: excelRaw.length, coupa: 0 };
+  try {
+    const mtimeRow = await query<{ mt: string | null }>(
+      `SELECT max(source_mtime)::text AS mt FROM ingest.batch_file
+        WHERE batch_id = $1 AND detected_feed = 'fx'`,
+      [batchId],
+    );
+    const excelMtime = mtimeRow[0]?.mt ?? null;
+
+    // The rate file can repeat a pair+period; a single INSERT may not touch
+    // the same row twice, so dedupe (first row wins, matching buildFxTable).
+    const seenPair = new Set<string>();
+    const excelDedup = excelRaw.filter((r) => {
+      const k = `${r.from}|${r.to}|${r.year}|${r.month}`;
+      if (seenPair.has(k)) return false;
+      seenPair.add(k);
+      return true;
+    });
+    if (excelDedup.length > 0) {
+      await query(
+        `INSERT INTO ops.fx_rate_source
+           (from_currency, to_currency, period_year, period_month, rate, source, source_updated_at)
+         SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::smallint[], $5::numeric[],
+                              $6::text[], $7::timestamptz[])
+         ON CONFLICT (from_currency, to_currency, period_year, period_month)
+         DO UPDATE SET rate = EXCLUDED.rate, source = 'sap',
+                       source_updated_at = EXCLUDED.source_updated_at, updated_at = now()
+          WHERE fx_rate_source.source_updated_at IS NULL
+             OR COALESCE(EXCLUDED.source_updated_at, now()) > fx_rate_source.source_updated_at
+             OR (fx_rate_source.source = 'sap'
+                 AND COALESCE(EXCLUDED.source_updated_at, now()) >= fx_rate_source.source_updated_at)`,
+        [
+          excelDedup.map((r) => r.from),
+          excelDedup.map((r) => r.to),
+          excelDedup.map((r) => r.year),
+          excelDedup.map((r) => r.month),
+          excelDedup.map((r) => r.rate),
+          excelDedup.map(() => 'sap'),
+          excelDedup.map(() => excelMtime),
+        ],
+      );
+    }
+
+    const merged = await query<{
+      from: string; to: string; rate: number; year: number; month: number;
+      source: string; source_updated_at: string | null;
+    }>(
+      `SELECT from_currency AS "from", to_currency AS "to", rate::float AS rate,
+              period_year AS year, period_month AS month, source,
+              source_updated_at::text AS source_updated_at
+         FROM ops.fx_rate_source`,
+    );
+    raw = merged.map((r) => ({
+      from: r.from, to: r.to, rate: r.rate, year: r.year, month: r.month,
+      source: r.source, sourceUpdatedAt: r.source_updated_at,
+    }));
+    sourceCounts.sap = merged.filter((r) => r.source === 'sap').length;
+    sourceCounts.coupa = merged.filter((r) => r.source === 'coupa').length;
+  } catch (err) {
+    // ops.fx_rate_source absent (fresh install before migration 010) — the
+    // batch's own excel rows carry the table alone.
+    console.warn('fx_rate_source unavailable, excel-only FX:', err instanceof Error ? err.message : err);
+  }
+
   const rates = buildFxTable(raw);
-  return { table: new FxTable(rates), rates, yearResolved: anchor.ambiguous ? null : year };
+  return { table: new FxTable(rates), rates, yearResolved: anchor.ambiguous ? null : year, sourceCounts };
 }
 
 // ─────────────────────────────────────────────────────────── column orders
 
 const FX_COLS = [
   'dataset_version_id', 'currency_code', 'period_year', 'period_month',
-  'usd_per_unit', 'derivation', 'pivot_currency',
+  'usd_per_unit', 'derivation', 'pivot_currency', 'source', 'source_updated_at',
 ] as const;
 
 const PR_COLS = [
@@ -833,6 +1090,7 @@ const PR_COLS = [
   'is_deleted', 'release_indicator', 'wbs_element', 'release_l1_date', 'release_l2_date',
   'release_final_date', 'next_approver', 'is_fully_released', 'wbs_required', 'wbs_status',
   'po_line_count', 'status', 'aging_days', 'source_file_id', 'source_row',
+  'material_category', 'priority_label',
 ] as const;
 
 const PO_COLS = [
@@ -849,7 +1107,9 @@ const PO_COLS = [
   'receipt_count', 'reversal_count', 'transit_qty_net', 'gr_completion_pct', 'join_method',
   'gr_date_would_contaminate', 'status', 'aging_days', 'po_approval_days', 'sourcing_days',
   'delivery_days', 'delivery_vs_promise_days', 'is_retro_po', 'is_token_price', 'is_zero_price',
-  'source_file_id', 'source_row',
+  'source_file_id', 'source_row', 'material_category', 'urgency', 'priority_label',
+  'info_record', 'need_by_date', 'net_order_value_idr', 'still_deliver_val_idr',
+  'still_invoice_val_idr',
 ] as const;
 
 const GR_COLS = [
@@ -862,7 +1122,7 @@ const GR_COLS = [
 const PREL_COLS = [
   'dataset_version_id', 'pr_no', 'pr_item', 'rel_seq', 'rel_code', 'pic_release', 'login_name',
   'status', 'approve_date', 'approve_time', 'was_continuation', 'plant', 'company_code',
-  'purch_org', 'source_row',
+  'purch_org', 'source_row', 'lead_days', 'gap_days',
 ] as const;
 
 const POR_COLS = [

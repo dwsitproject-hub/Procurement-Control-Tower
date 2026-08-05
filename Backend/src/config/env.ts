@@ -71,6 +71,18 @@ export const EnvSchema = z
     INGEST_STALL_CYCLES: z.coerce.number().int().positive().default(4),
     INGEST_AUTOPOLL_ENABLED: bool.default(true),
 
+    // Coupa API (TECH_04). All optional: without them the poller stays off and
+    // the Admin panel says "not configured". Staging vs production is only here.
+    COUPA_BASE_URL: z.string().url().optional(),
+    COUPA_CLIENT_ID: z.string().optional(),
+    COUPA_CLIENT_SECRET: z.string().optional(),
+    COUPA_SCOPES: z
+      .string()
+      .default(
+        'core.sourcing.read core.sourcing.response.read core.purchase_order.read ' +
+          'core.inventory.receiving.read core.invoice.read core.pay.payments.read core.common.read',
+      ),
+
     SMTP_HOST: z.string().default('mailhog'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),
     SMTP_SECURE: z.enum(['none', 'starttls', 'tls']).default('none'),

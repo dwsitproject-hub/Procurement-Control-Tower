@@ -144,6 +144,10 @@ export interface ReleaseRowRaw {
   readonly plant: string | null;
   readonly purchOrg: string | null;
   readonly docType: string | null;
+  /** SAP-precomputed 'Approved Lead Time - PR Created' (008; v1 pr-alt card). */
+  readonly apprLeadDays?: number | null;
+  /** SAP-precomputed 'GAP Approval Lead Time' (008; v1 bottlenecks table). */
+  readonly gapLeadDays?: number | null;
 }
 
 export interface ReleaseRowFilled extends ReleaseRowRaw {

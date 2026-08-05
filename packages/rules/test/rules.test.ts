@@ -35,6 +35,10 @@ import {
   isContinuationRow,
   derivePrApproval,
   type ReleaseRowRaw,
+  materialCategory,
+  priorityLabel,
+  isUrgent,
+  isStandard,
 } from '../src/index.js';
 
 describe('movement register', () => {
@@ -596,5 +600,58 @@ describe('transfer leg signs are preserved, receipt signs are derived', () => {
     expect(postingQty('641', -100)).toBe(-100); // preserved: this is an issue leg
     expect(postingQty('641', 100)).toBe(100);   // preserved: this is a receipt leg
     expect(postingQty('642', -50)).toBe(-50);
+  });
+});
+
+describe('material category and priority labels (ported from v1)', () => {
+  it('applies explicit overrides first', () => {
+    expect(materialCategory('8080')).toBe('Service');
+    expect(materialCategory('912')).toBe('Chemical');
+    expect(materialCategory('929')).toBe('Fuel & Lubricant');
+    expect(materialCategory('958')).toBe('Packing Material');
+    expect(materialCategory('8050')).toBe('Finished Goods');
+  });
+
+  it('treats any 80x group as a service', () => {
+    expect(materialCategory('8099')).toBe('Service');
+    expect(materialCategory('801')).toBe('Service');
+  });
+
+  it('reproduces v1 parity rule for spare parts', () => {
+    // Deliberately reproducing v1's heuristic: even -> General, odd -> Factory.
+    expect(materialCategory('902')).toBe('Spare Parts-General');
+    expect(materialCategory('956')).toBe('Spare Parts-General');
+    expect(materialCategory('951')).toBe('Spare Parts-Factory');
+    expect(materialCategory('903')).toBe('Spare Parts-Factory');
+  });
+
+  it('returns Other for blanks and unmapped groups', () => {
+    expect(materialCategory(null)).toBe('Other');
+    expect(materialCategory('')).toBe('Other');
+    expect(materialCategory('999')).toBe('Other');
+    expect(materialCategory('ABC')).toBe('Other');
+  });
+
+  it('accepts database-supplied overrides', () => {
+    expect(materialCategory('777', { '777': 'Chemical' })).toBe('Chemical');
+  });
+
+  it('labels priority the way v1 does, and refuses to label urgency 0', () => {
+    expect(priorityLabel(1)).toBe('02-Urgent');
+    expect(priorityLabel(2)).toBe('03-Standard');
+    expect(priorityLabel(3)).toBe('04-Planned');
+    expect(priorityLabel(0)).toBe('01-Emergency');
+    // 104 reference items carry urgency 4, which v1's 4-entry array cannot label.
+    expect(priorityLabel(4)).toBeNull();
+    expect(priorityLabel(null)).toBeNull();
+  });
+
+  it('classifies the expedite lanes', () => {
+    expect(isUrgent(1)).toBe(true);
+    expect(isUrgent(2)).toBe(true);
+    expect(isUrgent(0)).toBe(false);   // undefined in the source
+    expect(isUrgent(3)).toBe(false);
+    expect(isStandard(3)).toBe(true);
+    expect(isStandard(4)).toBe(true);
   });
 });

@@ -161,6 +161,20 @@ export function oidcEnabled(): boolean {
   return isOidcConfigured(env);
 }
 
+/**
+ * Lazy re-init: the Hub may boot after this app (or drop and return). Retried
+ * at most once per minute so a dead Hub cannot slow the login page down.
+ */
+let lastInitAttempt = 0;
+export async function ensureOidcReady(): Promise<boolean> {
+  if (!oidcEnabled()) return false;
+  if (discovery && jwks) return true;
+  if (Date.now() - lastInitAttempt < 60_000) return false;
+  lastInitAttempt = Date.now();
+  const r = await initOidc();
+  return r.ok;
+}
+
 export async function initOidc(): Promise<{ ok: boolean; error?: string }> {
   if (!oidcEnabled()) return { ok: false, error: 'not configured' };
   try {

@@ -15,6 +15,8 @@ import { closePool, healthCheck } from './db/client.js';
 import { buildRouter, problemHandler } from './api/routes.js';
 import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
+import { startCoupaPoller } from './modules/coupa/sync.js';
+import { coupaConfigured } from './modules/coupa/client.js';
 
 const env = loadEnv();
 
@@ -65,11 +67,16 @@ async function main(): Promise<void> {
   app.use(buildRouter());
   app.use(problemHandler());
 
+  // Coupa poller: a 60s ticker that runs a sync when rule_config says it is
+  // enabled and due. Without COUPA_* env vars this is a no-op.
+  startCoupaPoller((msg) => process.stdout.write(`${msg}\n`));
+
   const server = app.listen(env.PORT, () => {
     process.stdout.write(
       `Procurement Control Tower API listening on :${env.PORT}\n` +
         `  env=${env.NODE_ENV}  sessions=${sessionStoreKind()}  ` +
-        `sso=${isOidcConfigured(env) ? 'configured' : 'off'}  share=${env.SHARE_PATH}\n`,
+        `sso=${isOidcConfigured(env) ? 'configured' : 'off'}  share=${env.SHARE_PATH}  ` +
+        `coupa=${coupaConfigured() ? 'configured' : 'off'}\n`,
     );
   });
 

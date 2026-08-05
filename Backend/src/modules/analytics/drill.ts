@@ -231,6 +231,44 @@ const FILTERS: Record<string, Compiler> = {
     if (!col) throw new Error(`unknown measure: ${String(v)}`);
     return `${a}.${col} IS NOT NULL`;
   },
+  /**
+   * The cycle cards drop negative spans (a GR before the PO date is a data
+   * artefact, not a lead time), so their drills must too - 3,260 delivery
+   * and 639 sourcing spans are negative in the current extract.
+   */
+  measureNonNeg: (v, a) => {
+    const COL: Record<string, string> = {
+      sourcing: 'sourcing_days',
+      po_approval: 'po_approval_days',
+      delivery: 'delivery_days',
+    };
+    const col = COL[String(v)];
+    if (!col) throw new Error(`unknown measure: ${String(v)}`);
+    return `(${a}.${col} IS NOT NULL AND ${a}.${col} >= 0)`;
+  },
+  // cycle_e2e's population: received lines whose linked PR gives a
+  // non-negative requisition->receipt span.
+  e2eEvaluable: (_v, a) =>
+    `(${a}.receipt_date IS NOT NULL
+      AND EXISTS (SELECT 1 FROM core.fact_pr_item _pi
+                   WHERE _pi.dataset_version_id = ${a}.dataset_version_id
+                     AND _pi.pr_no = ${a}.pr_no AND _pi.pr_item = ${a}.pr_item
+                     AND ${a}.receipt_date - _pi.requisition_date >= 0))`,
+  // pr_approval_lead_time's population: approved release steps with a positive
+  // SAP lead, whose PR exists in the item feed.
+  apprLeadEvaluable: (_v, a) =>
+    `(${a}.approve_date IS NOT NULL AND ${a}.lead_days > 0
+      AND EXISTS (SELECT 1 FROM core.fact_pr_item _pi
+                   WHERE _pi.dataset_version_id = ${a}.dataset_version_id
+                     AND _pi.pr_no = ${a}.pr_no AND _pi.pr_item = ${a}.pr_item))`,
+  // worst_approver_gap's population: approved steps whose PR has a
+  // requisition date - the rows every PIC's gap is measured from.
+  gapEvaluable: (_v, a) =>
+    `(${a}.approve_date IS NOT NULL
+      AND EXISTS (SELECT 1 FROM core.fact_pr_item _pi
+                   WHERE _pi.dataset_version_id = ${a}.dataset_version_id
+                     AND _pi.pr_no = ${a}.pr_no AND _pi.pr_item = ${a}.pr_item
+                     AND _pi.requisition_date IS NOT NULL))`,
   status: (v, a, ps) => `${a}.status = ${p(ps, String(v))}`,
   statusIn: (v, a, ps) => `${a}.status = ANY(${p(ps, (v as unknown[]).map(String))})`,
   plant: (v, a, ps) => `${a}.plant = ${p(ps, String(v))}`,

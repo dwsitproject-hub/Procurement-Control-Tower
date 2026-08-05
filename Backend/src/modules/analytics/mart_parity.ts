@@ -137,13 +137,6 @@ export const PARITY_KPIS: KpiSpec[] = [
            WHERE dataset_version_id = $1/*F*/ AND receipt_date IS NOT NULL`,
     drill: { grain: 'po_line', filters: { hasReceipt: true } },
   },
-  {
-    id: 'items_delivered',
-    unit: 'count',
-    sql: `SELECT count(*)::int AS value FROM ${POL}
-           WHERE dataset_version_id = $1 AND status IN ('Delivered','Partially Delivered')`,
-    drill: { grain: 'po_line', filters: { statusIn: ['Delivered', 'Partially Delivered'] } },
-  },
 
   // ── Open Items ──
   {
@@ -604,10 +597,15 @@ export const PARITY_KPIS: KpiSpec[] = [
              WHERE r.dataset_version_id = $1
                AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL
              GROUP BY r.pic_release HAVING count(*) >= 30)
-          SELECT max(med) AS value, sum(n)::int AS sample,
+          SELECT max(med) AS value,
+                 (SELECT count(*)::int FROM core.fact_pr_release r
+                    JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
+                                 AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
+                   WHERE r.dataset_version_id = $1
+                     AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL) AS sample,
                  (SELECT pic_release FROM g ORDER BY med DESC LIMIT 1) AS worst_pic
             FROM g`,
-    drill: null,
+    drill: { grain: 'pr_release', filters: { gapEvaluable: true } },
   },
   {
     id: 'auto_release_share_pct',
@@ -681,7 +679,7 @@ export const PARITY_KPIS: KpiSpec[] = [
                          AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
            WHERE r.dataset_version_id = $1
              AND r.approve_date IS NOT NULL AND r.lead_days > 0`,
-    drill: null,
+    drill: { grain: 'pr_release', filters: { apprLeadEvaluable: true } },
   },
 ];
 

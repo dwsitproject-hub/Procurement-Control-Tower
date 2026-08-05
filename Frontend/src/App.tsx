@@ -90,7 +90,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'tail_spend_po_pct', 'avg_po_value_idr', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
   ],
   delivery: [
-    'cycle_delivery', 'cycle_e2e', 'items_delivered', 'delivered_gr', 'reversal_rate',
+    'cycle_delivery', 'cycle_e2e', 'delivered_gr', 'reversal_rate',
     'otd_vs_requested',
   ],
   approvals: [

@@ -139,7 +139,7 @@ export const KPI_IDS = [
   'approved_within_3d','oldest_unreleased','emergency_urgent_share','at_risk_demand',
   'pr_cancellation_rate','pr_deleted','total_po_amount','total_po_count',
   'po_line_items','unique_suppliers','lines_pending_po_approval','hold_po_lines',
-  'gr_coverage_pct','pr_po_price_variance','tail_spend_pct','items_delivered',
+  'gr_coverage_pct','pr_po_price_variance','tail_spend_pct',
   'sole_source_materials','delivered_not_invoiced','po_irc','otd_vs_requested',
   // G6.3 — the v1-only registry KPIs, promoted
   'tail_spend_po_pct','valuation_coverage_pct','unique_requisitioners','avg_pr_line_value_idr',
@@ -201,7 +201,6 @@ export const KPI_TITLES: Record<KpiId, string> = {
   gr_coverage_pct: 'GR Coverage % (of approved)',
   pr_po_price_variance: 'PR to PO Price Variance',
   tail_spend_pct: 'Tail Spend %',
-  items_delivered: 'Items Delivered',
   sole_source_materials: 'Sole-Source Materials',
   delivered_not_invoiced: 'Delivered, Not Invoiced',
   po_irc: 'Info-Record Coverage %',

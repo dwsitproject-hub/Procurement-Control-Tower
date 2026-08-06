@@ -23,6 +23,17 @@ async function ensureLedger(): Promise<void> {
 }
 
 export async function migrate(): Promise<{ applied: string[]; skipped: string[] }> {
+  // Serialise concurrent runners (e.g. two instances booting at once): the
+  // second waits here until the first finishes, then applies nothing.
+  await pool.query('SELECT pg_advisory_lock(208671163)');
+  try {
+    return await migrateLocked();
+  } finally {
+    await pool.query('SELECT pg_advisory_unlock(208671163)');
+  }
+}
+
+async function migrateLocked(): Promise<{ applied: string[]; skipped: string[] }> {
   await ensureLedger();
 
   const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();

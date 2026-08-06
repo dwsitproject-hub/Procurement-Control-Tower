@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { loadEnv, isOidcConfigured } from './config/env.js';
 import { closePool, healthCheck } from './db/client.js';
 import { buildRouter, problemHandler } from './api/routes.js';
+import { migrate } from './db/migrate.js';
 import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
 import { startCoupaPoller } from './modules/coupa/sync.js';
@@ -25,6 +26,15 @@ async function main(): Promise<void> {
   if (!db.ok) {
     process.stderr.write(`FATAL: database unreachable — ${db.error}\n`);
     process.exit(1);
+  }
+
+  // Self-migrate at boot (idempotent, advisory-locked): the schema is ready
+  // before the session store, scheduler, or first request needs it — a fresh
+  // deployment cannot hit "relation ... does not exist" from boot ordering.
+  const mig = await migrate();
+  if (mig.applied.length > 0) {
+    process.stdout.write(`migrations applied at boot: ${mig.applied.join(', ')}
+`);
   }
 
   await initSessionStore();

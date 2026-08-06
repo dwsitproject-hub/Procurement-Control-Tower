@@ -286,12 +286,18 @@ docker compose -f compose.yml up -d
 4. Admin → Coupa: "Sync now" — every object reports `ok` (proves egress to
    kpn-test). Enable the scheduler (5–10 min) and "Save schedule".
 5. Admin → FX Rates: `sap` and `coupa` source pills both present.
-6. Admin → SAP Data Upload → **SAP Data Sync**: press *Test / preview folder* —
-   all six exports should show "would use: yes". Then tick **Scheduled sync**,
-   set the interval and *Save schedule*: the share folder is polled from then
-   on (this scheduler is new as of 6 Aug 2026 — before that the share ingest
-   only ran when someone pressed Sync, which is why auto-sync appeared dead).
-   The panel shows the last scheduled run and its outcome.
+6. Admin → SAP Data Upload → **SAP Data Sync**: each of the six files has its
+   own folder, name pattern and up to three daily pickup times in
+   **Asia/Jakarta**. Press *Test / preview folders* — every row should show the
+   file it would use (the newest match). Then tick **Scheduled sync** and
+   *Save schedule*. Use *Same folder for all* / *Same times for all* when the
+   exports share one directory. The panel shows the last run and a
+   recent-pickups log. (This scheduler is new as of 6 Aug 2026 — before that
+   the share ingest only ran when someone pressed Sync, which is why auto-sync
+   appeared dead.)
+   Note: a dataset publishes complete or not at all, so a pickup time decides
+   when that file's folder is re-read; each firing assembles the newest file
+   from every folder into one bundle. Unchanged files report `noop_unchanged`.
 7. **Both login paths** (when SSO is enabled): the login page shows
    "Sign in with DWS Hub" above the credential form — test the SP-initiated
    flow (button) AND the IdP-initiated flow (the app's tile in the Hub

@@ -32,7 +32,8 @@ import {
 } from '../modules/analytics/drill.js';
 import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
-import { ManualUploadSource, ShareFolderSource, type DiscoveredFile } from '../modules/ingest/sources.js';
+import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
+import { PerFeedShareSource, loadShareConfig } from '../modules/ingest/share_poller.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
 import { queryDetail, DETAIL_COLUMNS, type DetailFilters } from '../modules/analytics/detail.js';
 import {
@@ -843,7 +844,9 @@ export function buildRouter(): Router {
   }));
 
   r.post('/api/v1/ingest/sync', role('steward', async (req, res, ctx) => {
-    const source = new ShareFolderSource(env.SHARE_PATH, env.INGEST_FILE_SETTLE_SECONDS);
+    // Same per-feed folders/patterns the scheduler uses, so "Sync now" and the
+    // scheduled pickup can never read different files.
+    const source = new PerFeedShareSource(await loadShareConfig());
     const force = Boolean((req.body ?? {}).force);
     const out = await runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force });
     await recordAudit({

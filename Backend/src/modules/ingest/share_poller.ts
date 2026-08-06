@@ -1,55 +1,103 @@
 /**
- * Scheduled share-folder sync (user request 6 Aug 2026).
+ * Scheduled share-folder sync — per-feed folders, patterns and pickup times
+ * (user request 6 Aug 2026).
  *
  * SHARE_POLL_CRON_MINUTES and INGEST_AUTOPOLL_ENABLED existed in the
- * environment since W1 but NOTHING read them — the share ingest only ever ran
- * when a steward pressed Sync. That is why "the auto sync from the share
- * folder is not running": it was never scheduled. This module is that
- * scheduler, and its settings live in rule_config so an admin can change the
- * path, the file-name filter and the interval at runtime, exactly like the
- * Coupa poller.
+ * environment since W1 but NOTHING read them: the share ingest only ever ran
+ * when a steward pressed Sync. That is why "the auto sync from the share folder
+ * is not running" — it was never scheduled.
+ *
+ * Each of the six feeds now carries its own folder, its own file-name pattern
+ * and up to three daily pickup times expressed in **Asia/Jakarta**. Settings
+ * live in rule_config, so an admin changes them at runtime.
+ *
+ * A note on what a per-feed slot means, because the honest answer matters: the
+ * pipeline publishes a COMPLETE bundle or nothing (a half-loaded dataset is
+ * never published). So a feed's slot decides WHEN THAT FEED'S FOLDER IS READ
+ * AGAIN; when a slot fires, the newest matching file from every feed's own
+ * folder is assembled into one bundle and ingested. If nothing has changed
+ * since the last publish the pipeline reports noop_unchanged and no new
+ * dataset version appears.
  */
 
-import { readdir, stat, access } from 'node:fs/promises';
+import { readdir, stat, access, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { join } from 'node:path';
-import { pool } from '../../db/client.js';
+import { join, resolve, sep } from 'node:path';
+import type { Feed } from '@pct/contracts';
+import { pool, query } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
 import { runIngest } from './pipeline.js';
-import { ShareFolderSource } from './sources.js';
+import {
+  SourceUnavailableError, type DiscoveredFile, type FileSource,
+} from './sources.js';
 
 const env = loadEnv();
 
 /** Stable lock id for "share ingest" — distinct from the Coupa one (0xc00fa). */
 const ADVISORY_LOCK_KEY = 0x5ade0;
 
+export const SYNC_TIMEZONE = 'Asia/Jakarta';
+
+/** The six feeds, with the labels the panel shows. */
+export const FEED_META: { feed: Feed; label: string; defaultPattern: string }[] = [
+  { feed: 'pr', label: 'PR Report', defaultPattern: 'PR Report*.XLSX' },
+  { feed: 'po', label: 'PO Report', defaultPattern: 'PO Report*.XLSX' },
+  { feed: 'gr', label: 'GR List', defaultPattern: 'GR List*.XLSX' },
+  { feed: 'prel', label: 'PR Release', defaultPattern: 'PR Release*.XLSX' },
+  { feed: 'por', label: 'PO Release', defaultPattern: 'PO Release*.XLSX' },
+  { feed: 'fx', label: 'Rate Conversion', defaultPattern: 'Rate Conversion*.xlsx' },
+];
+
+export interface FeedConfig {
+  feed: Feed;
+  path: string;
+  pattern: string;
+  /** Up to three 'HH:MM' pickup times, Asia/Jakarta. Empty string = unused. */
+  slots: [string, string, string];
+}
+
 export interface ShareConfig {
   enabled: boolean;
-  path: string;
-  intervalMinutes: number;
-  /** Glob-ish patterns; a file must match one to be considered. Empty = all. */
-  filePatterns: string[];
+  timezone: string;
   settleSeconds: number;
+  feeds: FeedConfig[];
+}
+
+const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function normaliseSlots(raw: unknown): [string, string, string] {
+  const list = Array.isArray(raw) ? raw.map((x) => String(x ?? '').trim()) : [];
+  const out: string[] = [];
+  for (let i = 0; i < 3; i += 1) out.push(HHMM.test(list[i] ?? '') ? list[i]! : '');
+  return [out[0]!, out[1]!, out[2]!];
 }
 
 export async function loadShareConfig(): Promise<ShareConfig> {
   const rules = await loadRuleSnapshot();
-  const raw = rules['ingest.file_patterns'];
-  const patterns = Array.isArray(raw)
-    ? raw.map(String).filter((x) => x.trim() !== '')
-    : typeof raw === 'string' && raw.trim() !== ''
-      ? raw.split(',').map((x) => x.trim()).filter(Boolean)
-      : [];
+  const stored = (rules['ingest.feeds'] ?? {}) as Record<string, unknown>;
+  // Pre-012 single-path settings are the fallback, so an upgrade keeps working.
+  const legacyPath = String(rules['ingest.share_path'] ?? env.SHARE_PATH);
+
+  const feeds = FEED_META.map(({ feed, defaultPattern }) => {
+    const f = (stored[feed] ?? {}) as Record<string, unknown>;
+    return {
+      feed,
+      path: String(f['path'] ?? legacyPath),
+      pattern: String(f['pattern'] ?? defaultPattern),
+      slots: normaliseSlots(f['slots']),
+    };
+  });
+
   return {
     enabled: rules['ingest.autopoll_enabled'] === true || rules['ingest.autopoll_enabled'] === 'true',
-    path: String(rules['ingest.share_path'] ?? env.SHARE_PATH),
-    // Clamped here, not in the UI: the backend owns its own limits.
-    intervalMinutes: Math.min(Math.max(Number(rules['ingest.poll_interval_minutes'] ?? 30), 5), 1440),
-    filePatterns: patterns,
+    timezone: SYNC_TIMEZONE,
     settleSeconds: env.INGEST_FILE_SETTLE_SECONDS,
+    feeds,
   };
 }
+
+// ───────────────────────────────────────────────────────── name patterns
 
 /**
  * Translate a shell-style pattern to a regex. Supports `*` and `?` only —
@@ -64,98 +112,186 @@ export function patternToRegExp(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`, 'i');
 }
 
-export function matchesPatterns(name: string, patterns: readonly string[]): boolean {
-  if (patterns.length === 0) return true;
-  return patterns.some((p) => patternToRegExp(p).test(name));
+export function matchesPattern(name: string, pattern: string): boolean {
+  if (pattern.trim() === '') return true;
+  return patternToRegExp(pattern).test(name);
 }
 
-export interface ScanEntry {
-  name: string;
-  byteSize: number;
-  mtime: string;
-  matched: boolean;
-  /** Why the poller would skip it, if it would. */
-  skipReason: string | null;
+// ─────────────────────────────────────────────────────── Jakarta clock
+
+/** 'YYYY-MM-DD' and minutes-since-midnight in the sync timezone. */
+export function nowInZone(zone = SYNC_TIMEZONE, at: Date = new Date()): {
+  date: string; minutes: number; hhmm: string;
+} {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: zone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(at);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+  const date = `${get('year')}-${get('month')}-${get('day')}`;
+  const hh = Number(get('hour'));
+  const mm = Number(get('minute'));
+  return { date, minutes: hh * 60 + mm, hhmm: `${get('hour')}:${get('minute')}` };
 }
 
-/**
- * Preview what the poller sees — the diagnostic an admin needs while
- * configuring the path and the name filter. Reads directory metadata only;
- * it never ingests.
- */
-export async function scanShare(cfg: ShareConfig): Promise<{
-  ok: boolean;
+function slotMinutes(hhmm: string): number | null {
+  const m = HHMM.exec(hhmm);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/** Slots whose Jakarta time has passed today and that have not fired yet. */
+export async function dueSlots(cfg: ShareConfig, at: Date = new Date()): Promise<
+  { feed: Feed; slot: number; hhmm: string }[]
+> {
+  const { date, minutes } = nowInZone(cfg.timezone, at);
+  const ran = await query<{ feed: string; slot: number }>(
+    `SELECT feed, slot FROM ops.ingest_slot_run WHERE ran_on = $1`, [date],
+  );
+  const already = new Set(ran.map((r) => `${r.feed}|${r.slot}`));
+
+  const out: { feed: Feed; slot: number; hhmm: string }[] = [];
+  for (const f of cfg.feeds) {
+    f.slots.forEach((hhmm, i) => {
+      const mins = slotMinutes(hhmm);
+      if (mins === null) return;
+      // Only fire slots already reached today; a missed slot (downtime) fires
+      // on the next tick rather than being silently skipped.
+      if (mins > minutes) return;
+      if (already.has(`${f.feed}|${i + 1}`)) return;
+      out.push({ feed: f.feed, slot: i + 1, hhmm });
+    });
+  }
+  return out;
+}
+
+// ──────────────────────────────────────────────────── per-feed scanning
+
+export interface FeedScan {
+  feed: Feed;
+  label: string;
   path: string;
+  pattern: string;
+  readable: boolean;
   error?: string;
-  entries: ScanEntry[];
-}> {
+  /** The file the poller would use — newest matching, settled. */
+  chosen: { name: string; byteSize: number; mtime: string } | null;
+  /** Everything else in the folder, with why it was not chosen. */
+  others: { name: string; byteSize: number; mtime: string; reason: string }[];
+}
+
+async function scanFeed(f: FeedConfig, settleSeconds: number): Promise<FeedScan> {
+  const meta = FEED_META.find((m) => m.feed === f.feed)!;
+  const base: FeedScan = {
+    feed: f.feed, label: meta.label, path: f.path, pattern: f.pattern,
+    readable: false, chosen: null, others: [],
+  };
+
   try {
-    await access(cfg.path, constants.R_OK);
+    await access(f.path, constants.R_OK);
   } catch (err) {
-    return {
-      ok: false,
-      path: cfg.path,
-      error: `not readable: ${err instanceof Error ? err.message : String(err)}`,
-      entries: [],
-    };
+    return { ...base, error: `not readable: ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  const names = await readdir(cfg.path);
+  const names = await readdir(f.path);
   const now = Date.now();
-  const entries: ScanEntry[] = [];
+  const candidates: { name: string; size: number; mtime: Date }[] = [];
+  const others: FeedScan['others'] = [];
 
   for (const name of names) {
-    let skip: string | null = null;
-    if (name.startsWith('~$')) skip = 'Excel lock file';
-    else if (!/\.xlsx$/i.test(name)) skip = 'not an .xlsx file';
+    let reason: string | null = null;
+    if (name.startsWith('~$')) reason = 'Excel lock file';
+    else if (!/\.xlsx$/i.test(name)) reason = 'not an .xlsx file';
+    else if (!matchesPattern(name, f.pattern)) reason = 'does not match the pattern';
 
     let size = 0;
     let mtime = new Date(0);
-    if (skip === null) {
+    if (reason === null) {
       try {
-        const st = await stat(join(cfg.path, name));
-        if (!st.isFile()) skip = 'not a file';
+        const st = await stat(join(f.path, name));
         size = st.size;
         mtime = st.mtime;
-        if (skip === null && cfg.settleSeconds > 0 && now - st.mtimeMs < cfg.settleSeconds * 1000) {
-          skip = `still settling (< ${cfg.settleSeconds}s old)`;
+        if (!st.isFile()) reason = 'not a file';
+        else if (settleSeconds > 0 && now - st.mtimeMs < settleSeconds * 1000) {
+          reason = `still being written (< ${settleSeconds}s old)`;
         }
       } catch (err) {
-        skip = err instanceof Error ? err.message : String(err);
+        reason = err instanceof Error ? err.message : String(err);
       }
     }
 
-    const matched = skip === null && matchesPatterns(name, cfg.filePatterns);
-    if (skip === null && !matched) skip = 'no name pattern matches';
+    if (reason === null) candidates.push({ name, size, mtime });
+    else others.push({ name, byteSize: size, mtime: mtime.toISOString(), reason });
+  }
 
-    entries.push({
-      name,
-      byteSize: size,
-      mtime: mtime.toISOString(),
-      matched,
-      skipReason: skip,
+  // Newest wins: a share folder usually accumulates dated exports.
+  candidates.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  const [best, ...rest] = candidates;
+  for (const r of rest) {
+    others.push({
+      name: r.name, byteSize: r.size, mtime: r.mtime.toISOString(),
+      reason: 'an older match than the chosen file',
     });
   }
 
-  return { ok: true, path: cfg.path, entries: entries.sort((a, b) => a.name.localeCompare(b.name)) };
+  return {
+    ...base,
+    readable: true,
+    chosen: best ? { name: best.name, byteSize: best.size, mtime: best.mtime.toISOString() } : null,
+    others: others.sort((a, b) => a.name.localeCompare(b.name)),
+  };
 }
 
-/** A source that also applies the admin's name filter. */
-export class FilteredShareSource extends ShareFolderSource {
-  constructor(
-    root: string,
-    settleSeconds: number,
-    private readonly patterns: readonly string[],
-    sizeMemo?: Map<string, number>,
-  ) {
-    super(root, settleSeconds, sizeMemo);
+export async function scanShare(cfg: ShareConfig): Promise<{ feeds: FeedScan[]; complete: boolean }> {
+  const feeds: FeedScan[] = [];
+  for (const f of cfg.feeds) feeds.push(await scanFeed(f, cfg.settleSeconds));
+  return { feeds, complete: feeds.every((f) => f.chosen !== null) };
+}
+
+// ────────────────────────────────────────────────────────── the source
+
+/**
+ * A source spanning the six per-feed folders: the newest matching file from
+ * each. Reads are confined to the configured roots, so a handle can never
+ * escape them even though handles are internally generated.
+ */
+export class PerFeedShareSource implements FileSource {
+  readonly kind = 'synology' as const;
+
+  constructor(private readonly cfg: ShareConfig) {}
+
+  async list(): Promise<DiscoveredFile[]> {
+    const scan = await scanShare(this.cfg);
+    // An unreadable folder must NOT look like "no new data" — that is the
+    // difference between "nothing to load" and "the mount is broken".
+    const dead = scan.feeds.find((f) => !f.readable);
+    if (dead) throw new SourceUnavailableError(dead.path);
+
+    const out: DiscoveredFile[] = [];
+    for (const f of scan.feeds) {
+      if (!f.chosen) continue;
+      out.push({
+        handle: join(f.path, f.chosen.name),
+        displayName: f.chosen.name,
+        byteSize: f.chosen.byteSize,
+        mtime: new Date(f.chosen.mtime),
+      });
+    }
+    return out;
   }
 
-  override async list() {
-    const all = await super.list();
-    return all.filter((f) => matchesPatterns(f.displayName, this.patterns));
+  async read(handle: string): Promise<Buffer> {
+    const target = resolve(handle);
+    const allowed = this.cfg.feeds.some((f) => {
+      const root = resolve(f.path);
+      return target === root || target.startsWith(root + sep);
+    });
+    if (!allowed) throw new Error('refusing to read a path outside the configured folders');
+    return readFile(target);
   }
 }
+
+// ───────────────────────────────────────────────────────────── the run
 
 export interface ShareRunResult {
   outcome: string;
@@ -163,10 +299,10 @@ export interface ShareRunResult {
 }
 
 /**
- * One scheduled pass. Advisory-locked so overlapping ticks (or a manual sync
- * running at the same moment) cannot ingest the same files twice.
+ * One pass. Advisory-locked so overlapping ticks — or a manual sync at the same
+ * moment — cannot ingest the same files twice.
  */
-export async function runShareSync(trigger: 'scheduled' | 'manual'): Promise<ShareRunResult> {
+export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<ShareRunResult> {
   const cfg = await loadShareConfig();
   const client = await pool.connect();
   try {
@@ -175,14 +311,13 @@ export async function runShareSync(trigger: 'scheduled' | 'manual'): Promise<Sha
     );
     if (!lock.rows[0]?.ok) return { outcome: 'locked' };
 
-    const source = new FilteredShareSource(cfg.path, cfg.settleSeconds, cfg.filePatterns);
-    const out = await runIngest({ source, autoPublish: true });
-    void trigger;
+    const out = await runIngest({ source: new PerFeedShareSource(cfg), autoPublish: true });
     return {
       outcome: out.outcome,
       detail: 'missing' in out ? `missing ${out.missing.join(',')}`
         : 'datasetVersionId' in out ? `v${out.datasetVersionId}`
         : 'path' in out ? out.path
+        : 'reason' in out ? out.reason
         : undefined,
     };
   } finally {
@@ -192,17 +327,23 @@ export async function runShareSync(trigger: 'scheduled' | 'manual'): Promise<Sha
 }
 
 let pollerStarted = false;
-let lastRunAt = 0;
-let lastResult: { at: string; outcome: string; detail?: string } | null = null;
+let lastResult: { at: string; outcome: string; detail?: string; slots?: string } | null = null;
 
 export function shareLastResult(): typeof lastResult {
   return lastResult;
 }
 
+export async function recentSlotRuns(limit = 20): Promise<Record<string, unknown>[]> {
+  return query(
+    `SELECT feed, slot, ran_on::text AS "ranOn", ran_at AS "ranAt", outcome, detail
+       FROM ops.ingest_slot_run ORDER BY ran_at DESC LIMIT ${Math.min(Math.max(limit, 1), 100)}`,
+  );
+}
+
 /**
- * Checks every 60s whether a scheduled share sync is due. Enable switch, path,
- * name filter and interval all come from rule_config, so changes take effect
- * without a restart.
+ * Ticks every 60s: if any feed's Jakarta pickup time has arrived and has not
+ * fired today, assemble the bundle and ingest once. All settings are re-read
+ * each tick, so changes apply without a restart.
  */
 export function startSharePoller(log: (msg: string) => void): void {
   if (pollerStarted) return;
@@ -213,13 +354,28 @@ export function startSharePoller(log: (msg: string) => void): void {
       try {
         const cfg = await loadShareConfig();
         if (!cfg.enabled) return;
-        if (Date.now() - lastRunAt < cfg.intervalMinutes * 60_000) return;
-        lastRunAt = Date.now();
+        const due = await dueSlots(cfg);
+        if (due.length === 0) return;
+
         const r = await runShareSync('scheduled');
-        lastResult = { at: new Date().toISOString(), outcome: r.outcome, detail: r.detail };
-        // 'noop_unchanged' is the normal steady state; log at the same level so
-        // an operator can see the poller is alive rather than guessing.
-        log(`share sync (${r.outcome})${r.detail ? `: ${r.detail}` : ''}`);
+        // 'locked' means another run holds the lock; leave the slots unmarked
+        // so the next tick retries rather than losing the pickup.
+        if (r.outcome === 'locked') return;
+
+        const label = due.map((d) => `${d.feed}@${d.hhmm}`).join(' ');
+        for (const d of due) {
+          await query(
+            `INSERT INTO ops.ingest_slot_run (feed, slot, ran_on, outcome, detail)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (feed, slot, ran_on)
+               DO UPDATE SET ran_at = now(), outcome = EXCLUDED.outcome, detail = EXCLUDED.detail`,
+            [d.feed, d.slot, nowInZone(cfg.timezone).date, r.outcome, r.detail ?? null],
+          );
+        }
+        lastResult = {
+          at: new Date().toISOString(), outcome: r.outcome, detail: r.detail, slots: label,
+        };
+        log(`share sync (${r.outcome})${r.detail ? `: ${r.detail}` : ''} [${label}]`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastResult = { at: new Date().toISOString(), outcome: 'error', detail: msg };

@@ -28,7 +28,9 @@ import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
 import { COUPA_OBJECTS, coupaSyncInFlight, runCoupaSync } from '../modules/coupa/sync.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
-import { loadShareConfig, scanShare, shareLastResult } from '../modules/ingest/share_poller.js';
+import {
+  FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastResult,
+} from '../modules/ingest/share_poller.js';
 import { loadEnv } from '../config/env.js';
 
 // Injected from routes.ts so both files share one implementation.
@@ -138,26 +140,46 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       // The mount itself is environment-level: the container must be able to
       // see the path, which an admin cannot arrange from a web form.
       envPath: shareEnvPath(),
+      nowInZone: nowInZone().hhmm,
       lastResult: shareLastResult(),
+      recentRuns: await recentSlotRuns(12),
     });
   }));
 
   r.put('/api/v1/admin/ingest/config', role('admin', async (req, res, ctx) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const enabled = b['enabled'] === true;
-    const interval = Math.min(Math.max(Number(b['intervalMinutes'] ?? 30) || 30, 5), 1440);
-    const sharePath = String(b['path'] ?? '').trim();
-    const patterns = Array.isArray(b['filePatterns'])
-      ? (b['filePatterns'] as unknown[]).map(String).map((x) => x.trim()).filter(Boolean)
-      : [];
-    if (sharePath === '') throw new HttpProblem(400, 'invalid-body', 'A share path is required');
+    const incoming = Array.isArray(b['feeds']) ? (b['feeds'] as Record<string, unknown>[]) : [];
+
+    const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    const feeds: Record<string, unknown> = {};
+    for (const meta of FEED_META) {
+      const row = incoming.find((x) => String(x['feed']) === meta.feed);
+      if (!row) continue;
+      const path = String(row['path'] ?? '').trim();
+      if (path === '') {
+        throw new HttpProblem(400, 'invalid-body', `A folder is required for ${meta.label}`);
+      }
+      const rawSlots = Array.isArray(row['slots']) ? (row['slots'] as unknown[]) : [];
+      const slots: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const v = String(rawSlots[i] ?? '').trim();
+        if (v !== '' && !HHMM.test(v)) {
+          throw new HttpProblem(400, 'invalid-body', `${meta.label}: "${v}" is not a HH:MM time`);
+        }
+        slots.push(v);
+      }
+      feeds[meta.feed] = {
+        path,
+        pattern: String(row['pattern'] ?? meta.defaultPattern).trim(),
+        slots,
+      };
+    }
 
     const today = new Date().toISOString().slice(0, 10);
     for (const [key, value] of [
       ['ingest.autopoll_enabled', enabled],
-      ['ingest.poll_interval_minutes', interval],
-      ['ingest.share_path', sharePath],
-      ['ingest.file_patterns', patterns],
+      ['ingest.feeds', feeds],
     ] as const) {
       await query(
         `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
@@ -171,22 +193,31 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     await recordAudit({
       action: 'admin.ingest.config', actorUserId: ctx.principal.userId,
       actorEmail: ctx.principal.email, outcome: 'success',
-      detail: { enabled, interval, sharePath, patterns }, ip: req.ip,
+      detail: { enabled, feeds }, ip: req.ip,
     });
-    res.json({ enabled, intervalMinutes: interval, path: sharePath, filePatterns: patterns });
+    res.json(await loadShareConfig());
   }));
 
   // Preview only — reads directory metadata, never ingests. This is how an
-  // admin confirms a path and a name filter before switching the poller on.
+  // admin confirms each folder, pattern and schedule before switching the
+  // poller on. Scans the values in the FORM, so nothing must be saved first.
   r.post('/api/v1/admin/ingest/scan', role('steward', async (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const cfg = await loadShareConfig();
-    // Allow scanning a candidate path/pattern set WITHOUT saving it first.
-    if (typeof b['path'] === 'string' && b['path'].trim() !== '') cfg.path = b['path'].trim();
-    if (Array.isArray(b['filePatterns'])) {
-      cfg.filePatterns = (b['filePatterns'] as unknown[]).map(String).map((x) => x.trim()).filter(Boolean);
+    if (Array.isArray(b['feeds'])) {
+      const incoming = b['feeds'] as Record<string, unknown>[];
+      cfg.feeds = cfg.feeds.map((f) => {
+        const row = incoming.find((x) => String(x['feed']) === f.feed);
+        if (!row) return f;
+        return {
+          ...f,
+          path: String(row['path'] ?? f.path).trim() || f.path,
+          pattern: String(row['pattern'] ?? f.pattern),
+        };
+      });
     }
-    res.json(await scanShare(cfg));
+    const out = await scanShare(cfg);
+    res.json({ ...out, timezone: cfg.timezone, nowInZone: nowInZone(cfg.timezone).hhmm });
   }));
 
   // ── User Access (011): users, departments, and the page matrix ───────────

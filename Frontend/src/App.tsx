@@ -439,7 +439,10 @@ export default function App() {
         ) : tab === 'custom' ? (
           <CustomTab onDrill={onDrill} />
         ) : tab === 'admin' ? (
-          <AdminTab isAdmin={me.roles.includes('admin')} />
+          <AdminTab
+            isAdmin={me.roles.includes('admin')}
+            canIngest={me.capabilities.includes('ingest')}
+          />
         ) : tab === 'detail' ? (
           <DetailTable
             key={detailInit ? JSON.stringify(detailInit.params) : 'plain'}

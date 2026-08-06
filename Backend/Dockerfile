@@ -43,6 +43,12 @@ COPY --from=build --chown=1001:1001 /app/Backend/package.json    ./Backend/packa
 # Migrations are .sql files, not compiled output, so they are copied separately.
 COPY --from=build --chown=1001:1001 /app/Backend/src/db/migrations ./dist/db/migrations
 
+# The upload spool is a mounted volume. Creating it here with the runtime
+# user's ownership means a freshly created named volume inherits those
+# permissions; without this, Docker makes it root-owned and every manual
+# upload fails with EACCES (found 6 Aug 2026 by actually uploading).
+RUN mkdir -p /var/lib/pct/spool && chown -R 1001:1001 /var/lib/pct
+
 USER 1001
 EXPOSE 3000
 CMD ["node", "dist/main.js"]

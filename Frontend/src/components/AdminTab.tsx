@@ -3,6 +3,7 @@ import { ApiError, api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
 import { CoupaPanel } from './CoupaTab';
 import { UserAccessTab } from './UserAccessTab';
+import { SapUploadTab } from './SapUploadTab';
 
 /**
  * W6 — steward tooling. v1's cfg-modal (exclusions), cv-modal (column mapping)
@@ -26,6 +27,7 @@ const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
 const ADMIN_SECTIONS = [
   { id: 'users', label: 'Users', icon: '👥', adminOnly: true },
   { id: 'permissions', label: 'Page Permission', icon: '🔐', adminOnly: true },
+  { id: 'sapupload', label: 'SAP Data Upload', icon: '⬆️', adminOnly: false },
   { id: 'coupa', label: 'Coupa Sync', icon: '🔄', adminOnly: false },
   { id: 'exclusions', label: 'Data Exclusions', icon: '🗂️', adminOnly: false },
   { id: 'mapping', label: 'Column Mapping', icon: '🔧', adminOnly: false },
@@ -33,7 +35,7 @@ const ADMIN_SECTIONS = [
 ] as const;
 type AdminSection = (typeof ADMIN_SECTIONS)[number]['id'];
 
-export function AdminTab({ isAdmin }: { isAdmin: boolean }) {
+export function AdminTab({ isAdmin, canIngest }: { isAdmin: boolean; canIngest: boolean }) {
   const available = ADMIN_SECTIONS.filter((x) => isAdmin || !x.adminOnly);
   const [section, setSection] = useState<AdminSection>(() => {
     const saved = localStorage.getItem('pct_admin_section') as AdminSection | null;
@@ -64,6 +66,7 @@ export function AdminTab({ isAdmin }: { isAdmin: boolean }) {
 
       {active === 'users' && <UserAccessTab section="users" />}
       {active === 'permissions' && <UserAccessTab section="matrix" />}
+      {active === 'sapupload' && <SapUploadTab canUpload={canIngest} />}
       {active === 'coupa' && <CoupaPanel isAdmin={isAdmin} />}
       {active === 'exclusions' && <ExclusionsPanel isAdmin={isAdmin} />}
       {active === 'mapping' && <MappingsPanel />}

@@ -9,6 +9,7 @@
 import express, { type NextFunction, type Request, type Response, type Router } from 'express';
 import multer from 'multer';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
@@ -126,6 +127,37 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
       next(e);
     }
   };
+}
+
+/**
+ * A writable spool root. The configured path is a mounted volume; if it was
+ * created before the image set its ownership it is root-owned and this process
+ * (uid 1001) cannot write there. Rather than failing every manual upload, fall
+ * back to the OS temp dir and say so — spooled files are request-scoped and
+ * deleted when the batch reaches a terminal state, so durability is irrelevant.
+ */
+let spoolRootCache: string | null = null;
+async function spoolRoot(): Promise<string> {
+  if (spoolRootCache) return spoolRootCache;
+  const configured = env.UPLOAD_SPOOL_PATH;
+  try {
+    await mkdir(configured, { recursive: true });
+    const probe = join(configured, `.probe-${randomUUID()}`);
+    await writeFile(probe, '');
+    await unlink(probe).catch(() => undefined);
+    spoolRootCache = configured;
+  } catch (err) {
+    const fallback = join(tmpdir(), 'pct-spool');
+    await mkdir(fallback, { recursive: true });
+    process.stderr.write(
+      `WARNING: upload spool ${configured} is not writable ` +
+      `(${err instanceof Error ? err.message : String(err)}); using ${fallback}. ` +
+      `Fix the volume's ownership to uid 1001 to silence this.
+`,
+    );
+    spoolRootCache = fallback;
+  }
+  return spoolRootCache;
 }
 
 // ────────────────────────────────────────────────────────────── helpers
@@ -828,7 +860,7 @@ export function buildRouter(): Router {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (files.length === 0) throw new HttpProblem(400, 'invalid-body', 'No files supplied');
 
-    const spool = join(env.UPLOAD_SPOOL_PATH, randomUUID());
+    const spool = join(await spoolRoot(), randomUUID());
     await mkdir(spool, { recursive: true });
 
     const staged: DiscoveredFile[] = [];

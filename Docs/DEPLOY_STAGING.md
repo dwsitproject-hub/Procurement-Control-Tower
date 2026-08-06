@@ -47,6 +47,35 @@ The repo lives at `git@github.com:dwsitproject-hub/Procurement-Control-Tower.git
 The FE and BE servers build their own images from a checkout — the same
 pattern as the other apps on these hosts. The DB server needs no code.
 
+### 1a. Give each app server read-only GitHub access (one-time)
+
+A fresh server has no GitHub key, so a clone fails with
+`git@github.com: Permission denied (publickey)` — set the key up FIRST.
+Do this on **both** app servers (57 and 56), each with its **own** key
+(GitHub rejects a deploy key that is already registered elsewhere).
+
+In the server's PuTTY session:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/pct_deploy -N '' -C "pct-staging-$(hostname)"
+cat ~/.ssh/pct_deploy.pub
+```
+
+Add the printed key on GitHub → repo → Settings → **Deploy keys** →
+*Add deploy key* — **read-only** (leave "Allow write access" unticked;
+servers only pull). Then point SSH at it:
+
+```bash
+printf 'Host github.com\n  User git\n  IdentityFile ~/.ssh/pct_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+```
+
+> **If this server already reaches GitHub for other apps:** the appended
+> `Host github.com` block takes over ALL github.com traffic on this box —
+> SSH uses the first matching block in `~/.ssh/config`. If another repo's
+> `git pull` breaks later, check the block ordering in that file.
+
+### 1b. Clone
+
 In the PuTTY session on **each app server** (57 and 56):
 
 ```bash
@@ -54,23 +83,11 @@ mkdir -p /opt/pct && cd /opt/pct
 git clone -b sit2 git@github.com:dwsitproject-hub/Procurement-Control-Tower.git src
 ```
 
-> **If the clone is refused** (this server has no GitHub access yet), add a
-> read-only deploy key — one per server, in its PuTTY session:
->
-> ```bash
-> ssh-keygen -t ed25519 -f ~/.ssh/pct_deploy -N '' -C "pct-staging-$(hostname)"
-> cat ~/.ssh/pct_deploy.pub
-> ```
->
-> Add that public key on GitHub → repo → Settings → Deploy keys (read-only is
-> enough), then:
->
-> ```bash
-> printf 'Host github.com\n  User git\n  IdentityFile ~/.ssh/pct_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
-> ```
->
-> and retry the clone. (GitHub does not allow the same deploy key on two
-> servers — generate one per host.)
+First contact prints GitHub's host-key fingerprint — answer `yes`.
+
+> If a clone attempt failed half-way earlier, git leaves the empty target
+> directory behind and the retry refuses to clone into it —
+> `rm -rf` the leftover directory first.
 
 > **Working from Windows with PuTTY:** server commands run in a PuTTY session
 > per host (as `root`). The only file transfer left is the SAP data files and

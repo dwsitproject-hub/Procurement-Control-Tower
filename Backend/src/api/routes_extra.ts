@@ -24,7 +24,7 @@ import {
 } from '../modules/analytics/custom.js';
 import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
-import { COUPA_OBJECTS, runCoupaSync } from '../modules/coupa/sync.js';
+import { COUPA_OBJECTS, coupaSyncInFlight, runCoupaSync } from '../modules/coupa/sync.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
 
 // Injected from routes.ts so both files share one implementation.
@@ -333,17 +333,28 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   }));
 
   r.post('/api/v1/admin/coupa/sync', role('steward', async (req, res, ctx) => {
-    const out = await runCoupaSync('manual');
-    await recordAudit({
-      action: 'coupa.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
-      outcome: out.outcome === 'error' ? 'failure' : 'success',
-      detail: {
-        outcome: out.outcome,
-        objects: out.objects.map((o) => ({ object: o.object, status: o.status, rows: o.rowsUpserted })),
-      },
-      ip: req.ip,
-    });
-    res.json(out);
+    // Fire-and-forget: a COLD run pages every object and can exceed any HTTP
+    // timeout (nginx cuts at 300s), which made a healthy sync look failed.
+    // The advisory lock inside runCoupaSync still prevents overlap, and the
+    // per-object 'running' watermark lets the panel poll for progress.
+    if (coupaSyncInFlight()) {
+      res.json({ outcome: 'locked', trigger: 'manual', objects: [] });
+      return;
+    }
+    void runCoupaSync('manual')
+      .then(async (out) => {
+        await recordAudit({
+          action: 'coupa.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+          outcome: out.outcome === 'error' ? 'failure' : 'success',
+          detail: {
+            outcome: out.outcome,
+            objects: out.objects.map((o) => ({ object: o.object, status: o.status, rows: o.rowsUpserted })),
+          },
+          ip: req.ip,
+        });
+      })
+      .catch(() => undefined);
+    res.status(202).json({ outcome: 'started', trigger: 'manual', objects: [] });
   }));
 
   // The Coupa tab's data: sourcing + invoice/payment aggregates WITH the rows

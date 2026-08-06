@@ -119,13 +119,13 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
   );
 
   // Supplier responses live behind a nested endpoint, fetched only for the
-  // events that actually changed in this run.
-  for (const r of rows) {
-    const state = s(r['state']);
-    if (state === 'template') continue; // sandbox templates have no responses
+  // events that actually changed in this run — and in PARALLEL, because one
+  // round trip per event otherwise dominates a cold run's wall clock.
+  const eventsWithResponses = rows.filter((r) => s(r['state']) !== 'template');
+  const nestedCounts = await mapLimit(eventsWithResponses, 6, async (r) => {
     try {
       const responses = arr(await coupaGet(`/api/quote_requests/${Number(r['id'])}/quote_responses`));
-      count += await upsert(
+      return await upsert(
         'ops.coupa_supplier_response',
         ['id','quote_request_id','supplier_name','submitted_at','state','awarded','total_amount','currency','line_count','updated_at'],
         responses.map((resp) => {
@@ -145,8 +145,10 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
     } catch {
       // A single event's responses failing must not sink the whole sync;
       // the raw event row is already stored and the next run retries.
+      return 0;
     }
-  }
+  });
+  count += nestedCounts.reduce((a, x) => a + x, 0);
   return count;
 }
 
@@ -301,6 +303,31 @@ async function projectExchangeRates(rows: Row[]): Promise<number> {
   return n2;
 }
 
+/**
+ * Bounded-concurrency map. The nested quote-responses fetch is one HTTPS round
+ * trip PER EVENT: run sequentially that is minutes of pure latency on a cold
+ * run from Jakarta to the Coupa host. Six at a time is far faster and stays
+ * well inside Coupa's rate limits.
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]!);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 // ── the sync run ─────────────────────────────────────────────────────────────
 
 export interface ObjectResult {
@@ -330,6 +357,16 @@ async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: n
     [object],
   );
   const since = wm?.last_updated_at ? minusMinutes(wm.last_updated_at, lookbackMin) : null;
+
+  // Publish 'running' immediately: a cold run takes minutes, and the admin
+  // panel must show progress instead of "No sync has run yet".
+  await query(
+    `INSERT INTO ops.coupa_watermark (object, last_run_at, last_status)
+     VALUES ($1, now(), 'running')
+     ON CONFLICT (object) DO UPDATE SET last_run_at = now(), last_status = 'running',
+       last_error = NULL`,
+    [object],
+  );
 
   let offset = 0;
   let pages = 0;
@@ -370,6 +407,13 @@ async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: n
   return { object, status: 'ok', pages, rowsUpserted: upserted, watermark: maxUpdated };
 }
 
+/** True while a run holds the lock in THIS process — lets the API answer a
+ *  duplicate 'Sync now' immediately instead of starting a doomed run. */
+let inFlight = false;
+export function coupaSyncInFlight(): boolean {
+  return inFlight;
+}
+
 export async function runCoupaSync(trigger: 'scheduled' | 'manual'): Promise<SyncResult> {
   const startedAt = new Date().toISOString();
   if (!coupaConfigured()) return { outcome: 'not_configured', trigger, startedAt, objects: [] };
@@ -380,6 +424,7 @@ export async function runCoupaSync(trigger: 'scheduled' | 'manual'): Promise<Syn
       `SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY],
     );
     if (!lock.rows[0]?.ok) return { outcome: 'locked', trigger, startedAt, objects: [] };
+    inFlight = true;
 
     const rules = await loadRuleSnapshot();
     const lookback = Math.max(0, Number(rules['coupa.lookback_minutes'] ?? 15));
@@ -406,6 +451,7 @@ export async function runCoupaSync(trigger: 'scheduled' | 'manual'): Promise<Syn
     const allError = results.every((r) => r.status === 'error');
     return { outcome: allError ? 'error' : anyError ? 'partial' : 'ok', trigger, startedAt, objects: results };
   } finally {
+    inFlight = false;
     await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]).catch(() => undefined);
     client.release();
   }

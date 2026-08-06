@@ -41,41 +41,45 @@ deploy/env/secrets.staging.env.example  # Coupa credentials template
 - Note: all three hosts show "System restart required" from unattended
   upgrades — schedule reboots before go-live, not during this deployment.
 
-## 1. Build and ship the images (on the Windows workstation)
+## 1. Get the code onto the app servers (from GitHub)
 
-Build once, ship the exact same bytes to both servers — no source code or
-toolchain on the servers.
+The repo lives at `git@github.com:dwsitproject-hub/Procurement-Control-Tower.git`.
+The FE and BE servers build their own images from a checkout — the same
+pattern as the other apps on these hosts. The DB server needs no code.
 
-> **Working from Windows with PuTTY:** open a PuTTY session (as `root`) to
-> each server for the server-side commands; file transfer uses **`pscp`**
-> (installed with PuTTY — if it is not on PATH, call
-> `"C:\Program Files\PuTTY\pscp.exe"`). pscp prompts for the root password or
-> uses your PuTTY key/Pageant.
-
-Build (workstation, PowerShell or Git Bash):
+In the PuTTY session on **each app server** (57 and 56):
 
 ```bash
-cd "D:/Claude/Procurement Dashboard"
-docker compose build api web
-docker tag pct-api pct-api:staging
-docker tag pct-web pct-web:staging
-docker save -o pct-api-staging.tar pct-api:staging
-docker save -o pct-web-staging.tar pct-web:staging
+mkdir -p /opt/pct && cd /opt/pct
+git clone -b sit2 git@github.com:dwsitproject-hub/Procurement-Control-Tower.git src
 ```
 
-Create the target folder on each server first (in its PuTTY window):
-`mkdir -p /opt/pct`
+> **If the clone is refused** (this server has no GitHub access yet), add a
+> read-only deploy key — one per server, in its PuTTY session:
+>
+> ```bash
+> ssh-keygen -t ed25519 -f ~/.ssh/pct_deploy -N '' -C "pct-staging-$(hostname)"
+> cat ~/.ssh/pct_deploy.pub
+> ```
+>
+> Add that public key on GitHub → repo → Settings → Deploy keys (read-only is
+> enough), then:
+>
+> ```bash
+> printf 'Host github.com\n  User git\n  IdentityFile ~/.ssh/pct_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+> ```
+>
+> and retry the clone. (GitHub does not allow the same deploy key on two
+> servers — generate one per host.)
 
-Ship (workstation):
-
-```bash
-pscp pct-api-staging.tar root@172.28.92.57:/opt/pct/
-pscp pct-web-staging.tar root@172.28.92.56:/opt/pct/
-```
+> **Working from Windows with PuTTY:** server commands run in a PuTTY session
+> per host (as `root`). The only file transfer left is the SAP data files and
+> the DB compose file, via **`pscp`** from the workstation (installed with
+> PuTTY — if not on PATH, call `"C:\Program Files\PuTTY\pscp.exe"`).
 
 ## 2. DB server — 172.28.92.60
 
-Ship the compose file (workstation):
+Ship the compose file (**workstation**, PowerShell/Git Bash in the repo root):
 
 ```bash
 pscp deploy/staging/db.compose.yml root@172.28.92.60:/opt/pct/compose.yml
@@ -84,7 +88,7 @@ pscp deploy/staging/db.compose.yml root@172.28.92.60:/opt/pct/compose.yml
 In the PuTTY session on **172.28.92.60**:
 
 ```bash
-cd /opt/pct
+mkdir -p /opt/pct && cd /opt/pct
 printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -base64 24)" > db.env
 chmod 600 db.env
 docker compose -f compose.yml up -d
@@ -95,32 +99,37 @@ Keep `db.env` safe — its password goes into the BE `DATABASE_URL` next.
 
 ## 3. BE server — 172.28.92.57
 
-Ship the config files (workstation):
+Everything below runs in the PuTTY session on **172.28.92.57** (except the
+Assets transfer, marked workstation).
+
+Build the API image from the checkout:
 
 ```bash
-pscp deploy/staging/be.compose.yml root@172.28.92.57:/opt/pct/compose.yml
-pscp deploy/env/staging.env root@172.28.92.57:/opt/pct/staging.env
-pscp deploy/env/secrets.staging.env.example root@172.28.92.57:/opt/pct/secrets.staging.env
+cd /opt/pct/src
+docker build -f Backend/Dockerfile -t pct-api:staging .
 ```
 
-In the PuTTY session on **172.28.92.57**:
+Lay out the runtime files from the repo's templates:
 
 ```bash
-mkdir -p /opt/pct/assets && cd /opt/pct
-docker load -i pct-api-staging.tar
+cd /opt/pct
+cp src/deploy/staging/be.compose.yml compose.yml
+cp src/deploy/env/staging.env staging.env
+cp src/deploy/env/secrets.staging.env.example secrets.staging.env
+mkdir -p assets
+chmod 600 staging.env secrets.staging.env
 ```
 
-Edit `/opt/pct/staging.env` in the PuTTY session (e.g. `nano staging.env`):
+Edit `/opt/pct/staging.env` (e.g. `nano staging.env`):
 - `SESSION_SECRET` → paste output of `openssl rand -base64 48`
 - `DATABASE_URL`   → `postgres://pct:<password from db.env>@172.28.92.60:5436/pct`
 - **SSO (if the Hub registration is done):** uncomment the `OIDC_*` block and
   fill the Hub hostname + `client_id` — see step 6. Leave it commented to ship
   with local login only and enable SSO later.
 
-Fill `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials
-(`chmod 600` both env files).
+Edit `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials.
 
-Put the SAP export files in the share stand-in (workstation):
+Put the SAP export files in the share stand-in (**workstation**):
 
 ```bash
 pscp "Assets/*.XLSX" "Assets/*.xlsx" root@172.28.92.57:/opt/pct/assets/
@@ -129,7 +138,7 @@ pscp "Assets/*.XLSX" "Assets/*.xlsx" root@172.28.92.57:/opt/pct/assets/
 (When the real Synology/CIFS share is available, mount it read-only at
 `/opt/pct/assets` instead — the compose file already mounts it `:ro`.)
 
-Start, migrate, seed, ingest (PuTTY session):
+Start, migrate, seed, ingest:
 
 ```bash
 cd /opt/pct
@@ -154,18 +163,15 @@ Expect `"outcome":"published"` with a dataset version id.
 
 ## 4. FE server — 172.28.92.56
 
-Ship the config files (workstation):
-
-```bash
-pscp deploy/staging/fe.compose.yml root@172.28.92.56:/opt/pct/compose.yml
-pscp deploy/nginx/staging.conf root@172.28.92.56:/opt/pct/staging.conf
-```
-
 In the PuTTY session on **172.28.92.56**:
 
 ```bash
+cd /opt/pct/src
+docker build -f Frontend/Dockerfile -t pct-web:staging .
+
 cd /opt/pct
-docker load -i pct-web-staging.tar
+cp src/deploy/staging/fe.compose.yml compose.yml
+cp src/deploy/nginx/staging.conf staging.conf
 docker compose -f compose.yml up -d
 ```
 
@@ -221,21 +227,26 @@ If the Hub is down, the login page automatically hides the SSO button
 ## 7. Updating staging (each release)
 
 ```bash
-# workstation
-docker compose build api web
-docker tag pct-api pct-api:staging && docker tag pct-web pct-web:staging
-docker save -o pct-api-staging.tar pct-api:staging
-docker save -o pct-web-staging.tar pct-web:staging
-pscp pct-api-staging.tar root@172.28.92.57:/opt/pct/
-pscp pct-web-staging.tar root@172.28.92.56:/opt/pct/
+# workstation: push the release
+git push origin sit2
+
 # BE server (PuTTY session)
-docker load -i /opt/pct/pct-api-staging.tar && docker compose -f /opt/pct/compose.yml up -d api
+cd /opt/pct/src && git pull
+docker build -f Backend/Dockerfile -t pct-api:staging .
+docker compose -f /opt/pct/compose.yml up -d api
 docker exec pct-api node dist/db/migrate.js   # idempotent
+
 # FE server (PuTTY session)
-docker load -i /opt/pct/pct-web-staging.tar && docker compose -f /opt/pct/compose.yml up -d web
+cd /opt/pct/src && git pull
+docker build -f Frontend/Dockerfile -t pct-web:staging .
+docker compose -f /opt/pct/compose.yml up -d web
 ```
 
-Rollback = keep the previous tar and `docker load -i` it again. The database
+If a release changed the compose files, env template, or nginx conf, re-copy
+them from `src/deploy/...` (compare first — your filled `staging.env` /
+`secrets.staging.env` are local to the server and must not be overwritten).
+
+Rollback = `git checkout <previous commit>` in `/opt/pct/src`, rebuild, `up -d` — or keep the previous image tagged (`docker tag pct-api:staging pct-api:prev`) before rebuilding and retag it back. The database
 never rolls back — migrations are additive and dataset versions immutable.
 
 ## Known staging caveats

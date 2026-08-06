@@ -201,9 +201,16 @@ Edit `/opt/pct/staging.env` (e.g. `nano staging.env`):
 
 Edit `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials.
 
-The SMTP block in `staging.env` is pre-filled for `mail.energi-up.com:587`
-(STARTTLS, user `noreply.sys@energi-up.com`) — **fill `SMTP_PASSWORD`** there.
-Recipients are set later in the app (Admin -> Notifications), not in this file.
+The SMTP block in `staging.env` is pre-filled for **`mail.energi-up.com:465`
+with implicit TLS** (`SMTP_SECURE=tls`, user `noreply.sys@energi-up.com`) —
+**fill `SMTP_PASSWORD`** there, on the server only. Recipients are set later in
+the app (Admin → Notifications), not in this file.
+
+> **Use 465, not 587.** Tested against the live server 6 Aug 2026: port 587
+> offers no STARTTLS (it answers `503 TLS is not allowed`), so mail and
+> credentials would cross the network unencrypted. Port 465 accepts implicit
+> TLS and passes full certificate verification, so it is both the working and
+> the secure choice.
 
 Put the SAP export files in the share stand-in (**workstation**):
 

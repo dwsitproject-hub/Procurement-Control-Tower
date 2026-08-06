@@ -17,6 +17,7 @@ import { migrate } from './db/migrate.js';
 import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
 import { startCoupaPoller } from './modules/coupa/sync.js';
+import { startSharePoller } from './modules/ingest/share_poller.js';
 import { coupaConfigured } from './modules/coupa/client.js';
 
 const env = loadEnv();
@@ -80,6 +81,8 @@ async function main(): Promise<void> {
   // Coupa poller: a 60s ticker that runs a sync when rule_config says it is
   // enabled and due. Without COUPA_* env vars this is a no-op.
   startCoupaPoller((msg) => process.stdout.write(`${msg}\n`));
+  // The scheduled share ingest (settings in rule_config; off until enabled).
+  startSharePoller((msg) => process.stdout.write(`${msg}\n`));
 
   const server = app.listen(env.PORT, () => {
     process.stdout.write(

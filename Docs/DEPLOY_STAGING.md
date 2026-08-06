@@ -285,13 +285,19 @@ docker compose -f compose.yml up -d
    FE→BE→DB end to end, cookies included).
 4. Admin → Coupa: "Sync now" — every object reports `ok` (proves egress to
    kpn-test). Enable the scheduler (5–10 min) and "Save schedule".
-5. Admin → FX rates: `sap` and `coupa` source pills both present.
-6. **Both login paths** (when SSO is enabled): the login page shows
+5. Admin → FX Rates: `sap` and `coupa` source pills both present.
+6. Admin → SAP Data Upload → **SAP Data Sync**: press *Test / preview folder* —
+   all six exports should show "would use: yes". Then tick **Scheduled sync**,
+   set the interval and *Save schedule*: the share folder is polled from then
+   on (this scheduler is new as of 6 Aug 2026 — before that the share ingest
+   only ran when someone pressed Sync, which is why auto-sync appeared dead).
+   The panel shows the last scheduled run and its outcome.
+7. **Both login paths** (when SSO is enabled): the login page shows
    "Sign in with DWS Hub" above the credential form — test the SP-initiated
    flow (button) AND the IdP-initiated flow (the app's tile in the Hub
    dashboard); both must land signed in. If the button is missing, the Hub was
    unreachable from the BE server (boot log shows the discovery warning).
-7. Full verification from the workstation (card = drill on every figure):
+8. Full verification from the workstation (card = drill on every figure):
    `npx tsx Backend/src/cli/sweep.ts --base http://172.28.92.56:3050`
    — expect `mismatches=0 errors=0` (pass `--password` if you already
    rotated the admin credential).

@@ -66,7 +66,7 @@ export function AdminTab({ isAdmin, canIngest }: { isAdmin: boolean; canIngest: 
 
       {active === 'users' && <UserAccessTab section="users" />}
       {active === 'permissions' && <UserAccessTab section="matrix" />}
-      {active === 'sapupload' && <SapUploadTab canUpload={canIngest} />}
+      {active === 'sapupload' && <SapUploadTab canUpload={canIngest} isAdmin={isAdmin} />}
       {active === 'coupa' && <CoupaPanel isAdmin={isAdmin} />}
       {active === 'exclusions' && <ExclusionsPanel isAdmin={isAdmin} />}
       {active === 'mapping' && <MappingsPanel />}

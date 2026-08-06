@@ -28,6 +28,8 @@ import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
 import { COUPA_OBJECTS, coupaSyncInFlight, runCoupaSync } from '../modules/coupa/sync.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
+import { loadShareConfig, scanShare, shareLastResult } from '../modules/ingest/share_poller.js';
+import { loadEnv } from '../config/env.js';
 
 // Injected from routes.ts so both files share one implementation.
 export interface RouteHelpers {
@@ -41,6 +43,11 @@ export interface RouteHelpers {
 }
 
 const FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr', 'fx'];
+
+/** The mount the container was started with — informational, not editable. */
+function shareEnvPath(): string {
+  return loadEnv().SHARE_PATH;
+}
 
 /** Argon2id with the same parameters as the seeder and the login path. */
 async function hashPassword(pw: string): Promise<string> {
@@ -116,6 +123,70 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         ),
       },
     });
+  }));
+
+  // ── SAP Data Sync: the scheduled share-folder ingest ─────────────────────
+  //
+  // The env vars for this existed from the start but nothing read them, so the
+  // "auto sync" never ran. Settings now live in rule_config and the poller
+  // re-reads them every tick, so a change takes effect without a restart.
+
+  r.get('/api/v1/admin/ingest/config', role('steward', async (_req, res) => {
+    const cfg = await loadShareConfig();
+    res.json({
+      ...cfg,
+      // The mount itself is environment-level: the container must be able to
+      // see the path, which an admin cannot arrange from a web form.
+      envPath: shareEnvPath(),
+      lastResult: shareLastResult(),
+    });
+  }));
+
+  r.put('/api/v1/admin/ingest/config', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const enabled = b['enabled'] === true;
+    const interval = Math.min(Math.max(Number(b['intervalMinutes'] ?? 30) || 30, 5), 1440);
+    const sharePath = String(b['path'] ?? '').trim();
+    const patterns = Array.isArray(b['filePatterns'])
+      ? (b['filePatterns'] as unknown[]).map(String).map((x) => x.trim()).filter(Boolean)
+      : [];
+    if (sharePath === '') throw new HttpProblem(400, 'invalid-body', 'A share path is required');
+
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [key, value] of [
+      ['ingest.autopoll_enabled', enabled],
+      ['ingest.poll_interval_minutes', interval],
+      ['ingest.share_path', sharePath],
+      ['ingest.file_patterns', patterns],
+    ] as const) {
+      await query(
+        `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
+         VALUES ($1, $2::jsonb, $3, 'SAP Data Sync panel', $4)
+         ON CONFLICT (rule_key, effective_from)
+           DO UPDATE SET rule_value = EXCLUDED.rule_value, note = EXCLUDED.note,
+                         created_by = EXCLUDED.created_by`,
+        [key, JSON.stringify(value), today, ctx.principal.userId],
+      );
+    }
+    await recordAudit({
+      action: 'admin.ingest.config', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { enabled, interval, sharePath, patterns }, ip: req.ip,
+    });
+    res.json({ enabled, intervalMinutes: interval, path: sharePath, filePatterns: patterns });
+  }));
+
+  // Preview only — reads directory metadata, never ingests. This is how an
+  // admin confirms a path and a name filter before switching the poller on.
+  r.post('/api/v1/admin/ingest/scan', role('steward', async (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const cfg = await loadShareConfig();
+    // Allow scanning a candidate path/pattern set WITHOUT saving it first.
+    if (typeof b['path'] === 'string' && b['path'].trim() !== '') cfg.path = b['path'].trim();
+    if (Array.isArray(b['filePatterns'])) {
+      cfg.filePatterns = (b['filePatterns'] as unknown[]).map(String).map((x) => x.trim()).filter(Boolean);
+    }
+    res.json(await scanShare(cfg));
   }));
 
   // ── User Access (011): users, departments, and the page matrix ───────────

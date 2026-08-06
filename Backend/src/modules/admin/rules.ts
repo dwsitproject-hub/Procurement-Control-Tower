@@ -22,6 +22,12 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   'freshness.ageing_days': 3,
   'freshness.stale_days': 7,
   'kpi.min_sample': 30,
+  // Scheduled share-folder ingest. Admin-configurable at runtime; the env
+  // values are only the initial defaults (SHARE_PATH is still env-only,
+  // because the container has to be able to see the mount).
+  'ingest.autopoll_enabled': false,
+  'ingest.poll_interval_minutes': 30,
+  'ingest.file_patterns': [],
   // Coupa poller (TECH_04 §3.4). Credentials are env-only, never here.
   'coupa.sync_enabled': false,
   'coupa.sync_interval_minutes': 10,

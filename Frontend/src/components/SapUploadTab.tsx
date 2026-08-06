@@ -38,11 +38,232 @@ const EXPECTED = [
   { feed: 'fx', label: 'Rate Conversion', hint: 'monthly FX rate table' },
 ];
 
+const PATTERN_PLACEHOLDER = [
+  'PR Report*.XLSX', 'PO Report*.XLSX', 'GR List*.XLSX',
+  'PR Release*.XLSX', 'PO Release*.XLSX', 'Rate Conversion*.xlsx',
+].join('\n');
+
 const SEV_PILL: Record<Finding['severity'], string> = {
   BLOCKER: 'spdel', CAVEAT: 'sn', WARNING: 'sa', INFO: 'sl',
 };
 
-export function SapUploadTab({ canUpload }: { canUpload: boolean }) {
+interface SyncCfg {
+  enabled: boolean;
+  path: string;
+  intervalMinutes: number;
+  filePatterns: string[];
+  settleSeconds: number;
+  envPath: string;
+  lastResult: { at: string; outcome: string; detail?: string } | null;
+}
+
+interface ScanEntry {
+  name: string; byteSize: number; mtime: string; matched: boolean; skipReason: string | null;
+}
+
+/**
+ * SAP Data Sync — the scheduled share-folder ingest.
+ *
+ * The environment has carried SHARE_POLL_CRON_MINUTES and
+ * INGEST_AUTOPOLL_ENABLED since the first build, but nothing read them: the
+ * share ingest only ran when someone pressed Sync. The poller behind this
+ * panel is that missing scheduler, and its settings live in the rule store so
+ * changes apply without a redeploy.
+ */
+function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }) {
+  const [cfg, setCfg] = useState<SyncCfg | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [path, setPath] = useState('');
+  const [interval, setIntervalMin] = useState(30);
+  const [patterns, setPatterns] = useState('');
+  const [scan, setScan] = useState<{ ok: boolean; path: string; error?: string; entries: ScanEntry[] } | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api.get<SyncCfg>('/api/v1/admin/ingest/config')
+      .then((x) => {
+        setCfg(x);
+        setEnabled(x.enabled);
+        setPath(x.path);
+        setIntervalMin(x.intervalMinutes);
+        setPatterns(x.filePatterns.join('\n'));
+      })
+      .catch((e: Error) => setMsg(e.message));
+  }, []);
+  useEffect(load, [load]);
+
+  const patternList = () => patterns.split('\n').map((x) => x.trim()).filter(Boolean);
+
+  const save = async () => {
+    setBusy('save'); setMsg(null);
+    try {
+      const out = await api.put<SyncCfg>('/api/v1/admin/ingest/config', {
+        enabled, path, intervalMinutes: interval, filePatterns: patternList(),
+      });
+      setMsg(out.enabled
+        ? `Saved — the folder is checked every ${out.intervalMinutes} minutes.`
+        : 'Saved — scheduled sync is off; use Sync now or a manual upload.');
+      load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'save failed');
+    } finally { setBusy(null); }
+  };
+
+  const doScan = async () => {
+    setBusy('scan'); setMsg(null); setScan(null);
+    try {
+      // Scans the values currently in the form, so a path can be tested
+      // before it is saved.
+      setScan(await api.post('/api/v1/admin/ingest/scan', { path, filePatterns: patternList() }));
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'scan failed');
+    } finally { setBusy(null); }
+  };
+
+  const syncNow = async () => {
+    setBusy('sync'); setMsg('Reading the share folder and ingesting…');
+    try {
+      const out = await api.post<Record<string, any>>('/api/v1/ingest/sync', {});
+      setMsg(
+        out.outcome === 'published' ? `Published dataset version ${out.datasetVersionId}.`
+        : out.outcome === 'noop_unchanged' ? 'The folder holds the same files already published — nothing to do.'
+        : out.outcome === 'incomplete_bundle' ? `Incomplete: missing ${(out.missing ?? []).join(', ')}.`
+        : out.outcome === 'source_unavailable' ? `The share folder is not readable: ${out.path}`
+        : `Outcome: ${out.outcome}`,
+      );
+      load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'sync failed');
+    } finally { setBusy(null); }
+  };
+
+  if (!cfg) {
+    return <div className="panel"><h2>🔁 SAP Data Sync</h2><div className="spinner" /></div>;
+  }
+
+  const matched = scan?.entries.filter((e) => e.matched).length ?? 0;
+
+  return (
+    <div className="panel">
+      <h2>🔁 SAP Data Sync</h2>
+      <p className="note" style={{ marginTop: 0 }}>
+        Reads the six SAP exports from a share folder on a schedule and publishes them through the
+        same pipeline as a manual upload. The folder must be <strong>mounted into the API
+        container</strong> — this environment was started with <code>{cfg.envPath}</code>. A path
+        outside that mount will not be readable no matter what is typed here.
+      </p>
+
+      <div className="dt-toolbar" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <label className="dt-check">
+          <input type="checkbox" checked={enabled} disabled={!isAdmin}
+            onChange={(e) => setEnabled(e.target.checked)} />
+          Scheduled sync
+        </label>
+        <label className="cu-field" style={{ minWidth: 260 }}>Share folder path
+          <input value={path} disabled={!isAdmin} onChange={(e) => setPath(e.target.value)}
+            placeholder="/mnt/sap_exports" />
+        </label>
+        <label className="cu-field">Every (minutes, 5–1440)
+          <input type="number" min={5} max={1440} value={interval} disabled={!isAdmin}
+            onChange={(e) => setIntervalMin(Number(e.target.value))} style={{ width: 110 }} />
+        </label>
+        {isAdmin && (
+          <button className="btn" style={{ width: 'auto' }} disabled={busy !== null} onClick={() => void save()}>
+            {busy === 'save' ? 'Saving…' : 'Save schedule'}
+          </button>
+        )}
+        <button className="dt-btn" disabled={busy !== null} onClick={() => void doScan()}>
+          {busy === 'scan' ? 'Scanning…' : 'Test / preview folder'}
+        </button>
+        {canEdit && (
+          <button className="dt-btn" disabled={busy !== null} onClick={() => void syncNow()}>
+            {busy === 'sync' ? 'Syncing…' : 'Sync now'}
+          </button>
+        )}
+      </div>
+
+      <label className="cu-field" style={{ display: 'block', marginTop: '.5rem', maxWidth: 560 }}>
+        File name patterns — one per line, <code>*</code> and <code>?</code> wildcards
+        <textarea
+          rows={4}
+          value={patterns}
+          disabled={!isAdmin}
+          onChange={(e) => setPatterns(e.target.value)}
+          placeholder={PATTERN_PLACEHOLDER}
+          style={{ width: '100%', fontFamily: 'inherit', fontSize: '.72rem' }}
+        />
+      </label>
+      <p className="note">
+        Leave the patterns empty to accept every <code>.xlsx</code> in the folder. Patterns only
+        decide which files are <em>considered</em> — which feed a file actually is comes from its own
+        column headers, so a renamed export is still classified correctly, and a file named like a PR
+        report but holding PO columns is not mistaken for one.
+        {cfg.settleSeconds > 0 && (
+          <> Files modified within the last {cfg.settleSeconds}s are skipped until the next pass, so a
+          half-written export is never read.</>
+        )}
+      </p>
+
+      {cfg.lastResult && (
+        <p className="note">
+          Last scheduled run: <strong>{cfg.lastResult.outcome}</strong>
+          {cfg.lastResult.detail ? ` (${cfg.lastResult.detail})` : ''} at{' '}
+          {formatDateTime(cfg.lastResult.at)}.
+        </p>
+      )}
+      {!cfg.enabled && (
+        <p className="note">
+          Scheduled sync is currently <strong>off</strong> — data only arrives when someone presses
+          Sync now, or via a manual upload below.
+        </p>
+      )}
+      {msg && <p className="note"><strong>{msg}</strong></p>}
+
+      {scan && (
+        <>
+          <h3 className="pr-tbl-h">Folder preview <span className="muted">— {scan.path}</span></h3>
+          {!scan.ok ? (
+            <p className="err">Cannot read this path: {scan.error}</p>
+          ) : (
+            <>
+              <p className="note">
+                {matched} of {scan.entries.length} entries would be picked up.
+                {matched > 0 && matched < 6 ? ' A complete bundle needs all six feeds.' : ''}
+              </p>
+              <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
+                <table className="data dd-tbl">
+                  <thead>
+                    <tr><th>File</th><th className="num">Size</th><th>Modified</th><th>Would use</th></tr>
+                  </thead>
+                  <tbody>
+                    {scan.entries.length === 0 && (
+                      <tr><td colSpan={4} className="muted">The folder is empty.</td></tr>
+                    )}
+                    {scan.entries.map((e, i) => (
+                      <tr key={e.name} className={i % 2 ? '' : 're'}>
+                        <td>{e.name}</td>
+                        <td className="num">{(e.byteSize / 1024 / 1024).toFixed(1)} MB</td>
+                        <td>{e.mtime ? formatDateTime(e.mtime) : DASH}</td>
+                        <td>
+                          {e.matched
+                            ? <span className="bs sd">yes</span>
+                            : <span className="bs sl" title={e.skipReason ?? ''}>no — {e.skipReason}</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdmin: boolean }) {
   const [files, setFiles] = useState<File[]>([]);
   const [publish, setPublish] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -103,6 +324,9 @@ export function SapUploadTab({ canUpload }: { canUpload: boolean }) {
   const totalMb = files.reduce((a, f) => a + f.size, 0) / 1024 / 1024;
 
   return (
+    <>
+    <SapSyncSection canEdit={canUpload} isAdmin={isAdmin} />
+
     <div className="panel">
       <h2>⬆️ SAP Data Upload</h2>
       <p className="note" style={{ marginTop: 0 }}>
@@ -258,5 +482,6 @@ export function SapUploadTab({ canUpload }: { canUpload: boolean }) {
         </>
       )}
     </div>
+    </>
   );
 }

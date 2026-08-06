@@ -16,6 +16,8 @@
 
 import { pool, query, queryOne } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
+import { notify } from '../notify/mailer.js';
+import { coupaErrorBody } from '../notify/messages.js';
 import { coupaConfigured, fetchPage, coupaGet } from './client.js';
 
 export const COUPA_OBJECTS = [
@@ -346,6 +348,24 @@ export interface SyncResult {
   objects: ObjectResult[];
 }
 
+/**
+ * Email the failures of a sync run, if any. Errors here are swallowed: a mail
+ * problem must not turn a partially successful sync into a crash.
+ */
+export async function notifyCoupaErrors(
+  trigger: string,
+  result: SyncResult,
+): Promise<void> {
+  try {
+    const failed = result.objects.filter((o) => o.status === 'error');
+    if (failed.length === 0) return;
+    const m = coupaErrorBody(trigger, result.objects);
+    await notify('coupa.error', m.subject, m.body);
+  } catch {
+    // Deliberately silent — notify() already records its own failures.
+  }
+}
+
 /** ISO minus N minutes, preserving a parseable timestamp for the filter. */
 function minusMinutes(iso: string, minutes: number): string {
   return new Date(new Date(iso).getTime() - minutes * 60_000).toISOString();
@@ -481,6 +501,9 @@ export function startCoupaPoller(log: (msg: string) => void): void {
         lastRunAt = Date.now();
         const r = await runCoupaSync('scheduled');
         log(`coupa sync (${r.outcome}): ${r.objects.map((o) => `${o.object}=${o.rowsUpserted}`).join(' ')}`);
+        // Only errors are worth an email here (user decision 6 Aug 2026): a
+        // clean incremental sync happens every few minutes and would be noise.
+        await notifyCoupaErrors('scheduled', r);
       } catch (e) {
         log(`coupa poller error: ${e instanceof Error ? e.message : String(e)}`);
       }

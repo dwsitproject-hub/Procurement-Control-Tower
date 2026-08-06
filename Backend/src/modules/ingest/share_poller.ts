@@ -28,6 +28,8 @@ import { pool, query } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
 import { runIngest } from './pipeline.js';
+import { notify } from '../notify/mailer.js';
+import { ingestFailureBody, ingestSuccessBody } from '../notify/messages.js';
 import {
   SourceUnavailableError, type DiscoveredFile, type FileSource,
 } from './sources.js';
@@ -296,7 +298,12 @@ export class PerFeedShareSource implements FileSource {
 export interface ShareRunResult {
   outcome: string;
   detail?: string;
+  batchId?: number;
+  datasetVersionId?: number;
 }
+
+/** Outcomes that mean "nothing was published and something is wrong". */
+const FAILURE_OUTCOMES = new Set(['failed', 'incomplete_bundle', 'source_unavailable']);
 
 /**
  * One pass. Advisory-locked so overlapping ticks — or a manual sync at the same
@@ -319,6 +326,8 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
         : 'path' in out ? out.path
         : 'reason' in out ? out.reason
         : undefined,
+      batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
+      datasetVersionId: 'datasetVersionId' in out ? out.datasetVersionId : undefined,
     };
   } finally {
     await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]).catch(() => undefined);
@@ -363,6 +372,28 @@ export function startSharePoller(log: (msg: string) => void): void {
         if (r.outcome === 'locked') return;
 
         const label = due.map((d) => `${d.feed}@${d.hhmm}`).join(' ');
+
+        // Email the outcome. Never let a mail problem fail the ingest: notify()
+        // swallows its own errors and records them.
+        try {
+          const input = {
+            trigger: 'scheduled' as const,
+            outcome: r.outcome,
+            detail: r.detail,
+            batchId: r.batchId,
+            datasetVersionId: r.datasetVersionId,
+            slots: label,
+          };
+          if (FAILURE_OUTCOMES.has(r.outcome)) {
+            const m = await ingestFailureBody(input);
+            await notify('ingest.failure', m.subject, m.body);
+          } else {
+            const m = await ingestSuccessBody(input);
+            await notify('ingest.success', m.subject, m.body);
+          }
+        } catch (mailErr) {
+          log(`share sync notification failed: ${mailErr instanceof Error ? mailErr.message : String(mailErr)}`);
+        }
         for (const d of due) {
           await query(
             `INSERT INTO ops.ingest_slot_run (feed, slot, ran_on, outcome, detail)

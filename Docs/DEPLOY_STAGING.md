@@ -201,6 +201,10 @@ Edit `/opt/pct/staging.env` (e.g. `nano staging.env`):
 
 Edit `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials.
 
+The SMTP block in `staging.env` is pre-filled for `mail.energi-up.com:587`
+(STARTTLS, user `noreply.sys@energi-up.com`) — **fill `SMTP_PASSWORD`** there.
+Recipients are set later in the app (Admin -> Notifications), not in this file.
+
 Put the SAP export files in the share stand-in (**workstation**):
 
 ```bash
@@ -298,12 +302,17 @@ docker compose -f compose.yml up -d
    Note: a dataset publishes complete or not at all, so a pickup time decides
    when that file's folder is re-read; each firing assembles the newest file
    from every folder into one bundle. Unchanged files report `noop_unchanged`.
-7. **Both login paths** (when SSO is enabled): the login page shows
+7. Admin → **Notifications**: confirm the mail-server rows read
+   `mail.energi-up.com` / `587` / `starttls` and Password = *configured*, add
+   the recipients, then **Send test email** — it must report `sent` and arrive.
+   Failure notices are the ones that matter; a clean Coupa sync is not emailed
+   on purpose (it runs every few minutes).
+8. **Both login paths** (when SSO is enabled): the login page shows
    "Sign in with DWS Hub" above the credential form — test the SP-initiated
    flow (button) AND the IdP-initiated flow (the app's tile in the Hub
    dashboard); both must land signed in. If the button is missing, the Hub was
    unreachable from the BE server (boot log shows the discovery warning).
-8. Full verification from the workstation (card = drill on every figure):
+9. Full verification from the workstation (card = drill on every figure):
    `npx tsx Backend/src/cli/sweep.ts --base http://172.28.92.56:3050`
    — expect `mismatches=0 errors=0` (pass `--password` if you already
    rotated the admin credential).

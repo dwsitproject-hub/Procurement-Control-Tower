@@ -34,6 +34,8 @@ import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
 import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
 import { PerFeedShareSource, loadShareConfig } from '../modules/ingest/share_poller.js';
+import { notify } from '../modules/notify/mailer.js';
+import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
 import { queryDetail, DETAIL_COLUMNS, type DetailFilters } from '../modules/analytics/detail.js';
 import {
@@ -854,6 +856,19 @@ export function buildRouter(): Router {
       outcome: out.outcome === 'failed' ? 'failure' : 'success',
       detail: { outcome: out.outcome, force }, ip: req.ip,
     });
+    // A manual sync notifies on FAILURE only: the person who pressed the button
+    // is already looking at the result, but a failure is worth telling the team.
+    if (['failed', 'incomplete_bundle', 'source_unavailable'].includes(out.outcome)) {
+      const m = await ingestFailureBody({
+        trigger: 'manual',
+        outcome: out.outcome,
+        detail: 'missing' in out ? `missing ${out.missing.join(',')}`
+          : 'path' in out ? out.path
+          : 'reason' in out ? out.reason : undefined,
+        batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
+      });
+      await notify('ingest.failure', m.subject, m.body);
+    }
     res.json(out);
   }));
 

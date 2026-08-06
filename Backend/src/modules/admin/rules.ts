@@ -22,6 +22,12 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   'freshness.ageing_days': 3,
   'freshness.stale_days': 7,
   'kpi.min_sample': 30,
+  // Email notifications. Recipients and toggles are admin-editable; the SMTP
+  // server and its password stay in the environment.
+  'notify.recipients': [],
+  'notify.on_ingest_success': true,
+  'notify.on_ingest_failure': true,
+  'notify.on_coupa_error': true,
   // Scheduled share-folder ingest. Admin-configurable at runtime; the env
   // values are only the initial defaults (SHARE_PATH is still env-only,
   // because the container has to be able to see the mount).

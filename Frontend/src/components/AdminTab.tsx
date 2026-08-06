@@ -4,6 +4,7 @@ import { DASH, formatNumber } from '../lib/format';
 import { CoupaPanel } from './CoupaTab';
 import { UserAccessTab } from './UserAccessTab';
 import { SapUploadTab } from './SapUploadTab';
+import { NotifyTab } from './NotifyTab';
 
 /**
  * W6 — steward tooling. v1's cfg-modal (exclusions), cv-modal (column mapping)
@@ -32,6 +33,7 @@ const ADMIN_SECTIONS = [
   { id: 'exclusions', label: 'Data Exclusions', icon: '🗂️', adminOnly: false },
   { id: 'mapping', label: 'Column Mapping', icon: '🔧', adminOnly: false },
   { id: 'fx', label: 'FX Rates', icon: '💱', adminOnly: false },
+  { id: 'notify', label: 'Notifications', icon: '📧', adminOnly: false },
 ] as const;
 type AdminSection = (typeof ADMIN_SECTIONS)[number]['id'];
 
@@ -71,6 +73,7 @@ export function AdminTab({ isAdmin, canIngest }: { isAdmin: boolean; canIngest: 
       {active === 'exclusions' && <ExclusionsPanel isAdmin={isAdmin} />}
       {active === 'mapping' && <MappingsPanel />}
       {active === 'fx' && <FxPanel />}
+      {active === 'notify' && <NotifyTab isAdmin={isAdmin} />}
     </>
   );
 }

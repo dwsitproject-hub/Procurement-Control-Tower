@@ -26,8 +26,10 @@ import {
 } from '../modules/analytics/custom.js';
 import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
-import { COUPA_OBJECTS, coupaSyncInFlight, runCoupaSync } from '../modules/coupa/sync.js';
+import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync } from '../modules/coupa/sync.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
+import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
+import { testBody } from '../modules/notify/messages.js';
 import {
   FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastResult,
 } from '../modules/ingest/share_poller.js';
@@ -125,6 +127,74 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         ),
       },
     });
+  }));
+
+  // ── Notifications: recipients, event toggles, log, test send ──────────────
+  //
+  // The SMTP server and its password come from the environment (a password must
+  // never live in a table an API can read); everything an operator changes day
+  // to day lives in rule_config.
+
+  r.get('/api/v1/admin/notify', role('steward', async (_req, res) => {
+    const cfg = await loadNotifyConfig();
+    res.json({ ...cfg, recent: await recentNotifications(15) });
+  }));
+
+  r.put('/api/v1/admin/notify', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const raw = Array.isArray(b['recipients'])
+      ? (b['recipients'] as unknown[]).map(String)
+      : String(b['recipients'] ?? '').split(/[,;\s]+/);
+    const recipients: string[] = [];
+    for (const one of raw.map((x) => x.trim()).filter(Boolean)) {
+      if (!isEmail(one)) throw new HttpProblem(400, 'invalid-body', `Not a valid email: ${one}`);
+      if (!recipients.includes(one)) recipients.push(one);
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [key, value] of [
+      ['notify.recipients', recipients],
+      ['notify.on_ingest_success', b['onIngestSuccess'] === true],
+      ['notify.on_ingest_failure', b['onIngestFailure'] === true],
+      ['notify.on_coupa_error', b['onCoupaError'] === true],
+    ] as const) {
+      await query(
+        `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
+         VALUES ($1, $2::jsonb, $3, 'Notifications panel', $4)
+         ON CONFLICT (rule_key, effective_from)
+           DO UPDATE SET rule_value = EXCLUDED.rule_value, note = EXCLUDED.note,
+                         created_by = EXCLUDED.created_by`,
+        [key, JSON.stringify(value), today, ctx.principal.userId],
+      );
+    }
+    await recordAudit({
+      action: 'admin.notify.config', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { recipients, ...b }, ip: req.ip,
+    });
+    res.json(await loadNotifyConfig());
+  }));
+
+  // Test send: goes to the saved recipients (or an address supplied for the
+  // test) and ignores the event toggles, since the point is to prove delivery.
+  r.post('/api/v1/admin/notify/test', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const one = String(b['to'] ?? '').trim();
+    if (one !== '' && !isEmail(one)) {
+      throw new HttpProblem(400, 'invalid-body', `Not a valid email: ${one}`);
+    }
+    const m = testBody();
+    const out = await notify('test', m.subject, m.body, {
+      to: one === '' ? undefined : [one],
+      ignoreToggles: true,
+    });
+    await recordAudit({
+      action: 'admin.notify.test', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email,
+      outcome: out.status === 'sent' ? 'success' : 'failure',
+      detail: { status: out.status, reason: out.reason, recipients: out.recipients }, ip: req.ip,
+    });
+    res.json(out);
   }));
 
   // ── SAP Data Sync: the scheduled share-folder ingest ─────────────────────
@@ -707,6 +777,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     }
     void runCoupaSync('manual')
       .then(async (out) => {
+        await notifyCoupaErrors('manual', out);
         await recordAudit({
           action: 'coupa.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
           outcome: out.outcome === 'error' ? 'failure' : 'success',

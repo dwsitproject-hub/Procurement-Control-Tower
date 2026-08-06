@@ -7,6 +7,8 @@
  */
 
 import type { Router } from 'express';
+import { PAGE_ACCESS, PAGE_KEYS } from '@pct/contracts';
+import argon2 from 'argon2';
 import { queryOne, query } from '../db/client.js';
 import { recordAudit } from '../modules/audit/audit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
@@ -39,6 +41,11 @@ export interface RouteHelpers {
 }
 
 const FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr', 'fx'];
+
+/** Argon2id with the same parameters as the seeder and the login path. */
+async function hashPassword(pw: string): Promise<string> {
+  return argon2.hash(pw, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
+}
 
 export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   const { role, requireScope, currentVersion, HttpProblem } = h;
@@ -109,6 +116,261 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         ),
       },
     });
+  }));
+
+  // ── User Access (011): users, departments, and the page matrix ───────────
+  //
+  // Admin-only. Every mutation is audited. A user's capability tier comes from
+  // their job role (app.job_role.base_role) so the existing route guards keep
+  // enforcing the four-tier model; the matrix adds per-page view/edit.
+
+  r.get('/api/v1/admin/users', role('admin', async (_req, res) => {
+    const users = await query(
+      `SELECT u.id, u.email, u.display_name AS "displayName", u.department, u.job_role AS "jobRole",
+              u.auth_method AS "authMethod", u.is_active AS "isActive",
+              u.must_change_password AS "mustChangePassword",
+              u.last_login_at AS "lastLoginAt",
+              (SELECT array_agg(ur.role_code ORDER BY ur.role_code)
+                 FROM app.user_role ur WHERE ur.user_id = u.id) AS roles,
+              (SELECT count(*)::int FROM app.data_scope ds WHERE ds.user_id = u.id) AS "scopeCount",
+              (SELECT count(*)::int FROM app.data_scope ds
+                WHERE ds.user_id = u.id AND ds.company_code = '*'
+                  AND ds.plant = '*' AND ds.purch_org = '*') AS "scopeAll" 
+         FROM app.app_user u ORDER BY u.display_name`,
+    );
+    const departments = await query(
+      `SELECT code, name FROM app.department WHERE is_active ORDER BY name`,
+    );
+    const jobRoles = await query(
+      `SELECT code, name, rank, base_role AS "baseRole" FROM app.job_role ORDER BY rank`,
+    );
+    const matrix = await query(
+      `SELECT subject_kind AS "subjectKind", subject_code AS "subjectCode",
+              page_key AS "pageKey", access
+         FROM app.page_permission`,
+    );
+    res.json({ users, departments, jobRoles, matrix });
+  }));
+
+  r.post('/api/v1/admin/users', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const email = String(b['email'] ?? '').trim().toLowerCase();
+    const displayName = String(b['displayName'] ?? '').trim();
+    const password = String(b['password'] ?? '');
+    const department = b['department'] === undefined || b['department'] === null || b['department'] === ''
+      ? null : String(b['department']);
+    const jobRole = String(b['jobRole'] ?? '');
+
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      throw new HttpProblem(400, 'invalid-body', 'A valid email is required');
+    }
+    if (displayName.length < 2) throw new HttpProblem(400, 'invalid-body', 'A name is required');
+    if (password.length < 12) {
+      throw new HttpProblem(400, 'invalid-body', 'The default password must be at least 12 characters');
+    }
+    const jr = await queryOne<{ code: string; base_role: string }>(
+      `SELECT code, base_role FROM app.job_role WHERE code = $1`, [jobRole],
+    );
+    if (!jr) throw new HttpProblem(400, 'invalid-body', 'Unknown job role');
+    if (department !== null) {
+      const d = await queryOne(`SELECT code FROM app.department WHERE code = $1`, [department]);
+      if (!d) throw new HttpProblem(400, 'invalid-body', 'Unknown department');
+    }
+    const dupe = await queryOne(`SELECT id FROM app.app_user WHERE email = $1`, [email]);
+    if (dupe) throw new HttpProblem(409, 'conflict', 'A user with that email already exists');
+
+    // must_change_password: the admin-issued default is single-use by design.
+    const ins = await queryOne<{ id: string }>(
+      `INSERT INTO app.app_user
+         (email, display_name, auth_method, is_active, department, job_role, must_change_password)
+       VALUES ($1, $2, 'local', true, $3, $4, true) RETURNING id`,
+      [email, displayName, department, jr.code],
+    );
+    const userId = ins!.id;
+    await query(
+      `INSERT INTO app.local_credential (user_id, password_hash, approval_note)
+       VALUES ($1, $2, 'User Access: admin-issued default, rotation forced')`,
+      [userId, await hashPassword(password)],
+    );
+    await query(
+      `INSERT INTO app.user_role (user_id, role_code) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING`,
+      [userId, jr.base_role],
+    );
+    await recordAudit({
+      action: 'admin.user.create', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { userId, email, jobRole: jr.code, department, baseRole: jr.base_role },
+      ip: req.ip,
+    });
+    // Never echo the password back.
+    res.status(201).json({ id: userId, email, displayName, department, jobRole: jr.code });
+  }));
+
+  r.put('/api/v1/admin/users/:id', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const id = req.params.id;
+    const target = await queryOne<{ id: string; email: string }>(
+      `SELECT id, email FROM app.app_user WHERE id = $1`, [id],
+    );
+    if (!target) throw new HttpProblem(404, 'not-found', 'No such user');
+
+    const detail: Record<string, unknown> = {};
+    if (b['displayName'] !== undefined) {
+      await query(`UPDATE app.app_user SET display_name = $2 WHERE id = $1`,
+        [id, String(b['displayName']).trim()]);
+      detail['displayName'] = b['displayName'];
+    }
+    if (b['department'] !== undefined) {
+      const dep = b['department'] === null || b['department'] === '' ? null : String(b['department']);
+      await query(`UPDATE app.app_user SET department = $2 WHERE id = $1`, [id, dep]);
+      detail['department'] = dep;
+    }
+    if (b['jobRole'] !== undefined) {
+      const jr = await queryOne<{ code: string; base_role: string }>(
+        `SELECT code, base_role FROM app.job_role WHERE code = $1`, [String(b['jobRole'])],
+      );
+      if (!jr) throw new HttpProblem(400, 'invalid-body', 'Unknown job role');
+      await query(`UPDATE app.app_user SET job_role = $2 WHERE id = $1`, [id, jr.code]);
+      // Keep the capability tier in step with the job role.
+      await query(`DELETE FROM app.user_role WHERE user_id = $1`, [id]);
+      await query(`INSERT INTO app.user_role (user_id, role_code) VALUES ($1, $2)`, [id, jr.base_role]);
+      detail['jobRole'] = jr.code;
+      detail['baseRole'] = jr.base_role;
+    }
+    if (b['isActive'] !== undefined) {
+      const active = b['isActive'] === true;
+      // Guard: never deactivate the last active administrator.
+      if (!active) {
+        const admins = await queryOne<{ n: number }>(
+          `SELECT count(*)::int AS n FROM app.app_user u
+             JOIN app.user_role ur ON ur.user_id = u.id AND ur.role_code = 'admin'
+            WHERE u.is_active AND u.id <> $1`, [id],
+        );
+        if ((admins?.n ?? 0) === 0) {
+          throw new HttpProblem(409, 'conflict', 'This is the last active administrator');
+        }
+      }
+      await query(`UPDATE app.app_user SET is_active = $2 WHERE id = $1`, [id, active]);
+      detail['isActive'] = active;
+    }
+    if (typeof b['resetPassword'] === 'string' && b['resetPassword'] !== '') {
+      const pw = String(b['resetPassword']);
+      if (pw.length < 12) {
+        throw new HttpProblem(400, 'invalid-body', 'The default password must be at least 12 characters');
+      }
+      await query(
+        `INSERT INTO app.local_credential (user_id, password_hash, approval_note)
+         VALUES ($1, $2, 'User Access: admin reset, rotation forced')
+         ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash,
+           password_set_at = now(), failed_attempts = 0, locked_until = NULL`,
+        [id, await hashPassword(pw)],
+      );
+      await query(`UPDATE app.app_user SET must_change_password = true WHERE id = $1`, [id]);
+      detail['passwordReset'] = true;
+    }
+
+    await recordAudit({
+      action: 'admin.user.update', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { userId: id, email: target.email, ...detail }, ip: req.ip,
+    });
+    res.json({ ok: true });
+  }));
+
+  // Data scope: a new user has NONE by design (deny by default), so the
+  // registration screen must be able to grant it or the account is useless.
+  // '*' means every value of that dimension.
+  r.put('/api/v1/admin/users/:id/scope', role('admin', async (req, res, ctx) => {
+    const id = req.params.id;
+    const entries = ((req.body ?? {}) as { entries?: unknown[] }).entries ?? [];
+    if (!Array.isArray(entries)) throw new HttpProblem(400, 'invalid-body', 'entries[] required');
+    const target = await queryOne<{ email: string }>(
+      `SELECT email FROM app.app_user WHERE id = $1`, [id],
+    );
+    if (!target) throw new HttpProblem(404, 'not-found', 'No such user');
+
+    // Replace the whole set: the UI always sends the intended final state.
+    await query(`DELETE FROM app.data_scope WHERE user_id = $1`, [id]);
+    for (const raw of entries) {
+      const e = raw as Record<string, unknown>;
+      await query(
+        `INSERT INTO app.data_scope (user_id, company_code, plant, purch_org)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [
+          id,
+          String(e['companyCode'] ?? '*').trim() || '*',
+          String(e['plant'] ?? '*').trim() || '*',
+          String(e['purchOrg'] ?? '*').trim() || '*',
+        ],
+      );
+    }
+    await recordAudit({
+      action: 'admin.user.scope', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { userId: id, email: target.email, entries: entries.length }, ip: req.ip,
+    });
+    res.json({ ok: true, entries: entries.length });
+  }));
+
+  r.put('/api/v1/admin/page-permissions', role('admin', async (req, res, ctx) => {
+    const entries = ((req.body ?? {}) as { entries?: unknown[] }).entries ?? [];
+    if (!Array.isArray(entries)) throw new HttpProblem(400, 'invalid-body', 'entries[] required');
+
+    let written = 0;
+    for (const raw of entries) {
+      const e = raw as Record<string, unknown>;
+      const kind = String(e['subjectKind'] ?? '');
+      const code = String(e['subjectCode'] ?? '');
+      const page = String(e['pageKey'] ?? '');
+      const access = String(e['access'] ?? '');
+      if (kind !== 'job_role' && kind !== 'department') {
+        throw new HttpProblem(400, 'invalid-body', `bad subjectKind: ${kind}`);
+      }
+      if (!(PAGE_KEYS as readonly string[]).includes(page)) {
+        throw new HttpProblem(400, 'invalid-body', `unknown page: ${page}`);
+      }
+      if (!(PAGE_ACCESS as readonly string[]).includes(access)) {
+        throw new HttpProblem(400, 'invalid-body', `bad access: ${access}`);
+      }
+      // The Admin page must stay reachable by the Admin job role, or the next
+      // save could lock every administrator out of this very screen.
+      if (kind === 'job_role' && code === 'admin' && page === 'admin' && access !== 'edit') {
+        throw new HttpProblem(409, 'conflict', "The Admin role must keep 'edit' on the Admin page");
+      }
+      await query(
+        `INSERT INTO app.page_permission (subject_kind, subject_code, page_key, access, updated_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (subject_kind, subject_code, page_key)
+           DO UPDATE SET access = EXCLUDED.access, updated_at = now(),
+                         updated_by = EXCLUDED.updated_by`,
+        [kind, code, page, access, ctx.principal.userId],
+      );
+      written += 1;
+    }
+    await recordAudit({
+      action: 'admin.page_permissions.update', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { entries: written }, ip: req.ip,
+    });
+    res.json({ ok: true, written });
+  }));
+
+  r.post('/api/v1/admin/departments', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const code = String(b['code'] ?? '').trim().toLowerCase().replace(/\s+/g, '_');
+    const name = String(b['name'] ?? '').trim();
+    if (!code || !name) throw new HttpProblem(400, 'invalid-body', 'code and name are required');
+    await query(
+      `INSERT INTO app.department (code, name) VALUES ($1, $2)
+       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, is_active = true`,
+      [code, name],
+    );
+    await recordAudit({
+      action: 'admin.department.upsert', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success', detail: { code, name }, ip: req.ip,
+    });
+    res.status(201).json({ code, name });
   }));
 
   // ── v1's PO-page top-spend tables (aggregates only, so viewer role) ──

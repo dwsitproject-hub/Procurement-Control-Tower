@@ -289,6 +289,10 @@ export default function App() {
   }
   if (!me) return <Login onSignedIn={setMe} />;
 
+  // An admin-issued default password must be rotated first: the API refuses
+  // every other endpoint until it is, so there is nothing useful to render.
+  if (me.mustChangePassword) return <ChangePassword me={me} onDone={setMe} />;
+
   // A newly provisioned SSO user is authenticated but has no data scope.
   if (me.scope.length === 0) {
     return (
@@ -376,10 +380,18 @@ export default function App() {
       <div className="shell">
         {/* v1's .sb sidebar: grouped nav, orange active border, open-items badge */}
         <nav className="sb" role="tablist" aria-orientation="vertical">
-          {NAV_GROUPS.map((g) => (
+          {NAV_GROUPS.map((g) => {
+            // Pages the user has no access to are not rendered at all (011).
+            // An absent map (older API) means "show everything", so a version
+            // skew can never lock a user out of their own dashboard.
+            const items = g.items.filter(
+              (t) => !me.pages || (me.pages[t.id] ?? 'none') !== 'none',
+            );
+            if (items.length === 0) return null;
+            return (
             <div key={g.section}>
               <div className="nsec">{g.section}</div>
-              {g.items.map((t) => {
+              {items.map((t) => {
                 const openBadge =
                   t.id === 'openitems'
                     ? ['pr_not_approved', 'pr_no_po', 'open_items'].reduce((acc, id) => {
@@ -402,7 +414,8 @@ export default function App() {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
       <div className="content">
@@ -701,6 +714,65 @@ export default function App() {
 async function logout(): Promise<void> {
   await api.post('/auth/logout').catch(() => undefined);
   window.location.reload();
+}
+
+// ─────────────────────────────────────────────── forced password change (011)
+
+/**
+ * Shown when an admin-issued default password has not been rotated. The API
+ * refuses every other endpoint until it is, so this is not merely cosmetic.
+ */
+function ChangePassword({ me, onDone }: { me: Me; onDone: (me: Me) => void }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr(null);
+    if (next !== confirm) { setErr('The new passwords do not match.'); return; }
+    if (next.length < 12) { setErr('The new password must be at least 12 characters.'); return; }
+    setBusy(true);
+    try {
+      await api.post('/auth/local/change-password', { currentPassword: current, newPassword: next });
+      onDone(await api.get<Me>('/api/v1/me'));
+    } catch (e2) {
+      setErr(e2 instanceof ApiError ? e2.problem.title : 'Could not change the password.');
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="login-wrap">
+      <form className="login" onSubmit={submit}>
+        <h1>Change your password</h1>
+        <p className="sub">
+          Signed in as {me.email}. This is a temporary password issued by an administrator —
+          choose your own before continuing.
+        </p>
+        <label>Current (temporary) password
+          <input type="password" value={current} autoComplete="current-password"
+            onChange={(e) => setCurrent(e.target.value)} required />
+        </label>
+        <label>New password
+          <input type="password" value={next} autoComplete="new-password"
+            onChange={(e) => setNext(e.target.value)} required minLength={12} />
+        </label>
+        <label>Confirm new password
+          <input type="password" value={confirm} autoComplete="new-password"
+            onChange={(e) => setConfirm(e.target.value)} required minLength={12} />
+        </label>
+        {err && <p className="err">{err}</p>}
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Saving…' : 'Set new password'}
+        </button>
+        <p className="sub" style={{ marginTop: '.6rem' }}>
+          At least 12 characters, and different from the temporary one.
+        </p>
+      </form>
+    </div>
+  );
 }
 
 // ────────────────────────────────────────────────────────────────── login

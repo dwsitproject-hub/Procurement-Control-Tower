@@ -13,10 +13,12 @@ import { mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
 import { KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
+import { resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
 import { healthCheck, query, queryOne } from '../db/client.js';
 import {
-  AuthError, buildAuthorizeUrl, ensureOidcReady, handleOidcCallback, loadPrincipal, localLogin, oidcEnabled,
+  AuthError, buildAuthorizeUrl, changeLocalPassword, ensureOidcReady, handleOidcCallback,
+  loadPrincipal, localLogin, oidcEnabled,
   type Principal,
 } from '../modules/auth/auth.js';
 import {
@@ -71,6 +73,13 @@ export class HttpProblem extends Error {
   }
 }
 
+/** Reachable while must_change_password is set — nothing else is. */
+const PASSWORD_CHANGE_ALLOWLIST = new Set([
+  '/api/v1/me',
+  '/auth/local/change-password',
+  '/auth/logout',
+]);
+
 function pub(handler: (req: Request, res: Response) => Promise<void> | void) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -99,6 +108,15 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
           outcome: 'denied', detail: { required: min, path: req.path }, ip: req.ip,
         });
         throw new HttpProblem(403, 'insufficient-role', `Requires ${min}`);
+      }
+      // Forced rotation (011): while the flag is set the ONLY reachable
+      // endpoints are the ones needed to change it. Enforced here, in the one
+      // guard every authenticated route goes through — not merely in the UI.
+      if (principal.mustChangePassword && !PASSWORD_CHANGE_ALLOWLIST.has(req.path)) {
+        throw new HttpProblem(
+          403, 'password-change-required',
+          'Your temporary password must be changed before using the application.',
+        );
       }
       const scope = await resolveScope(principal.userId);
       const ctx: Ctx = { principal, scope, sid: session.sid };
@@ -219,6 +237,33 @@ export function buildRouter(): Router {
     }
   }));
 
+  r.post('/auth/local/change-password', role('viewer', async (req, res, ctx) => {
+    const { currentPassword, newPassword } = (req.body ?? {}) as {
+      currentPassword?: string; newPassword?: string;
+    };
+    if (!currentPassword || !newPassword) {
+      throw new HttpProblem(400, 'invalid-body', 'currentPassword and newPassword are required');
+    }
+    try {
+      await changeLocalPassword(ctx.principal.userId, currentPassword, newPassword);
+    } catch (e) {
+      if (e instanceof AuthError) {
+        await recordAudit({
+          action: 'auth.password_change', actorUserId: ctx.principal.userId,
+          actorEmail: ctx.principal.email, outcome: 'failure',
+          detail: { reason: e.message }, ip: req.ip,
+        });
+        throw new HttpProblem(400, 'invalid-credentials', e.message);
+      }
+      throw e;
+    }
+    await recordAudit({
+      action: 'auth.password_change', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success', detail: {}, ip: req.ip,
+    });
+    res.json({ ok: true });
+  }));
+
   r.post('/auth/logout', pub(async (req, res) => {
     const session = await loadSession(req);
     if (session) {
@@ -242,6 +287,10 @@ export function buildRouter(): Router {
       roles: ctx.principal.roles,
       scope: ctx.scope,
       capabilities: caps,
+      department: ctx.principal.department,
+      jobRole: ctx.principal.jobRole,
+      pages: await resolvePages(ctx.principal.userId, ctx.principal.roles),
+      mustChangePassword: ctx.principal.mustChangePassword,
       ssoEnabled: oidcEnabled(),
     });
   }));

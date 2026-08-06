@@ -50,6 +50,11 @@ export interface Me {
   scope: { companyCode: string; plant: string; purchOrg: string }[];
   capabilities: string[];
   ssoEnabled: boolean;
+  department?: string | null;
+  jobRole?: string | null;
+  /** Effective per-page access (011); absent keys mean 'none'. */
+  pages?: Record<string, 'none' | 'view' | 'edit'>;
+  mustChangePassword?: boolean;
 }
 
 export interface FeedInfo {

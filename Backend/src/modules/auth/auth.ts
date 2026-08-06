@@ -26,12 +26,22 @@ export interface Principal {
   displayName: string;
   authMethod: 'sso' | 'local';
   roles: Role[];
+  department: string | null;
+  jobRole: string | null;
+  /** Admin-issued default password not yet rotated (011). */
+  mustChangePassword: boolean;
 }
 
 export async function loadPrincipal(userId: string): Promise<Principal | null> {
   const u = await queryOne<{
     id: string; email: string; display_name: string; auth_method: 'sso' | 'local'; is_active: boolean;
-  }>(`SELECT id, email, display_name, auth_method, is_active FROM app.app_user WHERE id = $1`, [userId]);
+    department: string | null; job_role: string | null; must_change_password: boolean;
+  }>(
+    `SELECT id, email, display_name, auth_method, is_active,
+            department, job_role, must_change_password
+       FROM app.app_user WHERE id = $1`,
+    [userId],
+  );
   if (!u || !u.is_active) return null;
 
   const roles = await query<{ role_code: Role }>(
@@ -44,7 +54,46 @@ export async function loadPrincipal(userId: string): Promise<Principal | null> {
     displayName: u.display_name,
     authMethod: u.auth_method,
     roles: roles.map((r) => r.role_code),
+    department: u.department,
+    jobRole: u.job_role,
+    mustChangePassword: u.must_change_password,
   };
+}
+
+/**
+ * Rotate a local password. Used by the forced first-login change (011) and by
+ * any user changing their own; verifies the current password first, then clears
+ * the must-change flag. Sessions are left alone: the caller stays signed in.
+ */
+export async function changeLocalPassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  if (newPassword.length < 12) {
+    throw new AuthError('invalid-credentials', 'The new password must be at least 12 characters.');
+  }
+  if (newPassword === currentPassword) {
+    throw new AuthError('invalid-credentials', 'The new password must differ from the current one.');
+  }
+  const cred = await queryOne<{ password_hash: string }>(
+    `SELECT password_hash FROM app.local_credential WHERE user_id = $1`,
+    [userId],
+  );
+  if (!cred) throw new AuthError('invalid-credentials', 'This account has no local password.');
+  if (!(await argon2.verify(cred.password_hash, currentPassword))) {
+    throw new AuthError('invalid-credentials', 'The current password is incorrect.');
+  }
+  const hash = await argon2.hash(newPassword, {
+    type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1,
+  });
+  await exec(
+    `UPDATE app.local_credential SET password_hash = $2, password_set_at = now(),
+            failed_attempts = 0, locked_until = NULL
+      WHERE user_id = $1`,
+    [userId, hash],
+  );
+  await exec(`UPDATE app.app_user SET must_change_password = false WHERE id = $1`, [userId]);
 }
 
 // ─────────────────────────────────────────────────────────── local accounts

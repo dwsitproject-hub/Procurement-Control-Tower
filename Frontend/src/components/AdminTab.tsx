@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ApiError, api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
 import { CoupaPanel } from './CoupaTab';
+import { UserAccessTab } from './UserAccessTab';
 
 /**
  * W6 — steward tooling. v1's cfg-modal (exclusions), cv-modal (column mapping)
@@ -20,6 +21,7 @@ const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
 export function AdminTab({ isAdmin }: { isAdmin: boolean }) {
   return (
     <>
+      {isAdmin && <UserAccessTab />}
       <CoupaPanel isAdmin={isAdmin} />
       <ExclusionsPanel isAdmin={isAdmin} />
       <MappingsPanel />

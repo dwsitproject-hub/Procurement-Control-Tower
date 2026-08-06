@@ -24,6 +24,54 @@ export const FEED_LABELS: Record<Feed, string> = {
 export const ROLES = ['viewer', 'analyst', 'manager', 'auditor', 'steward', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
+/**
+ * User Access (011): organisational job roles, the per-page permission matrix,
+ * and the page keys it is keyed by. The four-tier capability Role above is
+ * unchanged — a job role maps onto it, the matrix layers page access on top.
+ */
+export const JOB_ROLES = [
+  'staff', 'section_head', 'dept_head', 'division_head', 'management', 'admin',
+] as const;
+export type JobRole = (typeof JOB_ROLES)[number];
+
+export const JOB_ROLE_LABELS: Record<JobRole, string> = {
+  staff: 'Staff',
+  section_head: 'Section Head',
+  dept_head: 'Dept Head',
+  division_head: 'Division Head',
+  management: 'Management',
+  admin: 'Admin',
+};
+
+export const PAGE_ACCESS = ['none', 'view', 'edit'] as const;
+export type PageAccess = (typeof PAGE_ACCESS)[number];
+
+/** Every page the matrix can grant, in menu order. */
+export const PAGE_KEYS = [
+  'executive', 'openitems', 'pr', 'coupa_src', 'po', 'delivery', 'coupa_inv',
+  'approvals', 'materials', 'vendors', 'governance',
+  'detail', 'custom', 'admin', 'datacheck',
+] as const;
+export type PageKey = (typeof PAGE_KEYS)[number];
+
+export const PAGE_LABELS: Record<PageKey, string> = {
+  executive: 'Overview',
+  openitems: 'Open Items',
+  pr: 'PR Analysis',
+  coupa_src: 'Sourcing',
+  po: 'PO Analysis',
+  delivery: 'Delivery',
+  coupa_inv: 'Invoicing & Payment',
+  approvals: 'Approvals',
+  materials: 'Material Group',
+  vendors: 'Vendor 360',
+  governance: 'Governance',
+  detail: 'Detail Table',
+  custom: 'Custom',
+  admin: 'Admin',
+  datacheck: 'Data Quality',
+};
+
 export const ROLE_RANK: Record<Role, number> = {
   viewer: 10,
   analyst: 20,
@@ -50,6 +98,12 @@ export const MeSchema = z.object({
   roles: z.array(z.enum(ROLES)),
   scope: z.array(ScopeEntrySchema),
   capabilities: z.array(z.string()),
+  department: z.string().nullable().optional(),
+  jobRole: z.enum(JOB_ROLES).nullable().optional(),
+  /** Effective per-page access; absent keys mean 'none'. */
+  pages: z.record(z.enum(PAGE_ACCESS)).optional(),
+  /** True until an admin-issued default password has been rotated. */
+  mustChangePassword: z.boolean().optional(),
 });
 export type Me = z.infer<typeof MeSchema>;
 

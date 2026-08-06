@@ -210,16 +210,20 @@ pscp "Assets/*.XLSX" "Assets/*.xlsx" root@172.28.92.57:/opt/pct/assets/
 (When the real Synology/CIFS share is available, mount it read-only at
 `/opt/pct/assets` instead — the compose file already mounts it `:ro`.)
 
-Start, migrate, seed, ingest:
+Start, seed, ingest — **the API migrates its own schema at boot**
+(idempotent, advisory-locked), so there is no separate migrate step:
 
 ```bash
 cd /opt/pct
 docker compose -f compose.yml up -d
 docker logs -f pct-api          # wait for "listening on :3000"; Ctrl-C
-docker exec pct-api node dist/db/migrate.js   # applies 001..010
 docker exec pct-api node dist/db/seed.js      # roles + dev admin (dev-mode only)
 curl -s http://172.28.92.57:4100/ -o /dev/null -w '%{http_code}\n'   # 404 = API up
 ```
+
+> On a first boot the log shows `migrations applied at boot: 001... 010...`.
+> (Images built before 6 Aug 2026 don't self-migrate — run
+> `docker exec pct-api node dist/db/migrate.js` once, or rebuild.)
 
 Trigger the first ingest (as the seeded admin):
 
@@ -305,8 +309,7 @@ git push origin sit2
 # BE server (PuTTY session)
 cd /opt/pct/src && git pull
 docker build -f Backend/Dockerfile -t pct-api:staging .
-docker compose -f /opt/pct/compose.yml up -d api
-docker exec pct-api node dist/db/migrate.js   # idempotent
+docker compose -f /opt/pct/compose.yml up -d api   # migrations apply at boot
 
 # FE server (PuTTY session)
 cd /opt/pct/src && git pull

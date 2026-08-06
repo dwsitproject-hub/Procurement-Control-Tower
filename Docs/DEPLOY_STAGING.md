@@ -90,27 +90,82 @@ First contact prints GitHub's host-key fingerprint — answer `yes`.
 > `rm -rf` the leftover directory first.
 
 > **Working from Windows with PuTTY:** server commands run in a PuTTY session
-> per host (as `root`). The only file transfer left is the SAP data files and
-> the DB compose file, via **`pscp`** from the workstation (installed with
-> PuTTY — if not on PATH, call `"C:\Program Files\PuTTY\pscp.exe"`).
+> per host (as `root`). The only file transfer left is the SAP data files,
+> via **`pscp`** from the workstation (installed with PuTTY — if not on PATH,
+> call `"C:\Program Files\PuTTY\pscp.exe"`).
 
 ## 2. DB server — 172.28.92.60
 
-Ship the compose file (**workstation**, PowerShell/Git Bash in the repo root):
-
-```bash
-pscp deploy/staging/db.compose.yml root@172.28.92.60:/opt/pct/compose.yml
-```
-
-In the PuTTY session on **172.28.92.60**:
+Fully self-contained in the PuTTY session on **172.28.92.60** — the compose
+file is written in place (this host has no repo checkout, and pasting beats
+a cross-machine copy):
 
 ```bash
 mkdir -p /opt/pct && cd /opt/pct
 printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -base64 24)" > db.env
 chmod 600 db.env
+
+cat > compose.yml << 'EOF'
+name: pct
+
+services:
+  postgres:
+    image: postgres:16.4-bookworm
+    container_name: pct-postgres
+    restart: unless-stopped
+    env_file:
+      - ./db.env
+    environment:
+      POSTGRES_DB: pct
+      POSTGRES_USER: pct
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      TZ: Asia/Jakarta
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - max_connections=100
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - default_statistics_target=200
+      - -c
+      - enable_partition_pruning=on
+      - -c
+      - enable_partitionwise_join=on
+      - -c
+      - enable_partitionwise_aggregate=on
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "172.28.92.60:5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pct -d pct"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    shm_size: 512mb
+
+volumes:
+  pgdata:
+EOF
+
 docker compose -f compose.yml up -d
+sleep 5
 docker exec pct-postgres pg_isready -U pct -d pct   # expect "accepting connections"
 ```
+
+The file it writes is `deploy/staging/db.compose.yml` from the repo — if the
+repo version changes later, re-paste from there.
 
 Keep `db.env` safe — its password goes into the BE `DATABASE_URL` next.
 

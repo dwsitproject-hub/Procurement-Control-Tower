@@ -590,3 +590,19 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 
 /* PO-page top-spend tables: totals row. */
 .po-tbl-total td { font-weight: 700; border-top: 2px solid var(--border); }
+
+/* Admin sub-page nav: pills above the active section's panel. */
+.admin-subnav {
+  display: flex; flex-wrap: wrap; gap: .35rem;
+  margin-bottom: .8rem; padding-bottom: .6rem;
+  border-bottom: 1px solid var(--border);
+}
+.asn-btn {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: .32rem .8rem; font-size: .74rem; font-weight: 600; cursor: pointer;
+}
+.asn-btn:hover { border-color: var(--accent); }
+.asn-btn[aria-selected="true"] {
+  background: var(--navy); color: #fff; border-color: var(--navy);
+}

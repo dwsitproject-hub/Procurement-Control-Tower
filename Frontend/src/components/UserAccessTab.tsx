@@ -44,11 +44,10 @@ interface Payload {
 const ACCESS_CYCLE: PageAccess[] = ['none', 'view', 'edit'];
 const ACCESS_PILL: Record<PageAccess, string> = { none: 'sl', view: 'su', edit: 'sd' };
 
-export function UserAccessTab() {
+export function UserAccessTab({ section }: { section: 'users' | 'matrix' }) {
   const [d, setD] = useState<Payload | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<'users' | 'matrix'>('users');
 
   // register form
   const [nm, setNm] = useState('');
@@ -69,7 +68,12 @@ export function UserAccessTab() {
   useEffect(load, [load]);
 
   if (!d) {
-    return <div className="panel"><h2>👥 User Access</h2><div className="spinner" /></div>;
+    return (
+      <div className="panel">
+        <h2>{section === 'users' ? '👥 Users' : '🔐 Page Permission'}</h2>
+        <div className="spinner" />
+      </div>
+    );
   }
 
   const register = async () => {
@@ -165,21 +169,16 @@ export function UserAccessTab() {
 
   return (
     <div className="panel">
-      <h2>👥 User Access</h2>
-      <div className="dt-toolbar">
-        {(['users', 'matrix'] as const).map((t) => (
-          <button key={t} className="dt-btn" aria-pressed={tab === t}
-            style={tab === t ? { borderColor: 'var(--accent)', fontWeight: 600 } : {}}
-            onClick={() => setTab(t)}>
-            {t === 'users' ? 'Users' : 'Page permissions'}
-          </button>
-        ))}
-        <span className="count">{d.users.length} users · {d.departments.length} departments</span>
-      </div>
+      <h2>
+        {section === 'users' ? '👥 Users' : '🔐 Page Permission'}{' '}
+        <span className="muted">
+          — {d.users.length} users · {d.departments.length} departments
+        </span>
+      </h2>
 
       {msg && <p className="note" style={{ marginTop: '.4rem' }}>{msg}</p>}
 
-      {tab === 'users' ? (
+      {section === 'users' ? (
         <>
           <h3 className="pr-tbl-h">Register a new user</h3>
           <div className="dt-toolbar" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>

@@ -18,14 +18,56 @@ interface Exclusions { docTypes: string[]; purchGroups: string[]; purchOrgs: str
 
 const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
 
+/**
+ * Admin sub-pages. The tab grew to six independent panels, which is too much
+ * on one scroll, so each is its own section behind a sub-nav. The choice is
+ * remembered per browser like the other UI preferences.
+ */
+const ADMIN_SECTIONS = [
+  { id: 'users', label: 'Users', icon: '👥', adminOnly: true },
+  { id: 'permissions', label: 'Page Permission', icon: '🔐', adminOnly: true },
+  { id: 'coupa', label: 'Coupa Sync', icon: '🔄', adminOnly: false },
+  { id: 'exclusions', label: 'Data Exclusions', icon: '🗂️', adminOnly: false },
+  { id: 'mapping', label: 'Column Mapping', icon: '🔧', adminOnly: false },
+  { id: 'fx', label: 'FX Rates', icon: '💱', adminOnly: false },
+] as const;
+type AdminSection = (typeof ADMIN_SECTIONS)[number]['id'];
+
 export function AdminTab({ isAdmin }: { isAdmin: boolean }) {
+  const available = ADMIN_SECTIONS.filter((x) => isAdmin || !x.adminOnly);
+  const [section, setSection] = useState<AdminSection>(() => {
+    const saved = localStorage.getItem('pct_admin_section') as AdminSection | null;
+    return saved && available.some((x) => x.id === saved) ? saved : available[0]!.id;
+  });
+  // A demoted user must not be stranded on a section they can no longer see.
+  const active = available.some((x) => x.id === section) ? section : available[0]!.id;
+  const choose = (id: AdminSection) => {
+    setSection(id);
+    localStorage.setItem('pct_admin_section', id);
+  };
+
   return (
     <>
-      {isAdmin && <UserAccessTab />}
-      <CoupaPanel isAdmin={isAdmin} />
-      <ExclusionsPanel isAdmin={isAdmin} />
-      <MappingsPanel />
-      <FxPanel />
+      <div className="admin-subnav" role="tablist" aria-label="Admin sections">
+        {available.map((x) => (
+          <button
+            key={x.id}
+            className="asn-btn"
+            role="tab"
+            aria-selected={active === x.id}
+            onClick={() => choose(x.id)}
+          >
+            <span aria-hidden="true">{x.icon}</span> {x.label}
+          </button>
+        ))}
+      </div>
+
+      {active === 'users' && <UserAccessTab section="users" />}
+      {active === 'permissions' && <UserAccessTab section="matrix" />}
+      {active === 'coupa' && <CoupaPanel isAdmin={isAdmin} />}
+      {active === 'exclusions' && <ExclusionsPanel isAdmin={isAdmin} />}
+      {active === 'mapping' && <MappingsPanel />}
+      {active === 'fx' && <FxPanel />}
     </>
   );
 }

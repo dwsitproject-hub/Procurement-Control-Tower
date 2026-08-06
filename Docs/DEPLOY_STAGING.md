@@ -235,7 +235,32 @@ curl -s -b /tmp/pct.jar -X POST http://172.28.92.57:4100/api/v1/ingest/sync \
   -H 'Content-Type: application/json' -d '{}' -m 580
 ```
 
-Expect `"outcome":"published"` with a dataset version id.
+Expect `"outcome":"published"` with a dataset version id (`1` on a fresh
+database).
+
+### Reading the ingest response
+
+The response carries the full data-quality report, which looks alarming and is
+not: `WARNING` findings are **known characteristics of the SAP export**, not
+deployment problems — the publish already succeeded. Confirm the staging
+figures match the reference ingest of the same six files:
+
+| Rule | Expected | Meaning |
+|---|---:|---|
+| `V-M01` CAVEAT | 19,989 | No true need-by date in the export → Demand Realism and On-Time-vs-Requested stay disabled (PRD 13.1.1) |
+| `V-M03` INFO | 7,776 | PO delivery date equals doc date on 37.4% of lines → vendor OTD carries this caveat |
+| `V-R03` WARNING | 291 | PO lines referencing a requisition absent from the PR feed — kept and flagged, never fabricated |
+| `V-B01` WARNING | 107 | Token prices (0 < net ≤ 1) |
+| `V-B02` WARNING | 74 | Zero net price |
+| `V-B03` WARNING | 4,453 | STO lines across 767 POs — excluded from spend, retained in delivery |
+| `V-B04` WARNING | 4,211 | PR items with no valuation → WBS status indeterminate, never "compliant" |
+| `V-B07` WARNING | 92 | PO lines netting to zero after reversal |
+| `V-B10` WARNING | 241 | Release-exempt lines across 89 POs |
+| `V-I01` INFO | — | Linkage: 10,378 PR items reached a PO · 645 split-sourced (max 33) · 9,094 direct POs |
+| **`V-B08` INFO** | **0** | **Must be 0** — receipt-date contamination (the v1 defect that produced 1,695). Anything above 0 is a real problem |
+
+A different row count here means staging ingested different files — check
+`/opt/pct/assets` before trusting any figure on the dashboard.
 
 ## 4. FE server — 172.28.92.56
 

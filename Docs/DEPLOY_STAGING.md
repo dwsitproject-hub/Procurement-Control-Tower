@@ -249,6 +249,19 @@ ls -la /mnt/synology-apps/dev
 Mounting the share is infra's job. What it needs (read-only is sufficient — the
 app never writes to the NAS):
 
+> **Status on 172.28.92.57 as of 7 Aug 2026: BLOCKED at the network layer.**
+> The SMB server is **172.30.1.94** (from `/etc/smb-eos.creds`, left behind by an
+> EOS setup that was never completed on this VM — there is no fstab entry). It is
+> **unreachable from the BE server**: `nc -zv 172.30.1.94 445` returns
+> `No route to host` and `smbclient -L` returns `NT_STATUS_HOST_UNREACHABLE`.
+> `172.28.92.x` and `172.30.1.x` are different subnets with no route between them.
+>
+> Credentials are NOT the problem, and neither is the app. What infra must do:
+> allow **TCP 445 from 172.28.92.57 to 172.30.1.94** — on Alibaba Cloud that is
+> usually the NAS's security group plus VPC peering/route if the two sit in
+> different VPCs. Until then leave `STORAGE_*` commented out; staging keeps
+> reading `assets/`, and Admin → SAP Data Upload (manual upload) is unaffected.
+
 First, from infra — none of this can be guessed:
 
 | Needed | Notes |

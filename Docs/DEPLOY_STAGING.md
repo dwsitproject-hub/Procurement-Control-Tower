@@ -249,14 +249,38 @@ ls -la /mnt/synology-apps/dev
 Mounting the share is infra's job. What it needs (read-only is sufficient — the
 app never writes to the NAS):
 
+First, from infra — none of this can be guessed:
+
+| Needed | Notes |
+|---|---|
+| DSM hostname or IP | Must be reachable from 172.28.92.57 |
+| Share name | `APPs` unless they say otherwise |
+| A service account + password | **Read access is enough** |
+
+If another server already mounts this share, its `/etc/fstab` has all three —
+faster than a ticket.
+
+Write the credentials file with an editor, not a shell one-liner: a pasted
+`<placeholder>` makes bash treat `<` as input redirection and the command dies
+with `No such file or directory`.
+
 ```bash
 apt-get install -y cifs-utils
-printf 'username=<nas-service-account>
-password=<password>
-' > /etc/pct-nas.cred
+nano /etc/pct-nas.cred      # two lines: username=... and password=...
 chmod 600 /etc/pct-nas.cred
-mount -t cifs //<nas-host>/APPs /mnt/synology-apps   -o ro,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8
 ```
+
+Then set the host once and mount (edit the first line before pasting):
+
+```bash
+NAS_HOST='10.0.0.5'
+nc -zv "$NAS_HOST" 445
+mount -t cifs "//$NAS_HOST/APPs" /mnt/synology-apps   -o ro,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8
+stat -f -c '%T  %n' /mnt/synology-apps && ls -la /mnt/synology-apps/dev
+```
+
+`stat -f` must now print `cifs`. If it still prints `ext2/ext3`, the mount did
+not happen — read the error rather than continuing.
 
 Two options there are load-bearing:
 
@@ -267,8 +291,15 @@ Two options there are load-bearing:
   files even though the mount itself is healthy (the same cause as the earlier
   upload-spool `EACCES`).
 
-Persist it in `/etc/fstab` with the same options plus `_netdev`, or a reboot
-silently drops back to an empty local folder.
+Only once that prints `cifs`, persist it — otherwise a reboot silently drops
+back to an empty local folder. Append it as a command (do not paste an fstab
+line into the shell; it is a file format, not a command):
+
+```bash
+printf '//%s/APPs /mnt/synology-apps cifs ro,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8,_netdev 0 0
+' "$NAS_HOST" >> /etc/fstab
+mount -a && findmnt /mnt/synology-apps
+```
 
 Then confirm the project folder exists (`APPs → dev → pct`; create it or ask
 infra — note the neighbouring app uses a lowercase slug, and case matters), and

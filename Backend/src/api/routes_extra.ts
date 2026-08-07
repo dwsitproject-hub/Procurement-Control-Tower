@@ -34,6 +34,7 @@ import {
   FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastResult,
 } from '../modules/ingest/share_poller.js';
 import { loadEnv } from '../config/env.js';
+import { storageBasePath, storageHealth } from '../config/storage.js';
 
 // Injected from routes.ts so both files share one implementation.
 export interface RouteHelpers {
@@ -48,9 +49,12 @@ export interface RouteHelpers {
 
 const FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr', 'fx'];
 
-/** The mount the container was started with — informational, not editable. */
+/**
+ * The folder the container resolved from its environment — informational, not
+ * editable: an admin cannot arrange a mount from a web form.
+ */
 function shareEnvPath(): string {
-  return loadEnv().SHARE_PATH;
+  return storageBasePath(loadEnv());
 }
 
 /** Argon2id with the same parameters as the seeder and the login path. */
@@ -210,6 +214,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       // The mount itself is environment-level: the container must be able to
       // see the path, which an admin cannot arrange from a web form.
       envPath: shareEnvPath(),
+      // Where that path comes from and whether it is really the NAS. Probing
+      // here rather than trusting the configuration is the point: a missing
+      // bind mount leaves a folder that looks fine and is empty.
+      storage: await storageHealth(),
       nowInZone: nowInZone().hhmm,
       lastResult: shareLastResult(),
       recentRuns: await recentSlotRuns(12),

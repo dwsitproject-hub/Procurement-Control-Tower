@@ -218,8 +218,71 @@ Put the SAP export files in the share stand-in (**workstation**):
 pscp "Assets/*.XLSX" "Assets/*.xlsx" root@172.28.92.57:/opt/pct/assets/
 ```
 
-(When the real Synology/CIFS share is available, mount it read-only at
-`/opt/pct/assets` instead — the compose file already mounts it `:ro`.)
+This is the fallback source, used until the NAS is wired up in step 3a.
+
+### 3a. Read the exports from the shared Synology NAS
+
+Do this instead of maintaining `/opt/pct/assets` by hand. The app-side contract
+is in `Docs/SYNOLOGY-INTEGRATION.md`; the mount itself belongs to infra.
+
+**Check the mount FIRST — do not configure the app before this passes:**
+
+```bash
+findmnt /mnt/synology/eos && ls -la /mnt/synology/eos/dev/
+```
+
+- No output from `findmnt` → the NAS is **not mounted on this server**. Stop:
+  that is an infra request, and until it is done leave the STORAGE block
+  commented out so staging keeps reading `assets/`.
+- Mounted, but no `dev/PCT` folder → ask infra for the project folder
+  (File Station: `APPs → dev → PCT`). Only that folder is your ask; the mount,
+  share and SMB are already provisioned.
+
+Then, in `/opt/pct/staging.env`, uncomment the four `STORAGE_*` lines:
+
+```env
+STORAGE_TYPE=local
+STORAGE_SYNOLOGY_ROOT=/mnt/synology/eos
+STORAGE_DEPLOYMENT=dev
+STORAGE_PROJECT_SLUG=PCT
+```
+
+Resolved folder: `/mnt/synology/eos/dev/PCT`. All three of root/deployment/slug
+must be set together — a partial set is refused at boot on purpose, because
+falling back silently gives you a healthy-looking dashboard reading the wrong
+folder.
+
+If this server mounts the NAS somewhere else, tell **Compose** (not
+`staging.env` — the bind mount is substituted before the container starts):
+
+```bash
+echo 'STORAGE_HOST_MOUNT=/srv/synology' > /opt/pct/.env
+```
+
+Recreate the container so the bind takes effect, then confirm:
+
+```bash
+cd /opt/pct
+docker compose -f compose.yml up -d --force-recreate api
+docker logs pct-api 2>&1 | grep -iE 'storage|WARNING'
+```
+
+Expect `storage=synology:/mnt/synology/eos/dev/PCT` and **no** `WARNING
+storage:` line.
+
+> **Why the API checks this itself.** Docker does not fail when a bind source is
+> missing — it creates an empty folder — so a missing mount looks exactly like
+> "no files found". The API compares the folder's filesystem against the
+> container root at boot and says `WARNING storage: ... is on the container's
+> own filesystem, not a mount` when the bind did not happen. Admin → SAP Data
+> Upload shows the same verdict in the UI.
+
+Last step, and it is easy to miss: **folders already saved in the panel win over
+the environment.** Open Admin → SAP Data Upload. If the six rows still point at
+`/mnt/sap_exports` the page says so ("outside the storage folder") and offers
+**Use the NAS folder for all** — click it, then **Save schedule**, then
+**Test / preview folders** to confirm all six exports are found. The mount is
+bound read-only, so an ingest can never modify a source export.
 
 Start, seed, ingest — **the API migrates its own schema at boot**
 (idempotent, advisory-locked), so there is no separate migrate step:

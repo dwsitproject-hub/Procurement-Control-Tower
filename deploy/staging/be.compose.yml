@@ -6,7 +6,12 @@
 # Required next to this file:
 #   staging.env          — copied from deploy/env/staging.env, secrets filled in
 #   secrets.staging.env  — Coupa credentials (optional; integrations off without it)
-#   assets/              — the SAP export files (read-only share stand-in)
+#   assets/              — the SAP export files (fallback when the NAS is unset)
+#
+# The Synology NAS is bound read-only from the host mount (STORAGE_HOST_MOUNT,
+# default /mnt/synology/eos). If this server does not mount the NAS, leave the
+# STORAGE_* block in staging.env commented out and the app keeps reading
+# assets/ — the bind below is then an empty folder and nothing reads it.
 name: pct
 
 services:
@@ -47,8 +52,16 @@ services:
       SHARE_PATH: /mnt/sap_exports
       UPLOAD_SPOOL_PATH: /var/lib/pct/spool
     volumes:
-      # Read-only exactly as the production CIFS mount will be — an application
-      # defect can never modify or delete a source file.
+      # The shared Synology NAS (Docs/SYNOLOGY-INTEGRATION.md). Bound READ-ONLY:
+      # this app only READS the six SAP exports that land in its project folder,
+      # so an application defect can never modify or delete one. Override the
+      # host path with STORAGE_HOST_MOUNT if this server mounts it elsewhere.
+      #
+      # Docker CREATES AN EMPTY FOLDER instead of failing when the host path is
+      # absent, which is why the API probes the mount at boot and the Admin ->
+      # SAP Data Upload panel reports whether the folder is really the NAS.
+      - ${STORAGE_HOST_MOUNT:-/mnt/synology/eos}:/mnt/synology/eos:ro
+      # Fallback source, used while STORAGE_* is unset in staging.env.
       - ./assets:/mnt/sap_exports:ro
       - spool:/var/lib/pct/spool
     ports:

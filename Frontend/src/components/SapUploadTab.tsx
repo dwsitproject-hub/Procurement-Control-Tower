@@ -49,12 +49,30 @@ interface FeedCfg {
   slots: [string, string, string];
 }
 
+interface StorageInfo {
+  mode: 'explicit_path' | 'synology_composed' | 'legacy_share_path';
+  type: string;
+  basePath: string;
+  synologyRoot: string | null;
+  deployment: string | null;
+  projectSlug: string | null;
+  expectsNas: boolean;
+  optionsConflict: boolean;
+  exists: boolean;
+  readable: boolean;
+  writable: boolean;
+  error: string | null;
+  separateDevice: boolean | null;
+  mountWarning: string | null;
+}
+
 interface SyncCfg {
   enabled: boolean;
   timezone: string;
   settleSeconds: number;
   feeds: FeedCfg[];
   envPath: string;
+  storage: StorageInfo;
   nowInZone: string;
   lastResult: { at: string; outcome: string; detail?: string; slots?: string } | null;
   recentRuns: { feed: string; slot: number; ranOn: string; ranAt: string; outcome: string | null; detail: string | null }[];
@@ -90,6 +108,118 @@ const FEED_LABEL: Record<string, string> = {
  * every feed's own folder is assembled into one bundle and ingested; if nothing
  * changed the result is "unchanged" and no new version appears.
  */
+/**
+ * Where the six exports are read from — the shared Synology NAS when
+ * STORAGE_* is configured (Docs/SYNOLOGY-INTEGRATION.md), otherwise the plain
+ * SHARE_PATH folder.
+ *
+ * This block exists for one specific failure: when the bind mount is missing,
+ * Docker creates an empty folder inside the container, so the path looks
+ * correct and the pickup simply reports "no files found". The server compares
+ * the folder's filesystem against the container root, which tells the two
+ * apart — so this can say "that is not the NAS" instead of leaving someone to
+ * guess why an export that is definitely in File Station was never picked up.
+ */
+function StorageBlock({ s }: { s: StorageInfo }) {
+  const composed = s.mode === 'synology_composed';
+  const ok = s.exists && s.readable && !s.mountWarning;
+
+  return (
+    <>
+      <h3 className="pr-tbl-h">
+        {composed ? '🗄 Synology NAS' : '🗄 Source folder'}{' '}
+        <span className="muted">— environment configuration, read-only here</span>
+      </h3>
+
+      {s.mountWarning && (
+        <p className="note">
+          <span className="bs spdel">mount problem</span> <strong>{s.mountWarning}</strong>
+        </p>
+      )}
+      {s.optionsConflict && (
+        <p className="note">
+          <span className="bs sa">overridden</span> <code>STORAGE_LOCAL_PATH</code> is set as well
+          as the composed Synology path, and takes precedence. Unset it to use the NAS folder.
+        </p>
+      )}
+
+      <div className="table-wrap">
+        <table className="data dd-tbl">
+          <tbody>
+            <tr className="re">
+              <td>Status</td>
+              <td>
+                {ok
+                  ? <span className="bs sd">{composed ? 'NAS folder mounted and readable' : 'folder readable'}</span>
+                  : !s.exists ? <span className="bs spdel">not present in the container</span>
+                    : !s.readable ? <span className="bs spdel">present but not readable</span>
+                      : <span className="bs sa">see the warning above</span>}
+                {s.error && <span className="muted"> {s.error}</span>}
+              </td>
+            </tr>
+            <tr>
+              <td>Resolved folder</td>
+              <td><code>{s.basePath}</code></td>
+            </tr>
+            {composed ? (
+              <>
+                <tr className="re">
+                  <td>NAS root <span className="muted">(host mount)</span></td>
+                  <td><code>{s.synologyRoot}</code></td>
+                </tr>
+                <tr>
+                  <td>Deployment</td>
+                  <td>
+                    <code>{s.deployment}</code>{' '}
+                    <span className="muted">
+                      {s.deployment === 'prod' ? '(production folder)' : '(development folder)'}
+                    </span>
+                  </td>
+                </tr>
+                <tr className="re">
+                  <td>Project folder</td>
+                  <td>
+                    <code>{s.projectSlug}</code>{' '}
+                    <span className="muted">
+                      — File Station: APPs → {s.deployment} → {s.projectSlug}
+                    </span>
+                  </td>
+                </tr>
+              </>
+            ) : (
+              <tr className="re">
+                <td>Mode</td>
+                <td>
+                  <span className="muted">
+                    {s.mode === 'explicit_path'
+                      ? 'one explicit folder (STORAGE_LOCAL_PATH) — not composed from the NAS layout'
+                      : 'plain share folder (SHARE_PATH) — no Synology variables are set'}
+                  </span>
+                </td>
+              </tr>
+            )}
+            <tr>
+              <td>Write access</td>
+              <td>
+                {s.writable
+                  ? <span className="muted">writable — this app still only ever reads from it</span>
+                  : <span className="muted">read-only, as intended — an ingest can never alter a source export</span>}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="note">
+        Set by the backend environment (<code>STORAGE_SYNOLOGY_ROOT</code>,{' '}
+        <code>STORAGE_DEPLOYMENT</code>, <code>STORAGE_PROJECT_SLUG</code>, or{' '}
+        <code>STORAGE_LOCAL_PATH</code>) and shown here because a mount cannot be arranged from a
+        web form. The folders below default to this one; point a file at a sub-folder of it if the
+        exports are separated per file.
+      </p>
+    </>
+  );
+}
+
 function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }) {
   const [cfg, setCfg] = useState<SyncCfg | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -128,6 +258,17 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   const applySlotsToAll = () => {
     const first = feeds[0]?.slots ?? ['', '', ''];
     setFeeds((list) => list.map((f) => ({ ...f, slots: [...first] as [string, string, string] })));
+  };
+  /**
+   * Move every file onto the resolved storage folder. This is the migration
+   * step when an installation is pointed at the NAS: folders saved earlier in
+   * this panel are explicit user intent and are NOT silently rewritten by the
+   * server, so without this the top of the page would report a healthy NAS
+   * mount while the rows below kept reading the old folder.
+   */
+  const applyStorageToAll = () => {
+    const base = cfg?.storage.basePath;
+    if (base) setFeeds((list) => list.map((f) => ({ ...f, path: base })));
   };
 
   const save = async () => {
@@ -177,6 +318,12 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
 
   const scanOf = (feed: string) => scan?.feeds.find((f) => f.feed === feed);
 
+  // Folders that sit outside the resolved storage root. Not an error — exports
+  // may legitimately live elsewhere on the same mount — but when the NAS has
+  // just been configured these are the rows still reading the old location.
+  const base = cfg.storage.basePath;
+  const strayPaths = feeds.filter((f) => f.path !== base && !f.path.startsWith(`${base}/`));
+
   return (
     <div className="panel">
       <h2>
@@ -186,9 +333,11 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
       <p className="note" style={{ marginTop: 0 }}>
         Every time is <strong>{cfg.timezone}</strong> (server clock now reads{' '}
         <strong>{cfg.nowInZone}</strong>). Each folder must be <strong>mounted into the API
-        container</strong> — this one was started with <code>{cfg.envPath}</code>, so paths outside
-        that mount are not readable no matter what is typed here.
+        container</strong> — this one resolved <code>{cfg.envPath}</code>, so paths outside that
+        mount are not readable no matter what is typed here.
       </p>
+
+      <StorageBlock s={cfg.storage} />
       <p className="note">
         A dataset is published complete or not at all, so a pickup time decides <em>when that
         file&apos;s folder is read again</em>. When one fires, the newest matching file from every
@@ -215,6 +364,12 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
               title="Copy the first row's times into every row">
               Same times for all
             </button>
+            {strayPaths.length > 0 && (
+              <button className="dt-btn" disabled={busy !== null} onClick={applyStorageToAll}
+                title={`Point every file at ${cfg.storage.basePath}`}>
+                Use {cfg.storage.mode === 'synology_composed' ? 'the NAS folder' : 'the resolved folder'} for all
+              </button>
+            )}
           </>
         )}
         <button className="dt-btn" disabled={busy !== null} onClick={() => void doScan()}>
@@ -306,6 +461,17 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
           half-written export is never read.</>
         )}
       </p>
+
+      {strayPaths.length > 0 && (
+        <p className="note">
+          <span className="bs sa">outside the storage folder</span>{' '}
+          {strayPaths.length} of {feeds.length} file(s) point somewhere other than{' '}
+          <code>{base}</code> — {strayPaths.map((f) => FEED_LABEL[f.feed] ?? f.feed).join(', ')}.
+          {cfg.storage.mode === 'synology_composed'
+            ? ' Those are read from their own folder, not from the NAS. Use the button above to move them.'
+            : ' That is fine if the exports really live there; the folder check column confirms each one.'}
+        </p>
+      )}
 
       {scan && (
         <p className="note">

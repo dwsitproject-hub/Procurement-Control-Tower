@@ -27,6 +27,7 @@ import type { Feed } from '@pct/contracts';
 import { pool, query } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
+import { resolveStorage } from '../../config/storage.js';
 import { runIngest } from './pipeline.js';
 import { notify } from '../notify/mailer.js';
 import { ingestFailureBody, ingestSuccessBody } from '../notify/messages.js';
@@ -78,14 +79,36 @@ function normaliseSlots(raw: unknown): [string, string, string] {
 export async function loadShareConfig(): Promise<ShareConfig> {
   const rules = await loadRuleSnapshot();
   const stored = (rules['ingest.feeds'] ?? {}) as Record<string, unknown>;
-  // Pre-012 single-path settings are the fallback, so an upgrade keeps working.
-  const legacyPath = String(rules['ingest.share_path'] ?? env.SHARE_PATH);
+
+  /**
+   * The folder a feed uses when the panel has not saved one for it. Precedence,
+   * most specific first:
+   *
+   *   1. a per-feed folder saved in the panel  (handled below, per feed)
+   *   2. the resolved storage root, WHEN STORAGE_* is configured
+   *   3. the pre-012 `ingest.share_path` rule row
+   *   4. SHARE_PATH
+   *
+   * 2 deliberately outranks 3. `ingest.share_path` is a dead key — no UI writes
+   * it any more, the panel writes `ingest.feeds` — so an installation that once
+   * saved it would otherwise have that row shadow the NAS root forever: the
+   * panel would report a healthy Synology mount at the top while every feed
+   * quietly read the old folder. Configuring STORAGE_* in the environment is
+   * the newer and more deliberate statement of intent, so it wins.
+   *
+   * When no STORAGE_* variable is set, resolveStorage() returns SHARE_PATH and
+   * the order collapses to exactly what it was before: rule row, then env.
+   */
+  const storage = resolveStorage(env);
+  const defaultPath = storage.mode === 'legacy_share_path'
+    ? String(rules['ingest.share_path'] ?? storage.basePath)
+    : storage.basePath;
 
   const feeds = FEED_META.map(({ feed, defaultPattern }) => {
     const f = (stored[feed] ?? {}) as Record<string, unknown>;
     return {
       feed,
-      path: String(f['path'] ?? legacyPath),
+      path: String(f['path'] ?? defaultPath),
       pattern: String(f['pattern'] ?? defaultPattern),
       slots: normaliseSlots(f['slots']),
     };

@@ -28,6 +28,18 @@ const bool = z
   .transform((v) => v.toLowerCase() === 'true' || v === '1')
   .or(z.boolean());
 
+/**
+ * Optional variable where an EMPTY assignment means "not set".
+ *
+ * `FOO=` in an env file, and a Compose `environment:` entry with no value, both
+ * arrive as an empty string rather than as absent. Without this an operator who
+ * leaves a blank line in place of a value gets a boot failure complaining that
+ * '' is not a valid choice, which reads like a bug in the app rather than a
+ * blank they forgot to fill in.
+ */
+const optional = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), schema);
+
 export const EnvSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
@@ -61,7 +73,19 @@ export const EnvSchema = z
     DB_POOL_MAX: z.coerce.number().int().positive().default(10),
     DATASET_VERSIONS_RETAINED: z.coerce.number().int().min(2).default(12),
 
-    // Local stand-in for the Synology share: any readable directory.
+    // ── Shared Synology NAS (Docs/SYNOLOGY-INTEGRATION.md) ──
+    // Option B (recommended): root + deployment + slug compose the app folder.
+    // Option A: STORAGE_LOCAL_PATH gives one full path and overrides Option B.
+    // Neither: SHARE_PATH is used, so an upgrade with no STORAGE_* variables
+    // reads the same folder as before. See config/storage.ts.
+    STORAGE_TYPE: optional(z.enum(['local']).default('local')),
+    STORAGE_SYNOLOGY_ROOT: optional(z.string().optional()),
+    STORAGE_DEPLOYMENT: optional(z.enum(['dev', 'prod']).optional()),
+    STORAGE_PROJECT_SLUG: optional(z.string().min(1).optional()),
+    STORAGE_LOCAL_PATH: optional(z.string().optional()),
+
+    // Fallback share folder, and the local stand-in for the NAS in dev: any
+    // readable directory holding the six SAP exports.
     SHARE_PATH: z.string().default('/mnt/sap_exports'),
     SHARE_POLL_CRON_MINUTES: z.coerce.number().int().positive().default(30),
     UPLOAD_SPOOL_PATH: z.string().default('/var/lib/pct/spool'),
@@ -116,6 +140,41 @@ export const EnvSchema = z
         message: 'SameSite=None requires Secure=true — browsers reject otherwise',
       });
     }
+    // Synology Option B is all-or-nothing for the same reason as OIDC below: a
+    // partial set silently falls through to SHARE_PATH, and the operator is
+    // then looking at a working dashboard that is reading the wrong folder.
+    const storageKeys = [
+      env.STORAGE_SYNOLOGY_ROOT,
+      env.STORAGE_DEPLOYMENT,
+      env.STORAGE_PROJECT_SLUG,
+    ];
+    const storageSet = storageKeys.filter(Boolean).length;
+    if (storageSet > 0 && storageSet < 3) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STORAGE_SYNOLOGY_ROOT'],
+        message:
+          'Synology storage is partially configured — set STORAGE_SYNOLOGY_ROOT, ' +
+          'STORAGE_DEPLOYMENT and STORAGE_PROJECT_SLUG together, or none of them ' +
+          '(use STORAGE_LOCAL_PATH for a single explicit folder)',
+      });
+    }
+    if (env.STORAGE_SYNOLOGY_ROOT && !env.STORAGE_SYNOLOGY_ROOT.startsWith('/')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STORAGE_SYNOLOGY_ROOT'],
+        message: 'must be an absolute path INSIDE the container, e.g. /mnt/synology/eos',
+      });
+    }
+    // A slug with a separator would escape the app's own folder on the share.
+    if (env.STORAGE_PROJECT_SLUG && /[\\/]/.test(env.STORAGE_PROJECT_SLUG)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STORAGE_PROJECT_SLUG'],
+        message: 'is one folder name, not a path — it must not contain / or \\',
+      });
+    }
+
     // OIDC is all-or-nothing: a partial configuration produces a 404 login route
     // that is far harder to diagnose than a boot failure.
     const oidcKeys = [env.OIDC_DISCOVERY_URL, env.OIDC_CLIENT_ID, env.OIDC_REDIRECT_URI];

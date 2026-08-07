@@ -107,8 +107,14 @@ services:
       UPLOAD_SPOOL_PATH: /var/lib/pct/spool
     volumes:
       # The local stand-in for the Synology share, mounted READ-ONLY exactly as
-      # the production CIFS mount is — so an application defect can never modify
-      # or delete a source file.
+      # the NAS mount is on a server — so an application defect can never
+      # modify or delete a source file.
+      #
+      # A laptop has no NAS mount, so no STORAGE_* variables are set here and
+      # the app falls back to SHARE_PATH (Docs/SYNOLOGY-INTEGRATION.md is
+      # explicit that Option B must not be used without the mount). To rehearse
+      # the server layout locally, bind a folder at /mnt/synology/eos and set
+      # STORAGE_SYNOLOGY_ROOT / STORAGE_DEPLOYMENT / STORAGE_PROJECT_SLUG.
       - ./Assets:/mnt/sap_exports:ro
       - spool:/var/lib/pct/spool
     ports:

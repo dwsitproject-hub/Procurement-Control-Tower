@@ -159,12 +159,19 @@ Option B, per this doc. Staging:
 
 ```env
 STORAGE_TYPE=local
-STORAGE_SYNOLOGY_ROOT=/mnt/synology/eos
+STORAGE_SYNOLOGY_ROOT=/mnt/synology-apps
 STORAGE_DEPLOYMENT=dev
-STORAGE_PROJECT_SLUG=PCT
+STORAGE_PROJECT_SLUG=pct
 ```
 
-Resolved: `/mnt/synology/eos/dev/PCT` — File Station `APPs → dev → PCT`.
+Resolved: `/mnt/synology-apps/dev/pct` — File Station `APPs → dev → pct`.
+
+**The host mount differs per server.** This doc's `/mnt/synology/eos` is the EOS
+app server's; on the PCT staging BE (172.28.92.57) the APPs share belongs at
+`/mnt/synology-apps` (its neighbour is `dev/klip`, lowercase — case matters on
+the mount). Confirm with `stat -f`, never by looking at the folder tree: on
+7 Aug 2026 all of those paths existed on that VM as **local ext4 directories**
+and the share had never been mounted there at all.
 
 Two additions to the doc's resolution order, both to protect existing
 deployments:

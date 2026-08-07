@@ -225,34 +225,68 @@ This is the fallback source, used until the NAS is wired up in step 3a.
 Do this instead of maintaining `/opt/pct/assets` by hand. The app-side contract
 is in `Docs/SYNOLOGY-INTEGRATION.md`; the mount itself belongs to infra.
 
-**Check the mount FIRST — do not configure the app before this passes:**
+**Check the mount FIRST — do not configure the app before this passes.** A
+folder existing proves nothing; only the filesystem type does:
 
 ```bash
-findmnt /mnt/synology/eos && ls -la /mnt/synology/eos/dev/
+findmnt -t cifs,nfs,nfs4,smb3
+stat -f -c '%T  %n' /mnt/synology-apps /mnt/synology-apps/dev
+ls -la /mnt/synology-apps/dev
 ```
 
-- No output from `findmnt` → the NAS is **not mounted on this server**. Stop:
-  that is an infra request, and until it is done leave the STORAGE block
-  commented out so staging keeps reading `assets/`.
-- Mounted, but no `dev/PCT` folder → ask infra for the project folder
-  (File Station: `APPs → dev → PCT`). Only that folder is your ask; the mount,
-  share and SMB are already provisioned.
+- `stat -f` says **`cifs`** and the path appears in `findmnt` → it is the NAS.
+- `stat -f` says **`ext2/ext3`** → it is a LOCAL folder on this server's disk,
+  whatever it looks like in a file browser. Stop here.
 
-Then, in `/opt/pct/staging.env`, uncomment the four `STORAGE_*` lines:
+> **Checked on 172.28.92.57, 7 Aug 2026: it was NOT mounted.**
+> `findmnt` printed nothing and `/mnt/synology-apps`, `/mnt/synology-apps/dev`
+> and `/mnt/synology/eos` were all `ext2/ext3` — plain local directories, with
+> an empty `dev/klip` skeleton left behind. The Synology doc describes the *EOS
+> app server*; this staging BE is a different VM and the share had never been
+> mounted on it. Files dropped in those folders stay on the BE server's disk and
+> never reach File Station.
+
+Mounting the share is infra's job. What it needs (read-only is sufficient — the
+app never writes to the NAS):
+
+```bash
+apt-get install -y cifs-utils
+printf 'username=<nas-service-account>
+password=<password>
+' > /etc/pct-nas.cred
+chmod 600 /etc/pct-nas.cred
+mount -t cifs //<nas-host>/APPs /mnt/synology-apps   -o ro,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8
+```
+
+Two options there are load-bearing:
+
+- **`ro`** — the app only reads the exports, so a read-only mount makes it
+  impossible for an ingest defect to modify or delete a source file.
+- **`uid=1001,gid=1001`** — CIFS ignores the server's POSIX ownership, and the
+  API container runs as uid 1001. Without these the container cannot read the
+  files even though the mount itself is healthy (the same cause as the earlier
+  upload-spool `EACCES`).
+
+Persist it in `/etc/fstab` with the same options plus `_netdev`, or a reboot
+silently drops back to an empty local folder.
+
+Then confirm the project folder exists (`APPs → dev → pct`; create it or ask
+infra — note the neighbouring app uses a lowercase slug, and case matters), and
+uncomment the four `STORAGE_*` lines in `/opt/pct/staging.env`:
 
 ```env
 STORAGE_TYPE=local
-STORAGE_SYNOLOGY_ROOT=/mnt/synology/eos
+STORAGE_SYNOLOGY_ROOT=/mnt/synology-apps
 STORAGE_DEPLOYMENT=dev
-STORAGE_PROJECT_SLUG=PCT
+STORAGE_PROJECT_SLUG=pct
 ```
 
-Resolved folder: `/mnt/synology/eos/dev/PCT`. All three of root/deployment/slug
+Resolved folder: `/mnt/synology-apps/dev/pct`. All three of root/deployment/slug
 must be set together — a partial set is refused at boot on purpose, because
 falling back silently gives you a healthy-looking dashboard reading the wrong
 folder.
 
-If this server mounts the NAS somewhere else, tell **Compose** (not
+If this server mounts the share somewhere else, tell **Compose** (not
 `staging.env` — the bind mount is substituted before the container starts):
 
 ```bash
@@ -267,7 +301,7 @@ docker compose -f compose.yml up -d --force-recreate api
 docker logs pct-api 2>&1 | grep -iE 'storage|WARNING'
 ```
 
-Expect `storage=synology:/mnt/synology/eos/dev/PCT` and **no** `WARNING
+Expect `storage=synology:/mnt/synology-apps/dev/pct` and **no** `WARNING
 storage:` line.
 
 > **Why the API checks this itself.** Docker does not fail when a bind source is

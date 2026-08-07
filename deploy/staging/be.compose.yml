@@ -56,11 +56,13 @@ services:
       # this app only READS the six SAP exports that land in its project folder,
       # so an application defect can never modify or delete one. Override the
       # host path with STORAGE_HOST_MOUNT if this server mounts it elsewhere.
+      # NOTE: /mnt/synology-apps on 172.28.92.57 was a LOCAL folder, not a mount,
+      # when this was written - see Docs/DEPLOY_STAGING.md 3a.
       #
       # Docker CREATES AN EMPTY FOLDER instead of failing when the host path is
       # absent, which is why the API probes the mount at boot and the Admin ->
       # SAP Data Upload panel reports whether the folder is really the NAS.
-      - ${STORAGE_HOST_MOUNT:-/mnt/synology/eos}:/mnt/synology/eos:ro
+      - ${STORAGE_HOST_MOUNT:-/mnt/synology-apps}:/mnt/synology-apps:ro
       # Fallback source, used while STORAGE_* is unset in staging.env.
       - ./assets:/mnt/sap_exports:ro
       - spool:/var/lib/pct/spool

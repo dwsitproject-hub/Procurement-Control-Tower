@@ -460,13 +460,35 @@ export function buildRouter(): Router {
 
     const gf: GlobalFilter = parseGlobalFilter(req.query as Record<string, unknown>);
 
+    /**
+     * Optional `?ids=a,b,c` — return only these KPIs.
+     *
+     * The dashboard asks for the KPIs of the page being opened rather than all
+     * 71 on first paint, and asks again on every page change so the figures are
+     * current. Filtering here rather than in the browser is what makes that
+     * cheap: under a global filter each KPI is recomputed from the facts, so
+     * sending ids turns a full recompute into one for the dozen the page shows.
+     *
+     * Unknown ids are ignored rather than rejected: a browser running an older
+     * build must degrade to "that card is missing", never to a failed request
+     * that empties the whole page.
+     */
+    const idsParam = String((req.query as Record<string, unknown>)['ids'] ?? '').trim();
+    const wanted = idsParam === ''
+      ? null
+      : new Set(idsParam.split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 200));
+
     // A filtered request recomputes from the facts using the SAME spec SQL the
     // mart precomputes. The precomputed path below is untouched, so a bug in the
     // live path cannot affect the default dashboard.
     if (!isEmptyFilter(gf)) {
       const fpLive = sessionFingerprint(ctx.sid);
-      const live = await computeLiveKpis(v.id, gf);
-      const liveIds = new Set(live.map((k) => k.kpiId));
+      const liveAll = await computeLiveKpis(v.id, gf);
+      const live = wanted ? liveAll.filter((k) => wanted.has(k.kpiId)) : liveAll;
+      // Membership is tested against EVERY live KPI, not just the requested
+      // ones: a KPI that recomputes live must not be listed as unavailable
+      // merely because this page did not ask for it.
+      const liveIds = new Set(liveAll.map((k) => k.kpiId));
 
       // The 18 original mart KPIs (cycle times, GR/IR share, expedite, WBS…)
       // have no live recomputation yet. Under a filter they must NOT silently
@@ -480,6 +502,7 @@ export function buildRouter(): Router {
 
       const filteredOut = martOnly
         .filter((m) => !liveIds.has(m.kpi_id))
+        .filter((m) => !wanted || wanted.has(m.kpi_id))
         .map((m) => ({
           kpiId: m.kpi_id,
           title: KPI_TITLES[m.kpi_id as keyof typeof KPI_TITLES] ?? m.kpi_id,
@@ -534,8 +557,11 @@ export function buildRouter(): Router {
     }>(
       `SELECT kpi_id, status, value_num, numerator, denominator, sample_size, unit,
               currency_basis, severity, status_reason, detail, drill_predicate
-         FROM mart.kpi_value WHERE dataset_version_id = $1 ORDER BY kpi_id`,
-      [v.id],
+         FROM mart.kpi_value
+        WHERE dataset_version_id = $1
+          AND ($2::text[] IS NULL OR kpi_id = ANY($2::text[]))
+        ORDER BY kpi_id`,
+      [v.id, wanted ? [...wanted] : null],
     );
 
     const fp = sessionFingerprint(ctx.sid);

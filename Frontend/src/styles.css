@@ -99,11 +99,15 @@ a { color: var(--accent); }
   font-size: .58rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
   color: rgba(255, 255, 255, .35); padding: .7rem 1rem .25rem;
 }
+/* Nav items are anchors (each page has a URL), so the browser's default link
+   underline and colour have to be turned off; everything else is as it was
+   when they were buttons. */
 .ni {
   display: flex; align-items: center; gap: .5rem; width: 100%; text-align: left;
   padding: .5rem 1rem; font-size: .78rem; color: rgba(255, 255, 255, .75);
   background: none; border: 0; border-left: 3px solid transparent; cursor: pointer;
   transition: background .12s;
+  text-decoration: none; box-sizing: border-box;
 }
 .ni:hover { background: rgba(255, 255, 255, .06); color: #fff; }
 .ni[aria-selected="true"] {
@@ -606,6 +610,8 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
   background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 999px;
   padding: .32rem .8rem; font-size: .74rem; font-weight: 600; cursor: pointer;
+  /* Also an anchor now (/admin/<section>): restore button-like layout. */
+  display: inline-block; text-decoration: none; line-height: 1.45;
 }
 .asn-btn:hover { border-color: var(--accent); }
 .asn-btn[aria-selected="true"] {

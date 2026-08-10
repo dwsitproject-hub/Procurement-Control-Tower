@@ -42,32 +42,50 @@ const ADMIN_SECTIONS = [
 ] as const;
 type AdminSection = (typeof ADMIN_SECTIONS)[number]['id'];
 
-export function AdminTab({ isAdmin, canIngest }: { isAdmin: boolean; canIngest: boolean }) {
+/**
+ * The section now comes from the URL (`/admin/exclusions`) rather than from
+ * local state, so an admin sub-page can be linked to and survives a reload —
+ * "open Admin → Data Exclusions" is a link you can send someone.
+ *
+ * `section` is whatever was in the path, so it is validated here rather than
+ * trusted: an unknown or no-longer-permitted value falls back to the first
+ * section the user can actually see.
+ */
+export function AdminTab({ isAdmin, canIngest, section, onSection }: {
+  isAdmin: boolean;
+  canIngest: boolean;
+  section: string | null;
+  onSection: (id: AdminSection) => void;
+}) {
   const available = ADMIN_SECTIONS.filter((x) => isAdmin || !x.adminOnly);
-  const [section, setSection] = useState<AdminSection>(() => {
-    const saved = localStorage.getItem('pct_admin_section') as AdminSection | null;
-    return saved && available.some((x) => x.id === saved) ? saved : available[0]!.id;
-  });
-  // A demoted user must not be stranded on a section they can no longer see.
-  const active = available.some((x) => x.id === section) ? section : available[0]!.id;
-  const choose = (id: AdminSection) => {
-    setSection(id);
-    localStorage.setItem('pct_admin_section', id);
-  };
+  const active: AdminSection = available.some((x) => x.id === section)
+    ? (section as AdminSection)
+    : available[0]!.id;
+
+  // Canonicalise the URL so /admin (or a stale section) becomes the real path.
+  useEffect(() => {
+    if (section !== active) onSection(active);
+  }, [section, active, onSection]);
 
   return (
     <>
       <div className="admin-subnav" role="tablist" aria-label="Admin sections">
         {available.map((x) => (
-          <button
+          <a
             key={x.id}
+            href={`/admin/${x.id}`}
             className="asn-btn"
             role="tab"
             aria-selected={active === x.id}
-            onClick={() => choose(x.id)}
+            aria-current={active === x.id ? 'page' : undefined}
+            onClick={(e) => {
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              e.preventDefault();
+              onSection(x.id);
+            }}
           >
             <span aria-hidden="true">{x.icon}</span> {x.label}
-          </button>
+          </a>
         ))}
       </div>
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, type DatasetCurrent, type Finding, type Kpi, type Me } from './lib/api';
 import { formatNumber } from './lib/format';
 import { FreshnessBanner } from './components/FreshnessBanner';
@@ -9,21 +9,36 @@ import { DetailTable } from './components/DetailTable';
 import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
-import { MaterialsTab, VendorsTab } from './components/EntityViews';
 import { PrTables } from './components/PrTables';
 import { PoTables } from './components/PoTables';
-import { AdminTab } from './components/AdminTab';
-import { CustomTab } from './components/CustomTab';
-import { CoupaInvoicesTab, CoupaSourcingTab } from './components/CoupaPages';
-import { CustomKpiCard, CustomChartPanel } from './components/CustomTab';
+import {
+  DEFAULT_TAB, TAB_PATH, type Tab, hrefFor, linkHandler, navigate, useRoute,
+} from './lib/router';
+
+/**
+ * Pages behind their own chunks. Everything used to ship in one bundle, so
+ * opening Overview also downloaded Admin, the Coupa pages, the entity views and
+ * the custom builder. Each of these is now fetched the first time its page is
+ * opened — and most users never open Admin at all.
+ *
+ * Overview's own building blocks (cards, charts, tables) stay eager: they are
+ * the first paint, and deferring them would only add a round trip.
+ */
+const AdminTab = lazy(() => import('./components/AdminTab').then((m) => ({ default: m.AdminTab })));
+const CustomTab = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomTab })));
+// Pinned custom cards render on ordinary pages, but only for users who have
+// built one — so they are loaded on demand too. Importing them eagerly kept
+// the whole builder module in the main bundle for everybody.
+const CustomKpiCard = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomKpiCard })));
+const CustomChartPanel = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomChartPanel })));
+const MaterialsTab = lazy(() => import('./components/EntityViews').then((m) => ({ default: m.MaterialsTab })));
+const VendorsTab = lazy(() => import('./components/EntityViews').then((m) => ({ default: m.VendorsTab })));
+const CoupaSourcingTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaSourcingTab })));
+const CoupaInvoicesTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaInvoicesTab })));
 import { OverviewCard } from './components/OverviewCards';
 import {
   LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
 } from './components/LayoutEdit';
-
-type Tab =
-  | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
-  | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
 // v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
 const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: string }[] }[] = [
@@ -194,6 +209,20 @@ const CHART_FILTER_DIM: Record<string, 'monthKey' | 'plant' | 'purchOrg'> = {
 // Which validation findings surface inline on which tab (G1.5). The Data Check
 // tab always shows everything; these are the "you should know while reading
 // this page" callouts.
+
+/**
+ * Boundary for a lazily-loaded page. The fallback is the same spinner the
+ * panels use, inside a panel-sized box so the sidebar and header do not jump
+ * while the chunk downloads (typically one cached round trip, once per page
+ * per deployment).
+ */
+function PageChunk({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<div className="panel" style={{ minHeight: 220 }}><div className="spinner" /></div>}>
+      {children}
+    </Suspense>
+  );
+}
 const TAB_FINDINGS: Partial<Record<Tab, string[]>> = {
   pr: ['V-M01', 'V-R03', 'V-R04'],
   po: ['V-B01', 'V-B02', 'V-B03'],
@@ -211,7 +240,8 @@ function applyTheme(mode: ThemeMode) {
 export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [tab, setTab] = useState<Tab>('executive');
+  const route = useRoute();
+  const tab = route.tab;
   const [gf, setGf] = useState<GlobalFilterState>(EMPTY_FILTER);
   const [dataset, setDataset] = useState<DatasetCurrent | null>(null);
   const [kpis, setKpis] = useState<Kpi[]>([]);
@@ -246,15 +276,31 @@ export default function App() {
     api.get<DatasetCurrent>('/api/v1/dataset/current').then(setDataset).catch(() => undefined);
   }, [me]);
 
+  // Saved custom cards are only needed where they can appear: the Custom page,
+  // the layout editor, or a page that has pinned one. The chart catalogue is
+  // only read by the layout editor and the builder. Neither belongs in the
+  // first paint of Overview.
+  const needsCustom = tab === 'custom' || editing
+    || layout.customKpis.length > 0 || layout.customCharts.length > 0;
+  const needsCatalog = tab === 'custom' || editing;
+  const loadedCustom = useRef(false);
+  const loadedCatalog = useRef(false);
+
   useEffect(() => {
-    if (!me) return;
+    if (!me || !needsCustom || loadedCustom.current) return;
+    loadedCustom.current = true;
     api.get<{ specs: { kpis: any[]; charts: any[] } }>('/api/v1/custom/saved')
       .then((d) => setSavedCustom(d.specs ?? { kpis: [], charts: [] }))
-      .catch(() => undefined);
+      .catch(() => { loadedCustom.current = false; });
+  }, [me, needsCustom]);
+
+  useEffect(() => {
+    if (!me || !needsCatalog || loadedCatalog.current) return;
+    loadedCatalog.current = true;
     api.get<{ charts: { chartId: string; title?: string }[] }>('/api/v1/chart')
       .then((d) => setChartCatalog(d.charts))
-      .catch(() => undefined);
-  }, [me]);
+      .catch(() => { loadedCatalog.current = false; });
+  }, [me, needsCatalog]);
 
   // Inline anomaly banners (G1.5): the findings for the published version.
   useEffect(() => {
@@ -265,24 +311,111 @@ export default function App() {
       .catch(() => setFindings([]));
   }, [me, dataset]);
 
-  // Refetch KPIs whenever the global filter changes. The query string is empty
-  // when nothing is selected, which keeps the fast precomputed path in play.
   const gfQuery = globalFilterQuery(gf);
+
+  /**
+   * KPIs are fetched PER PAGE, and again on every page change.
+   *
+   * Previously one request pulled all 71 KPIs once and every page read from
+   * that snapshot, so opening the dashboard paid for pages nobody visited, and
+   * — the reason this changed — the figures were whatever they had been at
+   * first paint. Moving between pages after a recompute or a filter change
+   * showed stale numbers until a manual reload.
+   *
+   * Values already fetched stay on screen while the new request is in flight,
+   * so navigation never flashes empty cards; each response is merged over the
+   * cache. The cache is keyed by dataset version AND filter, so it is dropped
+   * whenever either changes — a stale value from a previous filter must never
+   * survive into a page opened after it.
+   */
+  const cacheKey = `${dataset?.datasetVersionId ?? 'none'}|${gfQuery}`;
+  const cacheKeyRef = useRef(cacheKey);
+  const [kpiLoading, setKpiLoading] = useState(false);
+
+  // Always requested, whatever the page: the header item count and the Open
+  // Items badge are chrome, and would otherwise be blank until their own page
+  // was opened.
+  const CHROME_KPIS = ['total_pr_items', 'pr_not_approved', 'pr_no_po', 'open_items'];
+
+  /**
+   * The id list as a STRING, deliberately — the effect below keys on its
+   * content, not on an array's identity.
+   *
+   * useTabLayout re-fetches the saved layout on every page change, so `layout`
+   * arrives as a fresh object shortly after the page opens. Keying on identity
+   * therefore fired the request twice per navigation. With a content key the
+   * second pass is a no-op whenever the resolved ids are unchanged, which is
+   * every page that has not been customised; a customised layout still issues
+   * a correcting second request rather than rendering the wrong cards.
+   */
+  const neededKey = useMemo(() => {
+    const slots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
+    // Layout can swap a slot for a different KPI — ask for what is shown.
+    return [...new Set([...slots.map((sl) => layout.replaced[sl] ?? sl), ...CHROME_KPIS])].join(',');
+  }, [tab, layout]);
+
   useEffect(() => {
     if (!me) return;
+    // Wait for the published version: it is half the cache key, so fetching
+    // before it lands means one request against key "none" and an immediate
+    // second one against the real key. There is also nothing to show without a
+    // dataset — the page renders "No data yet".
+    if (!dataset || dataset.datasetVersionId === null) return;
+    if (cacheKeyRef.current !== cacheKey) {
+      cacheKeyRef.current = cacheKey;
+      setKpis([]);
+    }
+    if (neededKey === '') return;
+
     let cancelled = false;
+    setKpiLoading(true);
+    const qs = new URLSearchParams(gfQuery);
+    qs.set('ids', neededKey);
     api
-      .get<{ kpis: Kpi[] }>(`/api/v1/kpi${gfQuery ? `?${gfQuery}` : ''}`)
+      .get<{ kpis: Kpi[] }>(`/api/v1/kpi?${qs.toString()}`)
       .then((d) => {
-        if (!cancelled) setKpis(d.kpis);
+        if (cancelled) return;
+        setKpis((prev) => {
+          const byId = new Map(prev.map((k) => [k.kpiId, k]));
+          for (const k of d.kpis) byId.set(k.kpiId, k);
+          return [...byId.values()];
+        });
       })
-      .catch(() => {
-        if (!cancelled) setKpis([]);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setKpiLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [me, gfQuery]);
+  }, [me, dataset, cacheKey, gfQuery, neededKey]);
+
+  // A page opened from a URL the user has no access to must not render blank.
+  const allowedTabs = useMemo(
+    () => NAV_GROUPS.flatMap((g) => g.items)
+      .filter((t) => !me?.pages || (me.pages[t.id] ?? 'none') !== 'none')
+      .map((t) => t.id),
+    [me],
+  );
+  useEffect(() => {
+    if (!me || allowedTabs.length === 0) return;
+    if (!allowedTabs.includes(tab)) {
+      navigate(allowedTabs.includes(DEFAULT_TAB) ? DEFAULT_TAB : allowedTabs[0]!, null, true);
+    }
+  }, [me, tab, allowedTabs]);
+
+  // An unknown or malformed path (/not-a-real-page, /overview/stray) renders
+  // the default page — so rewrite the address bar to match what is on screen,
+  // or a reload and a bookmark would disagree with it. Admin is excluded: it
+  // owns its own second segment and canonicalises that itself.
+  useEffect(() => {
+    if (!me || tab === 'admin') return;
+    if (window.location.pathname !== hrefFor(tab)) navigate(tab, null, true);
+  }, [me, tab, route.sub]);
+
+  // Opening a page part-scrolled is disorienting — the browser only restores a
+  // position for real navigations, and these are pushState.
+  useEffect(() => { window.scrollTo(0, 0); }, [tab, route.sub]);
 
   if (!authChecked) {
     return <div className="center-msg"><div className="spinner" />Loading…</div>;
@@ -332,7 +465,7 @@ export default function App() {
         <h1>Procurement Control Tower</h1>
         {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
         {dataCheckCount > 0 && (
-          <button className="hdr-chip" onClick={() => setTab('datacheck')} title="Open Data Quality">
+          <button className="hdr-chip" onClick={() => navigate('datacheck')} title="Open Data Quality">
             ⚠ Data Check ({dataCheckCount})
           </button>
         )}
@@ -400,17 +533,22 @@ export default function App() {
                       }, 0)
                     : 0;
                 return (
-                  <button
+                  // An anchor, not a button: the address bar now reflects the
+                  // page, so ctrl/cmd/middle-click should open it in a new tab
+                  // and "copy link" should produce something that works.
+                  <a
                     key={t.id}
+                    href={hrefFor(t.id)}
                     className="ni"
                     role="tab"
                     aria-selected={tab === t.id}
-                    onClick={() => setTab(t.id)}
+                    aria-current={tab === t.id ? 'page' : undefined}
+                    onClick={linkHandler(t.id)}
                   >
                     <span className="ic" aria-hidden="true">{t.icon}</span>
                     {t.label}
                     {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
-                  </button>
+                  </a>
                 );
               })}
             </div>
@@ -429,20 +567,24 @@ export default function App() {
             </p>
           </div>
         ) : tab === 'vendors' ? (
-          <VendorsTab onDrill={onDrill} />
+          <PageChunk><VendorsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'materials' ? (
-          <MaterialsTab onDrill={onDrill} />
+          <PageChunk><MaterialsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'coupa_src' ? (
-          <CoupaSourcingTab />
+          <PageChunk><CoupaSourcingTab /></PageChunk>
         ) : tab === 'coupa_inv' ? (
-          <CoupaInvoicesTab />
+          <PageChunk><CoupaInvoicesTab /></PageChunk>
         ) : tab === 'custom' ? (
-          <CustomTab onDrill={onDrill} />
+          <PageChunk><CustomTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'admin' ? (
-          <AdminTab
-            isAdmin={me.roles.includes('admin')}
-            canIngest={me.capabilities.includes('ingest')}
-          />
+          <PageChunk>
+            <AdminTab
+              isAdmin={me.roles.includes('admin')}
+              canIngest={me.capabilities.includes('ingest')}
+              section={route.sub}
+              onSection={(id) => navigate('admin', id)}
+            />
+          </PageChunk>
         ) : tab === 'detail' ? (
           <DetailTable
             key={detailInit ? JSON.stringify(detailInit.params) : 'plain'}
@@ -546,7 +688,11 @@ export default function App() {
                         </div>
                       ))}
                       {shownCustomKpis.map((spec) => (
-                        <CustomKpiCard key={`cu-${spec.title}`} spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                        <Suspense key={`cu-${spec.title}`} fallback={null}>
+                          <Suspense fallback={null}>
+                      <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                    </Suspense>
+                        </Suspense>
                       ))}
                     </div>
                   );
@@ -574,7 +720,7 @@ export default function App() {
                         {wait !== null && wait !== undefined && (
                           <span className="act-wait">{waitLabel}: {formatNumber(Number(wait))} days</span>
                         )}
-                        <span className="act-go" onClick={(e) => { e.stopPropagation(); setTab('openitems'); }}>
+                        <span className="act-go" onClick={(e) => { e.stopPropagation(); navigate('openitems'); }}>
                           View Details →
                         </span>
                       </button>
@@ -669,7 +815,9 @@ export default function App() {
                       onClick={() => updateLayout((cur) => ({ ...cur, customCharts: cur.customCharts.filter((t) => t !== spec.title) }))}
                     >✕</button>
                   )}
-                  <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                  <Suspense fallback={null}>
+                    <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                  </Suspense>
                 </div>
               ))}
             </div>
@@ -706,7 +854,7 @@ export default function App() {
           onOpenDetail={(params, label) => {
             setDetailInit({ params, label });
             setDrill(null);
-            setTab('detail');
+            navigate('detail');
           }}
         />
       )}

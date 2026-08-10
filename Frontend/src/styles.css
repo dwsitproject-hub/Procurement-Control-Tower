@@ -337,6 +337,11 @@ table.dd-tbl th .dt-sort:hover { color: #dbe7ff; }
   border: 1px solid var(--border); border-radius: 6px; margin-bottom: .6rem; background: var(--bg);
 }
 .dt-chip { display: inline-flex; align-items: center; gap: .3rem; font-size: .78rem; white-space: nowrap; }
+/* An exclusion that is already applied: the value is absent from the data, so
+   it is listed from the saved configuration. Marked so it reads as "removed",
+   not as an ordinary unticked option. */
+.dt-chip-off { font-style: italic; opacity: .85; }
+.dt-chip-off > span { color: var(--bad, #b42318); }
 
 .dt-facets { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .6rem; }
 .dt-facet { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }

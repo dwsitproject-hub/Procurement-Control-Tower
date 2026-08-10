@@ -15,7 +15,12 @@ import { NotifyTab } from './NotifyTab';
  * recompute button rather than pretending.
  */
 
-interface Opt { value: string; count: number }
+/**
+ * `excluded`/`inData` exist because an excluded value has NO rows in the facts —
+ * it is listed from the saved configuration, and its count comes from staging:
+ * what would come back if it were re-included.
+ */
+interface Opt { value: string; count: number; excluded?: boolean; inData?: boolean }
 interface Exclusions { docTypes: string[]; purchGroups: string[]; purchOrgs: string[] }
 
 const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
@@ -150,17 +155,28 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         {current[key].length > 0 && <span className="dt-badge">{current[key].length}</span>}
       </summary>
       <div className="dt-facet-list">
-        {opts.map((o) => (
-          <label key={o.value} className="dt-chip">
-            <input
-              type="checkbox"
-              disabled={!isAdmin}
-              checked={current[key].includes(o.value)}
-              onChange={() => toggle(key, o.value)}
-            />
-            {o.value} <span className="muted">({formatNumber(o.count)} lines)</span>
-          </label>
-        ))}
+        {/* Excluded values first: they are the ones an admin comes here to undo,
+            and they are absent from the data so they would otherwise be lost
+            among values that are still present. */}
+        {[...opts].sort((a, b) => Number(b.excluded ?? false) - Number(a.excluded ?? false))
+          .map((o) => (
+            <label key={o.value} className={`dt-chip${o.inData === false ? ' dt-chip-off' : ''}`}>
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={current[key].includes(o.value)}
+                onChange={() => toggle(key, o.value)}
+              />
+              {o.value}{' '}
+              {o.inData === false ? (
+                <span className="muted">
+                  (excluded{o.count > 0 ? ` — ${formatNumber(o.count)} lines return if unticked` : ''})
+                </span>
+              ) : (
+                <span className="muted">({formatNumber(o.count)} lines)</span>
+              )}
+            </label>
+          ))}
       </div>
     </details>
   );
@@ -171,7 +187,9 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
       <p className="note" style={{ marginBottom: '.6rem' }}>
         Excluded document types, purchasing groups and orgs are removed from <strong>every</strong> view
         at the next recompute — KPIs, charts, drills and the detail table all agree because the rows
-        are never loaded into the facts. Staging keeps them for lineage.
+        are never loaded into the facts. Staging keeps them for lineage, so an exclusion is always
+        reversible: an already-excluded value stays listed here (in red, with how many lines would
+        come back), and untick → <em>Save</em> → <em>Recompute</em> restores it.
         {!isAdmin && ' Editing requires the admin role.'}
       </p>
       <div className="dt-facets">

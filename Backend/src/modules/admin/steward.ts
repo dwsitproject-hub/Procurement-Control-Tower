@@ -60,23 +60,96 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
   }
 }
 
-/** Options for the exclusion editor, drawn from the data itself. */
+export interface ExclusionOption {
+  value: string;
+  /** Lines in the published facts, or — for an excluded value — lines that
+   *  would come back if it were re-included. */
+  count: number;
+  /** Currently excluded, so it is absent from the facts by construction. */
+  excluded: boolean;
+  /** False when the count came from staging rather than the facts. */
+  inData: boolean;
+}
+
+/**
+ * Options for the exclusion editor.
+ *
+ * These CANNOT be drawn from the facts alone, which is what the first version
+ * did and why an exclusion could not be undone: excluded rows are never loaded
+ * into the facts, so after the recompute the value had zero fact rows,
+ * disappeared from this list, and the checkbox needed to clear it no longer
+ * existed. The setting erased its own control.
+ *
+ * So the list is the UNION of what is in the facts and what is currently
+ * excluded. Excluded values are counted from `staging.raw_row`, which keeps
+ * every source row of the batch behind this version — that count is the honest
+ * answer to the question an admin is actually asking, namely "how much comes
+ * back if I re-include this?".
+ *
+ * The `LIMIT 60` on the fact side is unchanged, and the union protects that
+ * too: an excluded value is always listed, even when it would rank below the
+ * cut.
+ */
 export async function exclusionOptions(versionId: number): Promise<{
-  docTypes: { value: string; count: number }[];
-  purchGroups: { value: string; count: number }[];
-  purchOrgs: { value: string; count: number }[];
+  docTypes: ExclusionOption[];
+  purchGroups: ExclusionOption[];
+  purchOrgs: ExclusionOption[];
 }> {
-  const q3 = async (col: string) =>
-    query<{ value: string; count: number }>(
+  const current = await loadExclusions();
+
+  // The batch this version was built from — its staging rows are pre-exclusion.
+  const ver = await queryOne<{ batch_id: string }>(
+    `SELECT batch_id FROM core.dataset_version WHERE id = $1`, [versionId],
+  );
+  const batchId = ver?.batch_id ?? null;
+
+  const build = async (
+    col: string, payloadKey: string, excluded: string[],
+  ): Promise<ExclusionOption[]> => {
+    const inFacts = await query<{ value: string; count: number }>(
       `SELECT ${col} AS value, count(*)::int AS count FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND ${col} IS NOT NULL AND ${col} <> ''
         GROUP BY 1 ORDER BY 2 DESC LIMIT 60`,
       [versionId],
     );
+
+    const out: ExclusionOption[] = inFacts.map((r) => ({
+      value: r.value,
+      count: r.count,
+      excluded: excluded.includes(r.value),
+      inData: true,
+    }));
+
+    // Anything excluded that the facts no longer contain. Saved-but-not-yet-
+    // recomputed exclusions are still in the facts and are already covered.
+    const missing = excluded.filter((v) => !out.some((o) => o.value === v));
+    if (missing.length === 0) return out;
+
+    // Count from staging. Best effort: staging rows are pruned with their
+    // batch, so an old exclusion may have nothing left to count — it is still
+    // listed, because being able to undo it matters more than the number.
+    const counts = new Map<string, number>();
+    if (batchId !== null) {
+      const rows = await query<{ value: string; count: number }>(
+        `SELECT payload->>'${payloadKey}' AS value, count(*)::int AS count
+           FROM staging.raw_row
+          WHERE batch_id = $1 AND feed = 'po' AND payload->>'${payloadKey}' = ANY($2)
+          GROUP BY 1`,
+        [batchId, missing],
+      );
+      for (const r of rows) counts.set(r.value, r.count);
+    }
+
+    for (const v of missing) {
+      out.push({ value: v, count: counts.get(v) ?? 0, excluded: true, inData: false });
+    }
+    return out;
+  };
+
   return {
-    docTypes: await q3('doc_type'),
-    purchGroups: await q3('purch_group'),
-    purchOrgs: await q3('purch_org'),
+    docTypes: await build('doc_type', 'docType', current.docTypes),
+    purchGroups: await build('purch_group', 'purchGroup', current.purchGroups),
+    purchOrgs: await build('purch_org', 'purchOrg', current.purchOrgs),
   };
 }
 

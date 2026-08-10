@@ -726,6 +726,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
          FROM ops.coupa_watermark ORDER BY object`,
     );
     const counts = await queryOne<Record<string, number>>(
+      // RAW tables on purpose, unlike the analytics endpoints below: this is the
+      // sync diagnostic. It answers "did the poller store what Coupa has", so it
+      // must report everything fetched — applying data exclusions here would
+      // make a working sync look like it had lost rows.
       `SELECT (SELECT count(*) FROM ops.coupa_sourcing_event)::int AS sourcing_events,
               (SELECT count(*) FROM ops.coupa_supplier_response)::int AS supplier_responses,
               (SELECT count(*) FROM ops.coupa_po_line)::int AS po_lines,
@@ -813,7 +817,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                 FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days,
               sum(planned_savings) FILTER (WHERE currency = 'IDR') AS planned_savings_idr,
               count(*) FILTER (WHERE planned_savings IS NOT NULL AND currency <> 'IDR')::int AS savings_other_ccy
-         FROM ops.coupa_sourcing_event WHERE state <> 'template'`,
+         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'`,
     );
     const [bids] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS responses,
@@ -826,7 +830,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const eventsByMonth = await query(
       `SELECT to_char(created_at,'YYYY-MM') AS mk, count(*)::int AS events,
               count(*) FILTER (WHERE state = 'complete')::int AS completed
-         FROM ops.coupa_sourcing_event
+         FROM ops.v_coupa_sourcing_event
         WHERE state <> 'template' AND created_at IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
@@ -884,39 +888,39 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(DISTINCT currency)::int AS currencies,
               avg((payment_date::date - invoice_date)::numeric)
                 FILTER (WHERE paid AND payment_date IS NOT NULL AND invoice_date IS NOT NULL) AS avg_days_to_pay
-         FROM ops.coupa_invoice`,
+         FROM ops.v_coupa_invoice`,
     );
     const [pay] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS payments,
               sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr,
               count(*) FILTER (WHERE p.sap_payment_doc IS NOT NULL)::int AS with_sap_doc
          FROM ops.coupa_payment p
-         JOIN ops.coupa_invoice i ON i.id = p.invoice_id`,
+         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id`,
     );
     const invoicesByMonth = await query(
       `SELECT to_char(invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
               count(*) FILTER (WHERE paid)::int AS paid,
               sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr
-         FROM ops.coupa_invoice WHERE invoice_date IS NOT NULL
+         FROM ops.v_coupa_invoice WHERE invoice_date IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
     const paymentsByMonth = await query(
       `SELECT to_char(p.payment_date,'YYYY-MM') AS mk, count(*)::int AS payments,
               sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr
          FROM ops.coupa_payment p
-         JOIN ops.coupa_invoice i ON i.id = p.invoice_id
+         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
         WHERE p.payment_date IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
     const statusMix = await query(
-      `SELECT status, count(*)::int AS n FROM ops.coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
+      `SELECT status, count(*)::int AS n FROM ops.v_coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
     );
     const topSuppliers = await query(
       `SELECT supplier_name, count(*)::int AS invoices,
               sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr,
               count(*) FILTER (WHERE paid)::int AS paid,
               count(*) FILTER (WHERE currency <> 'IDR')::int AS other_ccy
-         FROM ops.coupa_invoice
+         FROM ops.v_coupa_invoice
         WHERE supplier_name IS NOT NULL
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
     );
@@ -924,14 +928,14 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
               (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
-         FROM ops.coupa_invoice i
+         FROM ops.v_coupa_invoice i
         ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
     );
     const recentPayments = await query(
       `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc,
               i.invoice_number, i.supplier_name, i.currency
          FROM ops.coupa_payment p
-         JOIN ops.coupa_invoice i ON i.id = p.invoice_id
+         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
         ORDER BY p.payment_date DESC NULLS LAST LIMIT 50`,
     );
     const wm = await query(
@@ -951,7 +955,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*) FILTER (WHERE state = 'complete')::int AS completed,
               percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (end_time - submit_time))/86400.0)
                 FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days
-         FROM ops.coupa_sourcing_event WHERE state <> 'template'`,
+         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'`,
     );
     const [responses] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS responses,
@@ -965,7 +969,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft'))::int AS open_count,
               sum(gross_total) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft') AND currency = 'IDR') AS open_idr,
               count(DISTINCT currency)::int AS currencies
-         FROM ops.coupa_invoice`,
+         FROM ops.v_coupa_invoice`,
     );
     const [linkage] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS coupa_po_lines,
@@ -976,14 +980,14 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const recentEvents = await query(
       `SELECT id, event_type, state, description, submit_time, end_time, plant, purch_org, sap_pr_no,
               supplier_count, line_count
-         FROM ops.coupa_sourcing_event WHERE state <> 'template'
+         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'
         ORDER BY updated_at DESC NULLS LAST LIMIT 25`,
     );
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.currency, i.supplier_name, i.payment_term,
               (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
-         FROM ops.coupa_invoice i
+         FROM ops.v_coupa_invoice i
         ORDER BY i.updated_at DESC NULLS LAST LIMIT 25`,
     );
     const wm = await query(

@@ -62,9 +62,11 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
 
 export interface ExclusionOption {
   value: string;
-  /** Lines in the published facts, or — for an excluded value — lines that
-   *  would come back if it were re-included. */
+  /** PO lines + PR items — the total rows the value covers. */
   count: number;
+  /** Split of `count`, because the two feeds are separate populations. */
+  poLines: number;
+  prItems: number;
   /** Currently excluded, so it is absent from the facts by construction. */
   excluded: boolean;
   /** False when the count came from staging rather than the facts. */
@@ -104,18 +106,47 @@ export async function exclusionOptions(versionId: number): Promise<{
   const batchId = ver?.batch_id ?? null;
 
   const build = async (
-    col: string, payloadKey: string, excluded: string[],
+    col: string, payloadKey: string, excluded: string[], prCol: string | null,
   ): Promise<ExclusionOption[]> => {
-    const inFacts = await query<{ value: string; count: number }>(
-      `SELECT ${col} AS value, count(*)::int AS count FROM core.fact_po_line
-        WHERE dataset_version_id = $1 AND ${col} IS NOT NULL AND ${col} <> ''
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 60`,
+    /**
+     * Values come from the PR feed as well as the PO feed.
+     *
+     * Listing only PO lines meant a document type, purchasing group or org that
+     * appears exclusively on requisitions — anything not yet turned into an
+     * order — could not be excluded at all: it was simply absent from the
+     * editor. The requisition side is exactly where an exclusion matters most,
+     * since that is where the pipeline starts.
+     *
+     * The two counts stay separate rather than being added into one opaque
+     * number: they are different populations, and "12 PO lines · 4,300 PR
+     * items" tells an admin something that "4,312 rows" does not.
+     */
+    const inFacts = await query<{ value: string; po_lines: number; pr_items: number }>(
+      `WITH po AS (
+         SELECT ${col} AS value, count(*)::int AS n FROM core.fact_po_line
+          WHERE dataset_version_id = $1 AND ${col} IS NOT NULL AND ${col} <> ''
+          GROUP BY 1
+       ), pr AS (
+         ${prCol === null
+           ? `SELECT NULL::text AS value, 0::int AS n WHERE false`
+           : `SELECT ${prCol} AS value, count(*)::int AS n FROM core.fact_pr_item
+               WHERE dataset_version_id = $1 AND ${prCol} IS NOT NULL AND ${prCol} <> ''
+               GROUP BY 1`}
+       )
+       SELECT COALESCE(po.value, pr.value) AS value,
+              COALESCE(po.n, 0) AS po_lines,
+              COALESCE(pr.n, 0) AS pr_items
+         FROM po FULL OUTER JOIN pr ON pr.value = po.value
+        ORDER BY (COALESCE(po.n, 0) + COALESCE(pr.n, 0)) DESC
+        LIMIT 60`,
       [versionId],
     );
 
     const out: ExclusionOption[] = inFacts.map((r) => ({
       value: r.value,
-      count: r.count,
+      count: r.po_lines + r.pr_items,
+      poLines: r.po_lines,
+      prItems: r.pr_items,
       excluded: excluded.includes(r.value),
       inData: true,
     }));
@@ -128,28 +159,39 @@ export async function exclusionOptions(versionId: number): Promise<{
     // Count from staging. Best effort: staging rows are pruned with their
     // batch, so an old exclusion may have nothing left to count — it is still
     // listed, because being able to undo it matters more than the number.
-    const counts = new Map<string, number>();
+    const po = new Map<string, number>();
+    const pr = new Map<string, number>();
     if (batchId !== null) {
-      const rows = await query<{ value: string; count: number }>(
-        `SELECT payload->>'${payloadKey}' AS value, count(*)::int AS count
+      // Both feeds, so the "would return" figure covers the same populations
+      // the live counts do.
+      const rows = await query<{ feed: string; value: string; count: number }>(
+        `SELECT feed, payload->>'${payloadKey}' AS value, count(*)::int AS count
            FROM staging.raw_row
-          WHERE batch_id = $1 AND feed = 'po' AND payload->>'${payloadKey}' = ANY($2)
-          GROUP BY 1`,
-        [batchId, missing],
+          WHERE batch_id = $1 AND feed = ANY($2::text[])
+            AND payload->>'${payloadKey}' = ANY($3)
+          GROUP BY 1, 2`,
+        [batchId, prCol === null ? ['po'] : ['po', 'pr'], missing],
       );
-      for (const r of rows) counts.set(r.value, r.count);
+      for (const r of rows) (r.feed === 'pr' ? pr : po).set(r.value, r.count);
     }
 
     for (const v of missing) {
-      out.push({ value: v, count: counts.get(v) ?? 0, excluded: true, inData: false });
+      const poN = po.get(v) ?? 0;
+      const prN = pr.get(v) ?? 0;
+      out.push({
+        value: v, count: poN + prN, poLines: poN, prItems: prN,
+        excluded: true, inData: false,
+      });
     }
     return out;
   };
 
   return {
-    docTypes: await build('doc_type', 'docType', current.docTypes),
-    purchGroups: await build('purch_group', 'purchGroup', current.purchGroups),
-    purchOrgs: await build('purch_org', 'purchOrg', current.purchOrgs),
+    // The PR feed carries its own Document Type, Purchasing Group and
+    // Purch. organization columns, so all three dimensions read both feeds.
+    docTypes: await build('doc_type', 'docType', current.docTypes, 'doc_type'),
+    purchGroups: await build('purch_group', 'purchGroup', current.purchGroups, 'purch_group'),
+    purchOrgs: await build('purch_org', 'purchOrg', current.purchOrgs, 'purch_org'),
   };
 }
 

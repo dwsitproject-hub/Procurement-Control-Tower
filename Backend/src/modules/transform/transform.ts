@@ -100,6 +100,9 @@ export interface TransformMetrics {
   unratedCurrencies: string[];
   excludedPoLines: number;
   excludedPrItems: number;
+  /** Approval steps dropped with their excluded requisition / order. */
+  excludedPrReleaseRows: number;
+  excludedPoReleaseRows: number;
   /** PO lines whose FX period came from a Coupa invoice date (basis rule). */
   invoiceDatedFxLines: number;
   /** Shared FX pair store (010): pair-months in use per source. */
@@ -157,6 +160,24 @@ export async function runTransform(
   let excludedPoLines = 0;
   let excludedPrItems = 0;
   const excludedPoKeys = new Set<string>();
+  const excludedPrKeys = new Set<string>();
+  /**
+   * Header-level bookkeeping for the release feeds, which are keyed by document
+   * rather than by line.
+   *
+   * Doc type, purchasing group and purchasing org are all PO HEADER attributes
+   * in SAP (EKKO), repeated on every line of the export — so in practice every
+   * line of a document shares the exclusion verdict. `kept` is still tracked
+   * rather than assumed: if an export ever disagrees with itself, a document
+   * with even one surviving line keeps its approval steps, which errs towards
+   * showing data rather than silently dropping approvals.
+   */
+  const excludedPoNos = new Set<string>();
+  const keptPoNos = new Set<string>();
+  const excludedPrNos = new Set<string>();
+  const keptPrNos = new Set<string>();
+  /** [kind, docNo, docItem, reason] — persisted for the Coupa store (014). */
+  const excludedDocRows: unknown[][] = [];
 
   const stoSuffix = rules['sto.doctype_suffix'] as string;
   const fxPolicy = rules['fx.policy'] as FxPolicy;
@@ -383,15 +404,18 @@ export async function runTransform(
 
     const docType = s(p.docType);
 
-    if (
-      (docType !== null && exDocTypes.has(docType)) ||
-      exPurchGroups.has(s(p.purchGroup) ?? '') ||
-      exPurchOrgs.has(s(p.purchOrg) ?? '')
-    ) {
+    const poExclusion = docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
+      : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+        : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+          : null;
+    if (poExclusion !== null) {
       excludedPoLines += 1;
       excludedPoKeys.add(key);
+      excludedPoNos.add(poNo);
+      excludedDocRows.push(['po', poNo, poItem, poExclusion]);
       continue;
     }
+    keptPoNos.add(poNo);
 
     const sto = isSto(docType, stoSuffix);
     if (sto) {
@@ -592,10 +616,23 @@ export async function runTransform(
     if (prNo === null || prItem === null) continue;
     const key = `${prNo}|${prItem}`;
 
-    if (exPurchGroups.has(s(p.purchGroup) ?? '') || exPurchOrgs.has(s(p.purchOrg) ?? '')) {
+    // Document type is tested here too. The PR export carries its own Document
+    // Type column, and excluding a type used to drop only the PO lines while
+    // every requisition of that type stayed on the PR, Open Items and
+    // Governance pages — so the same setting produced two different scopes.
+    const prDocType = s(p.docType);
+    const prExclusion = prDocType !== null && exDocTypes.has(prDocType) ? `doc_type=${prDocType}`
+      : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+        : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+          : null;
+    if (prExclusion !== null) {
       excludedPrItems += 1;
+      excludedPrKeys.add(key);
+      excludedPrNos.add(prNo);
+      excludedDocRows.push(['pr', prNo, prItem, prExclusion]);
       continue;
     }
+    keptPrNos.add(prNo);
 
     const appr = derivePrApproval(releaseByPrItem.get(key) ?? []);
     const deleted = (s(p.deletionIndicator) ?? '').toLowerCase() === 'true';
@@ -722,8 +759,42 @@ export async function runTransform(
   // ── release facts ──
   const prRelRows: unknown[][] = [];
   const seenPrRel = new Set<string>();
+  let excludedPrRelRows = 0;
   for (const r of filled.rows) {
     if (r.prNo === null || r.prItem === null || r.relSeq === null) continue;
+
+    // Approval steps of an excluded requisition must go with it. Without this
+    // the release facts kept every step, so an excluded purchasing group still
+    // appeared in Pending PR Approvals, the approver-bottleneck table and the
+    // approval cycle times — the exclusion was honoured everywhere except the
+    // pages built from this feed.
+    //
+    // Second clause: a release row whose requisition is absent from the PR feed
+    // entirely (the two exports need not cover the same window) is judged on
+    // its own columns instead. This feed carries no purchasing group, so only
+    // document type and purchasing org can be tested.
+    if (
+      // (a) this exact requisition item was excluded
+      excludedPrKeys.has(`${r.prNo}|${r.prItem}`)
+      // (b) the requisition was excluded and NO item of it survived. Needed
+      // because the two exports do not agree on item numbers: 189 of the
+      // reference PRs carry approval steps against item numbers absent from
+      // the PR export, so matching on the exact item left 378 approval steps
+      // behind for a requisition that had been fully excluded.
+      || (excludedPrNos.has(r.prNo) && !keptPrNos.has(r.prNo))
+      // (c) the requisition is unknown to the PR export — judge it on its own
+      // columns. This feed carries no purchasing group, so only document type
+      // and purchasing org can be tested.
+      || (
+        !keptPrNos.has(r.prNo) && !excludedPrNos.has(r.prNo)
+        && ((r.docType !== null && exDocTypes.has(r.docType))
+          || exPurchOrgs.has(r.purchOrg ?? ''))
+      )
+    ) {
+      excludedPrRelRows += 1;
+      continue;
+    }
+
     const k = `${r.prNo}|${r.prItem}|${r.relSeq}`;
     if (seenPrRel.has(k)) continue; // guard against duplicate keys after fill
     seenPrRel.add(k);
@@ -750,12 +821,28 @@ export async function runTransform(
 
   const poRelRows: unknown[][] = [];
   const seenPoRel = new Set<string>();
+  let excludedPoRelRows = 0;
   for (const r of porRows) {
     const p = r.payload;
     const poNo = s(p.poNo);
     const relSeq = i(p.relSeq);
     const relCode = s(p.relCode);
     if (poNo === null || relSeq === null || relCode === null) continue;
+
+    // Same reasoning as the PR release feed: drop the approval steps of an
+    // excluded order. A document is only dropped when NO line of it survived,
+    // and one absent from the PO feed is judged on its own purchasing org (the
+    // only exclusion attribute this export carries).
+    if (
+      (excludedPoNos.has(poNo) && !keptPoNos.has(poNo))
+      || (
+        !keptPoNos.has(poNo) && !excludedPoNos.has(poNo)
+        && exPurchOrgs.has(s(p.purchOrg) ?? '')
+      )
+    ) {
+      excludedPoRelRows += 1;
+      continue;
+    }
     const k = `${poNo}|${relSeq}|${relCode}`;
     if (seenPoRel.has(k)) continue;
     seenPoRel.add(k);
@@ -817,6 +904,18 @@ export async function runTransform(
   await insertMany(client, 'core.fact_pr_release', PREL_COLS, prRelRows);
   await insertMany(client, 'core.fact_po_release', POR_COLS, poRelRows);
   await insertMany(client, 'core.bridge_pr_po', BRIDGE_COLS, bridgeRows);
+
+  // What the exclusion config dropped (014). The Coupa store is polled
+  // continuously and is not rebuilt per version, so its invoice and payment
+  // queries cannot re-derive this — they read it from here. Writing it in the
+  // same transaction as the facts keeps the two consistent.
+  if (excludedDocRows.length > 0) {
+    await insertMany(
+      client, 'core.excluded_doc',
+      ['dataset_version_id', 'kind', 'doc_no', 'doc_item', 'reason'],
+      excludedDocRows.map((r) => [versionId, ...r]),
+    );
+  }
 
   // Derived columns that need the facts in place: sourcing days and retro POs.
   await client.query(
@@ -943,6 +1042,8 @@ export async function runTransform(
     unratedCurrencies: [...unrated],
     excludedPoLines,
     excludedPrItems,
+    excludedPrReleaseRows: excludedPrRelRows,
+    excludedPoReleaseRows: excludedPoRelRows,
     invoiceDatedFxLines: invoiceDatedLines,
     fxSourceSap: fx.sourceCounts.sap,
     fxSourceCoupa: fx.sourceCounts.coupa,

@@ -161,7 +161,26 @@ const FILTERS: Record<string, Compiler> = {
     v === null ? `${a}.material_category IS NULL` : `${a}.material_category = ${p(ps, String(v))}`,
   prNoPo: (_v, a) => `${a}.po_line_count = 0`,
   hasPo: (_v, a) => `${a}.po_line_count > 0`,
-  hasPr: (_v, a) => `${a}.pr_no IS NOT NULL`,
+  /**
+   * "This PO line has a requisition **in this version's facts**" — an EXISTS,
+   * not `pr_no IS NOT NULL`.
+   *
+   * Every chart using this filter reaches the PR item by an inner join (E2E
+   * needs the requisition date), so a reference alone is not what the aggregate
+   * counted. The two agreed on the reference data by luck — the PO lines whose
+   * requisition is missing from the PR export (V-R03) happen to have no receipt,
+   * so they fell out of the E2E population anyway.
+   *
+   * A data exclusion breaks that luck: excluding a purchasing org drops PR items
+   * whose PO lines belong to a different org and survive, and those lines then
+   * carry a pr_no that resolves to nothing. The chart dropped them, the drill
+   * kept them, and e2e_by_category reported 18 buckets where the drill returned
+   * more rows than the bar counted. Testing existence makes the predicate mean
+   * what the SQL means, under exclusions and without them.
+   */
+  hasPr: (_v, a) => `EXISTS (SELECT 1 FROM core.fact_pr_item _hp
+                              WHERE _hp.dataset_version_id = ${a}.dataset_version_id
+                                AND _hp.pr_no = ${a}.pr_no AND _hp.pr_item = ${a}.pr_item)`,
   unreleased: (_v, a) => `${a}.release_final_date IS NULL`,
   released: (_v, a) => `${a}.release_final_date IS NOT NULL`,
   purchOrg: (v, a, ps) => `${a}.purch_org = ${p(ps, String(v))}`,

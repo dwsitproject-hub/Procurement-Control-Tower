@@ -20,7 +20,14 @@ import { NotifyTab } from './NotifyTab';
  * it is listed from the saved configuration, and its count comes from staging:
  * what would come back if it were re-included.
  */
-interface Opt { value: string; count: number; excluded?: boolean; inData?: boolean }
+interface Opt {
+  value: string;
+  count: number;
+  poLines?: number;
+  prItems?: number;
+  excluded?: boolean;
+  inData?: boolean;
+}
 interface Exclusions { docTypes: string[]; purchGroups: string[]; purchOrgs: string[] }
 
 const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
@@ -103,6 +110,18 @@ export function AdminTab({ isAdmin, canIngest, section, onSection }: {
 
 // ────────────────────────────────────────────────────────────── exclusions
 
+/**
+ * "12 PO lines · 4,300 PR items" rather than one combined figure: they are
+ * separate populations, and the requisition count is often the larger of the
+ * two — which is the whole reason the PR feed had to be read here.
+ */
+function rowSplit(o: Opt): string {
+  const parts: string[] = [];
+  if ((o.poLines ?? 0) > 0) parts.push(`${formatNumber(o.poLines!)} PO lines`);
+  if ((o.prItems ?? 0) > 0) parts.push(`${formatNumber(o.prItems!)} PR items`);
+  return parts.length > 0 ? parts.join(' · ') : `${formatNumber(o.count)} rows`;
+}
+
 function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [current, setCurrent] = useState<Exclusions | null>(null);
   const [options, setOptions] = useState<{ docTypes: Opt[]; purchGroups: Opt[]; purchOrgs: Opt[] } | null>(null);
@@ -132,35 +151,48 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     setDirty(true);
   };
 
-  const save = async () => {
+  /**
+   * Save AND recompute, in one action.
+   *
+   * These were two buttons, which made the destructive half optional: saving
+   * alone changed the stored configuration while every page kept serving the
+   * previous scope, so the panel and the dashboard disagreed until someone
+   * remembered the second button. An exclusion is only real once the facts are
+   * rebuilt, so the two steps are now one.
+   */
+  const saveAndRecompute = async () => {
     setBusy('saving');
     setMsg(null);
     try {
       await api.put('/api/v1/admin/exclusions', current);
       setDirty(false);
-      setMsg('Saved. Run a recompute to apply — until then every view still shows the previous scope.');
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'save failed');
-    } finally {
       setBusy(null);
+      return;
     }
-  };
 
-  const recompute = async () => {
     setBusy('recompute');
-    setMsg('Recomputing — re-reading the share folder and rebuilding all facts…');
+    setMsg('Saved. Rebuilding every fact from the source files — this takes a minute…');
     try {
       // force: exclusion changes alter the transform's behaviour while the
       // source files stay byte-identical, so the bundle-hash no-op must be
       // bypassed.
-      const out = await api.post<{ outcome: string }>('/api/v1/ingest/sync', { force: true });
+      const out = await api.post<{ outcome: string; datasetVersionId?: number }>(
+        '/api/v1/ingest/sync', { force: true },
+      );
       setMsg(
         out.outcome === 'published'
-          ? 'Recompute complete — reload the page to see the new dataset version.'
-          : `Recompute outcome: ${out.outcome}`,
+          ? `Applied — dataset version ${out.datasetVersionId} published. Every page now uses the new scope; reload to see it.`
+          : out.outcome === 'source_unavailable'
+            ? 'Saved, but the source files could not be read, so nothing was rebuilt — the previous scope is still in force.'
+            : `Saved, but the rebuild reported "${out.outcome}" — the previous scope is still in force.`,
       );
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'recompute failed');
+      setMsg(
+        `Saved, but the rebuild failed (${e instanceof Error ? e.message : 'unknown error'}). `
+        + 'The previous scope is still in force; retry to apply.',
+      );
     } finally {
       setBusy(null);
     }
@@ -188,10 +220,10 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
               {o.value}{' '}
               {o.inData === false ? (
                 <span className="muted">
-                  (excluded{o.count > 0 ? ` — ${formatNumber(o.count)} lines return if unticked` : ''})
+                  (excluded{o.count > 0 ? ` — ${rowSplit(o)} return if unticked` : ''})
                 </span>
               ) : (
-                <span className="muted">({formatNumber(o.count)} lines)</span>
+                <span className="muted">({rowSplit(o)})</span>
               )}
             </label>
           ))}
@@ -203,11 +235,13 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     <div className="panel">
       <h2>🎛 Data exclusions</h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
-        Excluded document types, purchasing groups and orgs are removed from <strong>every</strong> view
-        at the next recompute — KPIs, charts, drills and the detail table all agree because the rows
-        are never loaded into the facts. Staging keeps them for lineage, so an exclusion is always
-        reversible: an already-excluded value stays listed here (in red, with how many lines would
-        come back), and untick → <em>Save</em> → <em>Recompute</em> restores it.
+        Excluded document types, purchasing groups and orgs are removed from <strong>every</strong>
+        stage — requisitions, approval steps (AR), sourcing, orders,
+        goods receipts, and Coupa invoices and payments. Saving rebuilds the facts, so KPIs,
+        charts, drills and the detail table all agree by construction rather than by filtering.
+        Staging keeps the rows for lineage, so an exclusion is always reversible: an
+        already-excluded value stays listed here in red with how many rows would come back, and
+        unticking it restores them on the next save.
         {!isAdmin && ' Editing requires the admin role.'}
       </p>
       <div className="dt-facets">
@@ -217,11 +251,16 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
       </div>
       {isAdmin && (
         <div className="dt-toolbar" style={{ marginTop: '.6rem' }}>
-          <button className="btn" style={{ width: 'auto' }} disabled={!dirty || busy !== null} onClick={() => void save()}>
-            {busy === 'saving' ? 'Saving…' : 'Save exclusions'}
-          </button>
-          <button className="dt-btn" disabled={busy !== null} onClick={() => void recompute()}>
-            {busy === 'recompute' ? 'Recomputing…' : 'Recompute now (re-ingest)'}
+          <button
+            className="btn"
+            style={{ width: 'auto' }}
+            disabled={!dirty || busy !== null}
+            onClick={() => void saveAndRecompute()}
+            title="Saves the selection and rebuilds every fact so the change takes effect"
+          >
+            {busy === 'saving' ? 'Saving…'
+              : busy === 'recompute' ? 'Rebuilding…'
+                : 'Save exclusions & recompute'}
           </button>
         </div>
       )}

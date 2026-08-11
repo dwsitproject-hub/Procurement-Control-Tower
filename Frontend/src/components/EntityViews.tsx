@@ -355,6 +355,54 @@ function VendorOtdBars({ onOpenVendor }: { onOpenVendor: (code: string) => void 
   );
 }
 
+/**
+ * Where this vendor's purchase orders are sent — the Coupa supplier master
+ * (payload doc §1.8), matched on the supplier number, which holds the same
+ * value as the SAP vendor code.
+ *
+ * Three states, all worth distinguishing: no Coupa record at all (the vendor
+ * was never onboarded there), a record with no PO email (onboarded but the
+ * address was never filled in — actionable), and an address. A blank field
+ * would read as a bug in all three.
+ */
+function SupplierContact({ code, supplier }: { code: string; supplier: any }) {
+  if (!supplier) {
+    return (
+      <p className="note vsup">
+        <span className="bs sl">no Coupa supplier</span>{' '}
+        <span className="muted">
+          No supplier in Coupa carries the number <code>{code}</code>, so there is no PO email
+          on file. Vendors are matched on the supplier number, which holds the SAP vendor code.
+        </span>
+      </p>
+    );
+  }
+  const held = supplier.onHold === true;
+  return (
+    <p className="note vsup">
+      <strong>📧 PO Email </strong>
+      {supplier.poEmail
+        ? <a href={`mailto:${supplier.poEmail}`}>{supplier.poEmail}</a>
+        : <span className="bs sa">not set in Coupa</span>}
+      {supplier.contactEmail && supplier.contactEmail !== supplier.poEmail && (
+        <span className="muted">
+          {' · '}contact <a href={`mailto:${supplier.contactEmail}`}>{supplier.contactEmail}</a>
+        </span>
+      )}
+      {supplier.poMethod && <span className="muted">{' · '}sent by {supplier.poMethod}</span>}
+      {supplier.status && (
+        <span className="muted">
+          {' · '}Coupa status <span className={`bs ${supplier.status === 'active' ? 'sd' : 'sl'}`}>{supplier.status}</span>
+        </span>
+      )}
+      {held && <span className="bs spdel" style={{ marginLeft: '.3rem' }}>on hold</span>}
+      {supplier.name && supplier.name !== undefined && (
+        <span className="muted">{' · '}as {supplier.name} in Coupa</span>
+      )}
+    </p>
+  );
+}
+
 export function VendorModal({
   code, onClose, onDrill,
 }: { code: string; onClose: () => void; onDrill: (t: string, l: string) => void }) {
@@ -385,6 +433,8 @@ export function VendorModal({
           {!d && !err && <div className="center-msg"><div className="spinner" />Loading…</div>}
           {d && (
             <>
+              <SupplierContact code={code} supplier={d.coupaSupplier} />
+
               {/* v1's 11 Vendor-360 bio KPIs */}
               <div className="ent-kpis">
                 <Bio label="Total Spending" value={d.bio.spendUsd === null ? `${DASH} (unrated ccy present)` : formatMoney(d.bio.spendUsd, 'USD')} />

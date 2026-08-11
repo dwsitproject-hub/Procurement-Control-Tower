@@ -259,10 +259,46 @@ export async function vendorDetail(
     params,
   );
 
+  /**
+   * The Coupa supplier record for this vendor (payload doc §1.8), matched on
+   * the supplier number, which carries the same value as the SAP vendor code.
+   *
+   * Deliberately a LEFT lookup that may find nothing: the supplier master is
+   * Coupa's, the vendor is SAP's, and a vendor that has never been onboarded in
+   * Coupa simply has no record. The popup then says the address is not on file
+   * rather than showing a blank field that reads like a bug.
+   *
+   * Not scoped by dataset version — supplier master data is current state, not
+   * a versioned fact, so it is read live like the rest of the Coupa store.
+   */
+  const supplier = await queryOne<{
+    number: string | null; name: string | null; status: string | null;
+    po_email: string | null; primary_contact_email: string | null;
+    po_method: string | null; on_hold: boolean | null; updated_at: string | null;
+  }>(
+    `SELECT number, COALESCE(display_name, name) AS name, status, po_email,
+            primary_contact_email, po_method, on_hold, updated_at::text
+       FROM ops.coupa_supplier
+      WHERE number = $1
+      ORDER BY updated_at DESC NULLS LAST
+      LIMIT 1`,
+    [vendorCode],
+  );
+
   const totalUnconverted = byCcy.reduce((s2, c) => s2 + c.unconv, 0);
   return {
     vendorCode,
     vendorName: bio.vendor_name,
+    coupaSupplier: supplier === null ? null : {
+      number: supplier.number,
+      name: supplier.name,
+      status: supplier.status,
+      poEmail: supplier.po_email,
+      contactEmail: supplier.primary_contact_email,
+      poMethod: supplier.po_method,
+      onHold: supplier.on_hold,
+      updatedAt: supplier.updated_at,
+    },
     bio: {
       firstSeen: bio.first_seen,
       lastSeen: bio.last_seen,

@@ -104,7 +104,11 @@ export const EnvSchema = z
       .string()
       .default(
         'core.sourcing.read core.sourcing.response.read core.purchase_order.read ' +
-          'core.inventory.receiving.read core.invoice.read core.pay.payments.read core.common.read',
+          'core.inventory.receiving.read core.invoice.read core.pay.payments.read ' +
+          // Supplier master (payload doc §1.8) — carries the PO email address
+          // shown in Vendor 360. Omitting it made /api/suppliers answer 403;
+          // the client is granted this scope, the app simply never asked.
+          'core.supplier.read core.common.read',
       ),
 
     SMTP_HOST: z.string().default('mailhog'),

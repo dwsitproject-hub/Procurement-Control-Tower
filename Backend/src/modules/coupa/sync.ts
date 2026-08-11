@@ -26,6 +26,10 @@ export const COUPA_OBJECTS = [
   'receiving_transactions',
   'invoices',
   'exchange_rates',
+  // Supplier master (payload doc §1.8) — master data rather than transactions,
+  // so it is small and changes rarely, but it carries the PO email address that
+  // Vendor 360 shows.
+  'suppliers',
 ] as const;
 export type CoupaObject = (typeof COUPA_OBJECTS)[number];
 
@@ -260,12 +264,45 @@ async function projectInvoices(rows: Row[]): Promise<number> {
   return count;
 }
 
+/**
+ * Supplier master — payload doc §1.8.
+ *
+ * `number` is the bridge to SAP: it holds the same value as the vendor code on
+ * a PO line, which is what lets Vendor 360 resolve a vendor to its Coupa
+ * record. `po-email` is where an order is actually dispatched and is NOT the
+ * same field as the primary contact's address, so both are kept.
+ */
+async function projectSuppliers(rows: Row[]): Promise<number> {
+  return upsert(
+    'ops.coupa_supplier',
+    ['id', 'number', 'name', 'display_name', 'status', 'po_email', 'po_method',
+     'primary_contact_email', 'payment_method', 'on_hold', 'website', 'created_at', 'updated_at'],
+    rows.map((r) => [
+      Number(r['id']),
+      s(r['number']),
+      s(r['name']),
+      s(r['display-name']),
+      s(r['status']),
+      s(r['po-email']),
+      s(r['po-method']),
+      s(obj(r['primary-contact'])['email']),
+      s(r['payment-method']),
+      b(r['on-hold']),
+      s(r['website']),
+      s(r['created-at']),
+      s(r['updated-at']),
+    ]),
+    'id',
+  );
+}
+
 const PROJECT: Record<CoupaObject, (rows: Row[]) => Promise<number>> = {
   quote_requests: projectQuoteRequests,
   purchase_orders: projectPurchaseOrders,
   receiving_transactions: projectReceipts,
   invoices: projectInvoices,
   exchange_rates: projectExchangeRates,
+  suppliers: projectSuppliers,
 };
 
 async function projectExchangeRates(rows: Row[]): Promise<number> {

@@ -375,6 +375,8 @@ export interface ObjectResult {
   pages: number;
   rowsUpserted: number;
   watermark: string | null;
+  /** Non-zero when the run stopped mid-window and the next one resumes there. */
+  resumeOffset?: number;
   error?: string;
 }
 
@@ -409,8 +411,8 @@ function minusMinutes(iso: string, minutes: number): string {
 }
 
 async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: number): Promise<ObjectResult> {
-  const wm = await queryOne<{ last_updated_at: string | null }>(
-    `SELECT last_updated_at::text FROM ops.coupa_watermark WHERE object = $1`,
+  const wm = await queryOne<{ last_updated_at: string | null; last_offset: number | null }>(
+    `SELECT last_updated_at::text, last_offset FROM ops.coupa_watermark WHERE object = $1`,
     [object],
   );
   const since = wm?.last_updated_at ? minusMinutes(wm.last_updated_at, lookbackMin) : null;
@@ -425,18 +427,41 @@ async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: n
     [object],
   );
 
-  let offset = 0;
+  /**
+   * Resume inside the current window rather than always restarting at 0.
+   *
+   * The page cap stops a cold run from blocking the poller, and the design was
+   * that the next tick continues from an advanced watermark. That assumption
+   * breaks when more rows share the window than one run can read: the newest
+   * row seen IS the stored watermark, so it cannot advance, and every
+   * subsequent run re-reads the identical 2,000 rows. The supplier master hit
+   * this exactly — a bulk update stamped thousands of suppliers within minutes,
+   * so 14,000 fetched rows produced 3,895 distinct ones and everything newer
+   * stayed unreachable.
+   */
+  const startOffset = Math.max(0, wm?.last_offset ?? 0);
+  let offset = startOffset;
   let pages = 0;
   let upserted = 0;
-  let maxUpdated: string | null = wm?.last_updated_at ?? null;
+  const startedAtWatermark = wm?.last_updated_at ?? null;
+  /**
+   * Compared as INSTANTS, not as strings. Postgres hands the watermark back as
+   * "2025-12-12 17:41:57+07" and Coupa sends "2025-12-12T17:41:57+07:00" — the
+   * same moment in two formats, never equal as text, and ordered by the byte
+   * value of ' ' against 'T' rather than by time. Both this maximum and the
+   * "did the watermark move" test below need real time comparison.
+   */
+  const startedMs = startedAtWatermark ? Date.parse(startedAtWatermark) : Number.NEGATIVE_INFINITY;
+  let maxUpdatedMs = startedMs;
+  let maxUpdated: string | null = startedAtWatermark;
+  /** Cleared when the source runs out of rows — the window is fully drained. */
+  let exhausted = false;
 
-  // Page cap keeps a cold first run from blocking the poller forever; the
-  // next tick resumes from the advanced watermark.
   const MAX_PAGES_PER_RUN = 40;
 
   while (pages < MAX_PAGES_PER_RUN) {
     const rows = await fetchPage(object, since, offset, pageLimit);
-    if (rows.length === 0) break;
+    if (rows.length === 0) { exhausted = true; break; }
     pages += 1;
     offset += rows.length;
 
@@ -445,23 +470,40 @@ async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: n
 
     for (const r of rows) {
       const u = s(r['updated-at']);
-      if (u && (maxUpdated === null || u > maxUpdated)) maxUpdated = u;
+      const ms = u ? Date.parse(u) : Number.NaN;
+      if (u && Number.isFinite(ms) && ms > maxUpdatedMs) {
+        maxUpdatedMs = ms;
+        maxUpdated = u;
+      }
     }
-    if (rows.length < pageLimit) break;
+    if (rows.length < pageLimit) { exhausted = true; break; }
   }
 
+  /**
+   * Where the next run starts. Zero in every case except the one that needs
+   * fixing: stopped at the cap AND the watermark did not move, so restarting
+   * would re-read the same rows. An advanced watermark changes `since` and
+   * therefore the result set, so the offset must not carry over.
+   */
+  const advanced = maxUpdatedMs > startedMs;
+  const nextOffset = exhausted || advanced ? 0 : offset;
+
   await query(
-    `INSERT INTO ops.coupa_watermark (object, last_updated_at, last_run_at, last_status, last_error, last_trigger, rows_upserted, runs)
-     VALUES ($1, $2, now(), 'ok', NULL, $3, $4, 1)
+    `INSERT INTO ops.coupa_watermark (object, last_updated_at, last_run_at, last_status, last_error, last_trigger, rows_upserted, runs, last_offset)
+     VALUES ($1, $2, now(), 'ok', NULL, $3, $4, 1, $5)
      ON CONFLICT (object) DO UPDATE SET
        last_updated_at = GREATEST(COALESCE(EXCLUDED.last_updated_at, ops.coupa_watermark.last_updated_at), ops.coupa_watermark.last_updated_at),
        last_run_at = now(), last_status = 'ok', last_error = NULL, last_trigger = EXCLUDED.last_trigger,
        rows_upserted = ops.coupa_watermark.rows_upserted + $4,
-       runs = ops.coupa_watermark.runs + 1`,
-    [object, maxUpdated, 'run', upserted],
+       runs = ops.coupa_watermark.runs + 1,
+       last_offset = EXCLUDED.last_offset`,
+    [object, maxUpdated, 'run', upserted, nextOffset],
   );
 
-  return { object, status: 'ok', pages, rowsUpserted: upserted, watermark: maxUpdated };
+  return {
+    object, status: 'ok', pages, rowsUpserted: upserted, watermark: maxUpdated,
+    resumeOffset: nextOffset,
+  };
 }
 
 /** True while a run holds the lock in THIS process — lets the API answer a

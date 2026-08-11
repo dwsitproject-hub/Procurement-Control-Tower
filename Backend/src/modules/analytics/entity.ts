@@ -24,6 +24,14 @@ function scoped(versionId: number, scope: readonly ScopeEntry[], alias: string):
 export interface VendorRow {
   vendorCode: string;
   vendorName: string;
+  /**
+   * Where this vendor's orders are sent — Coupa's supplier master, matched on
+   * the supplier number (payload doc §1.8). Null when the vendor has no Coupa
+   * record, or has one with no address filled in; the table distinguishes the
+   * two so a blank cell never has to be guessed at.
+   */
+  poEmail: string | null;
+  inCoupa: boolean;
   poCount: number;
   lineCount: number;
   spendUsd: number | null;
@@ -61,6 +69,7 @@ export async function vendorList(
     vendor_code: string; vendor_name: string; po_count: number; line_count: number;
     spend_usd: number | null; unconverted: number; materials: number; areas: number;
     otd_num: number; otd_den: number; avg_late: number | null; open_usd: number | null;
+    po_email: string | null; in_coupa: boolean;
   }>(
     `SELECT pol.vendor_code,
             max(pol.vendor_name) AS vendor_name,
@@ -75,8 +84,18 @@ export async function vendorList(
             count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL)::int AS otd_den,
             avg(pol.receipt_date - pol.delivery_date)
               FILTER (WHERE pol.receipt_date > pol.delivery_date) AS avg_late,
-            sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd
+            sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            -- Supplier master is current state, not a versioned fact, so it is
+            -- read live and joined per vendor. A LATERAL keeps it one row even
+            -- if the master ever holds duplicates of a number.
+            max(sup.po_email) AS po_email,
+            bool_or(sup.number IS NOT NULL) AS in_coupa
        FROM core.fact_po_line pol
+       LEFT JOIN LATERAL (
+         SELECT number, po_email FROM ops.coupa_supplier c
+          WHERE c.number = pol.vendor_code
+          ORDER BY c.updated_at DESC NULLS LAST LIMIT 1
+       ) sup ON true
       WHERE ${where}${searchSql} AND pol.vendor_code IS NOT NULL AND NOT pol.is_sto
       GROUP BY pol.vendor_code
       ORDER BY spend_usd DESC NULLS LAST
@@ -89,6 +108,8 @@ export async function vendorList(
     rows: rows.map((r) => ({
       vendorCode: r.vendor_code,
       vendorName: r.vendor_name,
+      poEmail: r.po_email,
+      inCoupa: r.in_coupa,
       poCount: r.po_count,
       lineCount: r.line_count,
       // Strict rule: if any line failed to convert, the USD total is incomplete
@@ -412,11 +433,33 @@ export async function vendorPivot(
     pageParams,
   );
 
-  const byVendor = new Map<string, { code: string; name: string | null; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean }>();
+  /**
+   * PO emails for the vendors on this page only — one small query rather than a
+   * join inside the month aggregation, which would have to be carried through
+   * every grouped row for no benefit.
+   */
+  const codes = [...new Set(rows.map((r) => r.code))];
+  const emails = new Map<string, string | null>();
+  const inCoupa = new Set<string>();
+  if (codes.length > 0) {
+    const sup = await query<{ number: string; po_email: string | null }>(
+      `SELECT DISTINCT ON (number) number, po_email FROM ops.coupa_supplier
+        WHERE number = ANY($1) ORDER BY number, updated_at DESC NULLS LAST`,
+      [codes],
+    );
+    for (const x of sup) { emails.set(x.number, x.po_email); inCoupa.add(x.number); }
+  }
+
+  const byVendor = new Map<string, { code: string; name: string | null; poEmail: string | null; inCoupa: boolean; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean }>();
   for (const r of rows) {
     let v = byVendor.get(r.code);
     if (!v) {
-      v = { code: r.code, name: r.name, byMonth: {}, total: 0, anyUnrated: false };
+      v = {
+        code: r.code, name: r.name,
+        poEmail: emails.get(r.code) ?? null,
+        inCoupa: inCoupa.has(r.code),
+        byMonth: {}, total: 0, anyUnrated: false,
+      };
       byVendor.set(r.code, v);
     }
     v.byMonth[r.mk] = r.unrated > 0 ? null : r.usd === null ? null : Number(r.usd);

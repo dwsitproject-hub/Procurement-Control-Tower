@@ -621,3 +621,7 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 /* Vendor 360: the Coupa supplier's PO email, above the bio cards. */
 .vsup { margin: 0 0 .5rem; padding: .45rem .6rem; background: var(--bg); border-radius: 6px; }
 .vsup a { font-weight: 650; }
+
+/* Vendor tables: the PO email column. Long addresses must not stretch the
+   table, so it truncates with the full value in the title attribute. */
+.ent-email { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

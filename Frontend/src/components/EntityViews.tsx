@@ -21,6 +21,10 @@ import { DASH, FLAG_META, formatDate, formatMoney, formatNumber, STATUS_PILL } f
 interface VendorRow {
   vendorCode: string;
   vendorName: string;
+  /** Coupa supplier master, matched on the supplier number (payload doc §1.8). */
+  poEmail: string | null;
+  /** Distinguishes "no Coupa record" from "record with no address". */
+  inCoupa: boolean;
   poCount: number;
   lineCount: number;
   spendUsd: number | null;
@@ -157,6 +161,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
               <tr>
                 <th className="num">No</th>
                 <th>Vendor</th><th>Code</th>
+                <th>PO Email</th>
                 <th style={{ textAlign: 'right' }}>POs</th>
                 <th style={{ textAlign: 'right' }}>Lines</th>
                 <th style={{ textAlign: 'right' }}>Spend USD</th>
@@ -177,6 +182,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
                   <td className="num muted">{page * pageSize + i + 1}</td>
                   <td>{r.vendorName}</td>
                   <td className="muted">{r.vendorCode}</td>
+                  <td className="ent-email"><PoEmailCell email={r.poEmail} inCoupa={r.inCoupa} /></td>
                   <td className="num">{formatNumber(r.poCount)}</td>
                   <td className="num">{formatNumber(r.lineCount)}</td>
                   <td className="num">
@@ -263,6 +269,7 @@ function VendorPivot({
           <thead>
             <tr>
               <th>Vendor / material (USD)</th>
+              <th>PO Email</th>
               {months.map((m) => <th key={m} style={{ textAlign: 'right' }}>{m}</th>)}
               <th style={{ textAlign: 'right' }}>Total</th>
             </tr>
@@ -280,11 +287,12 @@ function VendorPivot({
                     </button>
                     {r.anyUnrated && <span className="muted" title="Some lines have unrated currencies"> ⚠</span>}
                   </td>
+                  <td className="ent-email"><PoEmailCell email={r.poEmail ?? null} inCoupa={r.inCoupa === true} /></td>
                   {months.map((m) => <td key={m} className="num">{cell(r.byMonth[m])}</td>)}
                   <td className="num"><strong>{cell(r.total)}</strong></td>
                 </tr>
                 {expanded[r.code] === 'loading' && (
-                  <tr><td colSpan={months.length + 2} className="muted">Loading materials…</td></tr>
+                  <tr><td colSpan={months.length + 3} className="muted">Loading materials…</td></tr>
                 )}
                 {Array.isArray(expanded[r.code]) &&
                   (expanded[r.code] as Record<string, any>[]).map((m: any) => (
@@ -299,6 +307,7 @@ function VendorPivot({
                         </button>
                         {m.descr ? ` · ${m.descr}` : ''}
                       </td>
+                      <td />
                       {months.map((mk) => <td key={mk} className="num muted">{cell(m.byMonth[mk])}</td>)}
                       <td className="num muted">{cell(m.total)}</td>
                     </tr>
@@ -309,7 +318,7 @@ function VendorPivot({
           <tfoot>
             <tr>
               <td><strong>Grand total ({formatNumber(d.totalVendors)} vendors)</strong></td>
-              <td colSpan={months.length} />
+              <td colSpan={months.length + 1} />
               <td className="num"><strong>{d.grandTotalUsd === null ? `${DASH} (unrated ccy)` : cell(d.grandTotalUsd)}</strong></td>
             </tr>
           </tfoot>
@@ -353,6 +362,27 @@ function VendorOtdBars({ onOpenVendor }: { onOpenVendor: (code: string) => void 
       })}
     </>
   );
+}
+
+/**
+ * The PO email as a table cell.
+ *
+ * Three outcomes are distinguished rather than collapsed into a blank: an
+ * address (a mailto link), a Coupa record whose address was never filled in
+ * (actionable — someone should complete the master data), and no Coupa record
+ * at all (nothing to fix on this side; the vendor was never onboarded there).
+ */
+function PoEmailCell({ email, inCoupa }: { email: string | null; inCoupa: boolean }) {
+  if (email) {
+    return (
+      <a href={`mailto:${email}`} onClick={(e) => e.stopPropagation()} title="Send to this address">
+        {email}
+      </a>
+    );
+  }
+  return inCoupa
+    ? <span className="bs sa" title="This supplier exists in Coupa but has no PO email set">not set</span>
+    : <span className="muted" title="No Coupa supplier carries this vendor code">{DASH}</span>;
 }
 
 /**

@@ -138,12 +138,18 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   pr: [
     'pr_by_month', 'items_by_category', 'pr_approval_by_priority',
     'pr_approval_distribution', 'monthly_pr_no_po', 'pr_by_plant', 'wbs_by_plant',
+    // v1's Outstanding-PR family + demand shape and first-layer aging (7 Aug 2026).
+    'pr_items_by_area', 'pr_outstanding_by_company', 'pr_outstanding_by_porg',
+    'pr_outstanding_by_pgrp', 'pr_layer1_aging_by_priority',
   ],
   po: [
     'po_amount_by_area', 'po_amount_by_matcat', 'po_value_by_month', 'po_value_by_category',
     'po_by_plant', 'po_value_by_purch_org', 'po_value_by_pgrp', 'pr_status_by_pgrp',
     'sourcing_by_priority', 'po_approval_by_priority', 'po_approval_distribution',
     'sourcing_by_category', 'commitment_aging',
+    // v1's value-bracket and buyer-desk family (7 Aug 2026).
+    'po_bracket_value', 'po_bracket_count', 'po_issued_by', 'po_items_by_pgrp',
+    'po_count_by_category',
   ],
   delivery: [
     'delivery_ordered_vs_received', 'delivery_by_category', 'delivery_by_priority',

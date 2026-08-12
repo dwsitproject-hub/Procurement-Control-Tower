@@ -384,6 +384,67 @@ const FILTERS: Record<string, Compiler> = {
   areaIs: (v, a, ps) =>
     `COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${a}.plant), ${a}.plant) = ${p(ps, String(v))}`,
   foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
+
+  // ── v1's Outstanding-PR and PO-bracket families (7 Aug 2026) ────────────
+  /**
+   * v1's PR age brackets, verbatim including the Indonesian "sd" (s/d, "up to")
+   * in the labels the business uses: `< 7 · 8 sd 14 · 15 sd 21 · 22 sd 30 · > 31`.
+   * Boundaries are contiguous, so every whole day falls in exactly one bracket —
+   * and `aging_days` is already as-of-dated by the transform, so nothing here
+   * consults wall-clock time.
+   */
+  prAgeBracket: (v, a) => {
+    const k = String(v);
+    const c = a + '.aging_days';
+    if (k === '< 7') return `${c} IS NOT NULL AND ${c} <= 7`;
+    if (k === '8 sd 14') return `${c} BETWEEN 8 AND 14`;
+    if (k === '15 sd 21') return `${c} BETWEEN 15 AND 21`;
+    if (k === '22 sd 30') return `${c} BETWEEN 22 AND 30`;
+    if (k === '> 31') return `${c} >= 31`;
+    throw new Error(`unknown PR age bracket: ${k}`);
+  },
+  /** Layer-1 approval is measurable: both ends of the interval exist. */
+  l1Evaluable: (_v, a) => `${a}.release_l1_date IS NOT NULL AND ${a}.requisition_date IS NOT NULL`,
+  /**
+   * Head Office vs site UNIT, from the purchasing-group master (017). v1 derives
+   * this from the description on every render; the rule is precomputed in
+   * dim_purch_group so this is a lookup rather than a string test.
+   */
+  issuedBy: (v, a, ps) => {
+    const k = String(v);
+    if (k === 'Unassigned') return `(${a}.purch_group IS NULL OR ${a}.purch_group = '')`;
+    return `EXISTS (SELECT 1 FROM core.dim_purch_group _dg
+                     WHERE _dg.code = ${a}.purch_group AND _dg.is_ho = ${p(ps, k === 'HO')})`;
+  },
+  /**
+   * The PO DOCUMENT this line belongs to totals into the given value bracket.
+   *
+   * Brackets are a property of the document, not the line, so the predicate has
+   * to re-aggregate: v1 sums each document's IDR lines and brackets the total.
+   * Same population as the chart — IDR-currency lines that are neither STO nor
+   * deleted — or the drill would not match the bar.
+   */
+  poDocBracket: (v, a, ps) => {
+    const B: Record<string, [number, number | null]> = {
+      '0 - 5 JT': [0, 5e6],
+      '5 - 25 JT': [5e6, 25e6],
+      '25 - 100 JT': [25e6, 100e6],
+      '100 - 500 JT': [100e6, 500e6],
+      '>500 JT': [500e6, null],
+    };
+    const range = B[String(v)];
+    if (!range) throw new Error(`unknown PO value bracket: ${String(v)}`);
+    const [lo, hi] = range;
+    const upper = hi === null ? '' : ` AND _t.total < ${p(ps, hi)}`;
+    return `EXISTS (
+      SELECT 1 FROM (
+        SELECT sum(_pl.net_order_value) AS total
+          FROM core.fact_po_line _pl
+         WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+           AND _pl.po_no = ${a}.po_no
+           AND _pl.currency_code = 'IDR' AND NOT _pl.is_sto AND NOT _pl.is_deleted
+      ) _t WHERE _t.total > 0 AND _t.total >= ${p(ps, lo)}${upper})`;
+  },
   // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause
   // EXACTLY — a converted PR item's own status never reaches 'Delivered', so
   // the PR grain consults its PO lines. Any drift here would break the

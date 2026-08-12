@@ -1206,6 +1206,376 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
   },
+  // ── v1's Outstanding-PR family (ch-pr-outco / outpic / outporg) ──
+  //
+  // "Outstanding" is v1's word for an active requisition item that has not yet
+  // produced a PO — its `!deleted && !PO_No`, which is `po_line_count = 0` here.
+  {
+    chartId: 'pr_outstanding_by_company', seriesKey: 'items', seriesLabel: 'Outstanding PR items', unit: 'count',
+    sql: `SELECT company_code AS bucket_key, company_code AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('companyCode', company_code,'notDeleted',true,'prNoPo',true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_porg', seriesKey: 'items', seriesLabel: 'Outstanding PR items', unit: 'count',
+    sql: `SELECT purch_org AS bucket_key, purch_org AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchOrg', purch_org,'notDeleted',true,'prNoPo',true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '< 7', seriesLabel: '< 7', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','< 7')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '< 7'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '8 sd 14', seriesLabel: '8 sd 14', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','8 sd 14')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '8 sd 14'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '15 sd 21', seriesLabel: '15 sd 21', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','15 sd 21')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '15 sd 21'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '22 sd 30', seriesLabel: '22 sd 30', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','22 sd 30')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '22 sd 30'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '> 31', seriesLabel: '> 31', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','> 31')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '> 31'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-pr-area: every PR item by area, the shape of demand ──
+  {
+    chartId: 'pr_items_by_area', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
+    sql: `SELECT COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${PRI}.plant), ${PRI}.plant) AS bucket_key,
+                 COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${PRI}.plant), ${PRI}.plant) AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('areaIs', COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${PRI}.plant), ${PRI}.plant))) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-prl1: how long the FIRST approval layer takes ──
+  {
+    chartId: 'pr_layer1_aging_by_priority', seriesKey: 'days', seriesLabel: 'Layer-1 aging (days)', unit: 'days',
+    sql: `SELECT COALESCE(priority_label,'(none)') AS bucket_key,
+                 COALESCE(priority_label,'(none)') AS bucket_label,
+                 avg(release_l1_date - requisition_date)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('priorityLabel', min(priority_label),'l1Evaluable',true)) AS drill
+            FROM ${PRI}
+           WHERE dataset_version_id = $1 AND release_l1_date IS NOT NULL AND requisition_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  // ── v1's ch-po-brkval / ch-po-brkcnt: PO value brackets ──
+  //
+  // Brackets belong to the DOCUMENT, not the line: v1 sums each PO's IDR lines
+  // and brackets the total ("JT" = juta, million IDR). Restricted to
+  // IDR-currency lines exactly as v1 does, so the figure is a native-currency
+  // total and not an FX conversion.
+  //
+  // `value` is the metric the bar shows (billions of IDR, then document count);
+  // `row_count` is the LINES behind it, which is what the drill opens — the same
+  // entity-vs-row convention the PO Hold card uses.
+  {
+    chartId: 'po_bracket_value', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'idr',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'Amount in Local Currency' AS bucket_key,
+                  'Amount in Local Currency' AS bucket_label,
+                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 0 AND d.total < 5000000)::numeric AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 0 AND d.total < 5000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_count', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'count',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
+                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 0 AND d.total < 5000000) AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 0 AND d.total < 5000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_value', seriesKey: '5 - 25 JT', seriesLabel: '5 - 25 JT', unit: 'idr',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'Amount in Local Currency' AS bucket_key,
+                  'Amount in Local Currency' AS bucket_label,
+                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 5000000 AND d.total < 25000000)::numeric AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 5000000 AND d.total < 25000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_count', seriesKey: '5 - 25 JT', seriesLabel: '5 - 25 JT', unit: 'count',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
+                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 5000000 AND d.total < 25000000) AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 5000000 AND d.total < 25000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_value', seriesKey: '25 - 100 JT', seriesLabel: '25 - 100 JT', unit: 'idr',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'Amount in Local Currency' AS bucket_key,
+                  'Amount in Local Currency' AS bucket_label,
+                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 25000000 AND d.total < 100000000)::numeric AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 25000000 AND d.total < 100000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_count', seriesKey: '25 - 100 JT', seriesLabel: '25 - 100 JT', unit: 'count',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
+                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 25000000 AND d.total < 100000000) AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 25000000 AND d.total < 100000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_value', seriesKey: '100 - 500 JT', seriesLabel: '100 - 500 JT', unit: 'idr',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'Amount in Local Currency' AS bucket_key,
+                  'Amount in Local Currency' AS bucket_label,
+                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 100000000 AND d.total < 500000000)::numeric AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 100000000 AND d.total < 500000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_count', seriesKey: '100 - 500 JT', seriesLabel: '100 - 500 JT', unit: 'count',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
+                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 100000000 AND d.total < 500000000) AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 100000000 AND d.total < 500000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_value', seriesKey: '>500 JT', seriesLabel: '>500 JT', unit: 'idr',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'Amount in Local Currency' AS bucket_key,
+                  'Amount in Local Currency' AS bucket_label,
+                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 500000000)::numeric AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 500000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  {
+    chartId: 'po_bracket_count', seriesKey: '>500 JT', seriesLabel: '>500 JT', unit: 'count',
+    sql: `WITH docs AS (
+               SELECT po_no, sum(net_order_value) AS total
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted
+                GROUP BY 1 HAVING sum(net_order_value) > 0)
+           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
+                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 500000000) AS value,
+                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
+                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
+                      AND NOT l.is_sto AND NOT l.is_deleted
+                      AND d.total >= 500000000) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`,
+  },
+  // ── v1's ch-po-issued: Head Office desks vs site UNITs ──
+  {
+    chartId: 'po_issued_by', seriesKey: 'documents', seriesLabel: 'PO documents', unit: 'count',
+    // Documents, so a multi-line PO counts once; the drill opens its lines.
+    sql: `SELECT b.k AS bucket_key, b.k AS bucket_label,
+                 count(DISTINCT p.po_no)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('issuedBy', b.k,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} p
+            CROSS JOIN LATERAL (
+              SELECT CASE
+                       WHEN p.purch_group IS NULL OR p.purch_group = '' THEN 'Unassigned'
+                       WHEN EXISTS (SELECT 1 FROM core.dim_purch_group _d
+                                     WHERE _d.code = p.purch_group AND _d.is_ho) THEN 'HO'
+                       ELSE 'UNIT' END AS k) b
+           WHERE p.dataset_version_id = $1 AND NOT p.is_sto AND NOT p.is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-po-picitems: PO lines per buyer desk ──
+  {
+    chartId: 'po_items_by_pgrp', seriesKey: 'items', seriesLabel: 'PO line items', unit: 'count',
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${POL}.purch_group), NULLIF(${POL}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-po-catcnt: lines AND documents per material category ──
+  {
+    chartId: 'po_count_by_category', seriesKey: 'items', seriesLabel: 'PO line items', unit: 'count',
+    sql: `SELECT COALESCE(material_category,'(uncategorised)') AS bucket_key,
+                 COALESCE(material_category,'(uncategorised)') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'po_count_by_category', seriesKey: 'documents', seriesLabel: 'PO count', unit: 'count',
+    sql: `SELECT COALESCE(material_category,'(uncategorised)') AS bucket_key,
+                 COALESCE(material_category,'(uncategorised)') AS bucket_label,
+                 count(DISTINCT po_no)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
   // ── v1's ch-po-matval: PO Amount by Material Category ──
   {
     chartId: 'po_amount_by_matcat', seriesKey: 'value', seriesLabel: 'Amount (USD)', unit: 'usd',

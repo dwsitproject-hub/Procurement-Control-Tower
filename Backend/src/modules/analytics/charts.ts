@@ -119,6 +119,23 @@ export const CHART_META: ChartMeta[] = [
   { chartId: 'delivery_distribution',    title: 'Delivery LT distribution',         tab: 'delivery',  grain: 'po_line', unit: 'count' },
   { chartId: 'e2e_by_month',             title: 'End-to-end by month',              tab: 'delivery',  grain: 'po_line', unit: 'days' },
   { chartId: 'e2e_by_category',          title: 'Avg E2E by Material Category (days)',  tab: 'delivery',  grain: 'pr_item', unit: 'days' },
+
+  // ── v1's Outstanding-PR family (7 Aug 2026) ──
+  // "Outstanding" is v1's word for an active requisition that has not yet
+  // produced a PO, so these three describe the backlog that procurement still
+  // owes an order for.
+  { chartId: 'pr_outstanding_by_company', title: 'Outstanding PR Per Company',  tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['PR items with no PO · deleted excluded'] },
+  { chartId: 'pr_outstanding_by_porg',    title: 'Outstanding PR Per P. Org',   tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['PR items with no PO · deleted excluded'] },
+  { chartId: 'pr_outstanding_by_pgrp',    title: 'Outstanding PR By PIC',       tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['PR items with no PO · deleted excluded', 'PIC = the buyer desk (SAP purchasing group)', 'Stacked by age since the requisition date'] },
+  { chartId: 'pr_items_by_area',          title: 'PR Items by Area — share of demand', tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['Every PR item', 'Plants rolled up to areas'] },
+  { chartId: 'pr_layer1_aging_by_priority', title: 'Avg Layer-1 Aging by Priority (days)', tab: 'pr', grain: 'pr_item', unit: 'days', notes: ['Requisition date to the FIRST release level'] },
+
+  // ── v1's PO value-bracket and buyer-desk family (7 Aug 2026) ──
+  { chartId: 'po_bracket_value',      title: 'Bracket PO — Value of PO',   tab: 'po', grain: 'po_line', unit: 'idr', notes: ['Bracketed on the PO DOCUMENT total', 'IDR document-currency lines only', 'JT = juta / million IDR', 'Bars are billions of IDR; the drill opens the lines'] },
+  { chartId: 'po_bracket_count',      title: 'Bracket PO — # of PO',       tab: 'po', grain: 'po_line', unit: 'count', notes: ['Bracketed on the PO DOCUMENT total', 'IDR document-currency lines only', 'Counts documents — the drill opens their lines'] },
+  { chartId: 'po_issued_by',          title: 'PO Issued By',               tab: 'po', grain: 'po_line', unit: 'count', notes: ['HO vs site UNIT, from the purchasing-group master', 'Counts documents — the drill opens their lines'] },
+  { chartId: 'po_items_by_pgrp',      title: '# of PO Item Per PIC',       tab: 'po', grain: 'po_line', unit: 'count', notes: ['PIC = the buyer desk (SAP purchasing group)', 'STO and deleted lines excluded'] },
+  { chartId: 'po_count_by_category',  title: '# of PO Per Category',       tab: 'po', grain: 'po_line', unit: 'count', notes: ['Line items and distinct documents side by side', 'STO and deleted lines excluded'] },
 ];
 
 export const CHART_BY_ID = new Map(CHART_META.map((c) => [c.chartId, c]));

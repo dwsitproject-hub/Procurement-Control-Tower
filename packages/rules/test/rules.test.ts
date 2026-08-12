@@ -636,13 +636,21 @@ describe('material category and priority labels (ported from v1)', () => {
     expect(materialCategory('777', { '777': 'Chemical' })).toBe('Chemical');
   });
 
-  it('labels priority the way v1 does, and refuses to label urgency 0', () => {
-    expect(priorityLabel(1)).toBe('02-Urgent');
-    expect(priorityLabel(2)).toBe('03-Standard');
-    expect(priorityLabel(3)).toBe('04-Planned');
-    expect(priorityLabel(0)).toBe('01-Emergency');
-    // 104 reference items carry urgency 4, which v1's 4-entry array cannot label.
-    expect(priorityLabel(4)).toBeNull();
+  it('labels priority from v1s explicit urgency map, not by array index', () => {
+    // v1: {0:'04-Planned', 1:'01-Emergency', 2:'02-Urgent', 3:'03-Standard'}
+    // with everything else defaulting to '03-Standard'.
+    //
+    // This test previously asserted the array-index reading of that map, which
+    // is what the implementation did — so it locked in a one-step shift and,
+    // worst of all, urgency 0 (the LOWEST priority: 250 reference items) as
+    // "01-Emergency". Checked against v1 (19) on the reference export.
+    expect(priorityLabel(1)).toBe('01-Emergency');
+    expect(priorityLabel(2)).toBe('02-Urgent');
+    expect(priorityLabel(3)).toBe('03-Standard');
+    expect(priorityLabel(0)).toBe('04-Planned');
+    // Urgency 4 and up (96 reference items) fall back rather than vanish.
+    expect(priorityLabel(4)).toBe('03-Standard');
+    expect(priorityLabel(9)).toBe('03-Standard');
     expect(priorityLabel(null)).toBeNull();
   });
 

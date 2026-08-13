@@ -124,7 +124,20 @@ export async function localLogin(
             c.password_hash, c.failed_attempts, c.locked_until, c.mfa_enabled, c.expires_at
        FROM app.app_user u
        LEFT JOIN app.local_credential c ON c.user_id = u.id
-      WHERE u.email = $1 AND u.auth_method = 'local'`,
+      -- NOT gated on auth_method. That column records how an account was
+      -- PROVISIONED, not the only way it may sign in, and the requirement is two
+      -- routes in: Hub SSO or a password.
+      --
+      -- Gating on it broke the combination silently. An admin issued a password
+      -- for an account the Hub had created, the reset reported success, and every
+      -- attempt to use it came back "invalid email or password" because this
+      -- query could not see the row at all.
+      --
+      -- What authorises a password login is a CREDENTIAL, and only an admin can
+      -- create one. Without it password_hash is NULL, the verify below runs
+      -- against a dummy hash, and the attempt fails with the same message as any
+      -- other — so an SSO-only account still has no password to guess.
+      WHERE u.email = $1`,
     [email.trim().toLowerCase()],
   );
 

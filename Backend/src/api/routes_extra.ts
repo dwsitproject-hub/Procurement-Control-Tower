@@ -308,6 +308,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const users = await query(
       `SELECT u.id, u.email, u.display_name AS "displayName", u.department, u.job_role AS "jobRole",
               u.auth_method AS "authMethod", u.is_active AS "isActive",
+              -- Whether a PASSWORD sign-in is possible, which is not implied by
+              -- auth_method: a Hub-provisioned account gains one the moment an
+              -- admin issues it, and an admin needs to see that state.
+              EXISTS (SELECT 1 FROM app.local_credential lc WHERE lc.user_id = u.id) AS "hasPassword",
               u.must_change_password AS "mustChangePassword",
               u.last_login_at AS "lastLoginAt",
               (SELECT array_agg(ur.role_code ORDER BY ur.role_code)
@@ -390,8 +394,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.put('/api/v1/admin/users/:id', role('admin', async (req, res, ctx) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const id = req.params.id;
-    const target = await queryOne<{ id: string; email: string }>(
-      `SELECT id, email FROM app.app_user WHERE id = $1`, [id],
+    const target = await queryOne<{ id: string; email: string; auth_method: string }>(
+      `SELECT id, email, auth_method FROM app.app_user WHERE id = $1`, [id],
     );
     if (!target) throw new HttpProblem(404, 'not-found', 'No such user');
 
@@ -448,6 +452,11 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       );
       await query(`UPDATE app.app_user SET must_change_password = true WHERE id = $1`, [id]);
       detail['passwordReset'] = true;
+      // Worth recording explicitly: for a Hub-provisioned account this does not
+      // just rotate a password, it ADDS password sign-in to an account that had
+      // only SSO. The audit trail should show that decision rather than leave it
+      // to be inferred.
+      detail['passwordLoginEnabledFor'] = target.auth_method;
     }
 
     await recordAudit({

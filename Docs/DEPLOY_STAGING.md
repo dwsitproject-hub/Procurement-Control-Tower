@@ -559,28 +559,58 @@ from the server:
 nslookup test-pct.kpndomain.com
 ```
 
-### 8.2 Free port 80 on the FE server (172.28.92.56)
+### 8.2 Port 80 belongs to the host's nginx — proxy, do not take it
 
-The URL carries no port, so nginx has to answer on 80. Check nothing else holds
-it first — this is the one step that can break a working service:
+Checked on 172.28.92.56 (13 Aug 2026): port 80 is held by a **package-installed
+nginx**, serving its default "Welcome to nginx!" page.
 
 ```bash
-ss -ltnp | grep -w ':80' || echo 'port 80 is free'
+ss -ltnp | grep -w ':80'
+# LISTEN [::]:80  users:(("nginx",pid=954429,...),("nginx",pid=954428,...))
 ```
 
-If something is listening, decide what it is before continuing. If it is free:
+Those are nginx worker processes, not `docker-proxy`, so this is the host's own
+nginx rather than a container. **This server also runs klip, slms, eos and
+others** — that nginx is the shared front door for them, so stopping it or
+taking its port would break applications that have nothing to do with this one.
+
+So the dashboard stays on 3050 and the subdomain reaches it through a vhost.
+See first what the host nginx already serves, so the new file cannot collide:
+
+```bash
+nginx -v && systemctl is-enabled nginx
+ls /etc/nginx/conf.d/ /etc/nginx/sites-enabled/ 2>/dev/null
+nginx -T 2>/dev/null | grep -E 'server_name|listen ' | head -40
+```
+
+Then install the vhost from the repo — it is written to be additive, with no
+`default_server`, so an unknown Host keeps reaching whatever answered before:
 
 ```bash
 cd /opt/pct/src && git pull
+cp deploy/nginx/host-vhost-test-pct.conf /etc/nginx/conf.d/test-pct.conf
+nginx -t
+systemctl reload nginx
+```
+
+`nginx -t` before the reload is not optional: a syntax error in a shared nginx
+takes every other site on the host down with it.
+
+Make sure the container is up on 3050 (it should already be):
+
+```bash
+cd /opt/pct
 cp src/deploy/staging/fe.compose.yml compose.yml
 cp src/deploy/nginx/staging.conf staging.conf
 docker compose -f compose.yml up -d
-docker compose -f compose.yml ps
+curl -s -o /dev/null -w 'container direct: %{http_code}
+' http://127.0.0.1:3050/
 ```
 
-The compose file now publishes **both 80 and 3050**. That is deliberate: the IP
-URL and existing bookmarks keep working, so there is a way in if DNS has not
-propagated. Drop the 3050 line once the subdomain is the only entry point.
+> **Why the vhost sets `client_max_body_size 210m`.** The SAP upload posts six
+> files of up to 60 MB. nginx defaults to 1 MB, and the outer proxy rejects the
+> request with a 413 long before the container's own 210m limit is consulted —
+> so the limit has to be raised in BOTH places.
 
 ### 8.3 Tell the backend where it lives (172.28.92.57)
 
@@ -606,7 +636,9 @@ curl -s -o /dev/null -w 'api %{http_code}
 ```
 
 Expect `200`, `200`, `401`. The 401 is correct — the API is reachable and
-refusing an unauthenticated call. Then sign in through the browser and confirm
+refusing an unauthenticated call. If the root returns the nginx welcome page
+instead, the request reached the host nginx but not the vhost: check
+`server_name` matches the hostname exactly and that `nginx -T` lists the file. Then sign in through the browser and confirm
 the session sticks across a page reload: that exercises the cookie, which is the
 part a hostname change breaks if `proxy_set_header Host $host` were missing (it
 is present).

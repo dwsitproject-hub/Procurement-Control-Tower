@@ -1,7 +1,8 @@
 # Staging FE server (172.28.92.56). Serves the SPA and reverse-proxies /api
 # and /auth to the BE server — single origin, so the session cookie stays
-# first-party. Published on :80 for http://test-pct.kpndomain.com, and still on
-# 3050 during the cutover (free on this host per the 5 Aug 2026 audit).
+# first-party. Published on 3050; the host's own nginx proxies
+# http://test-pct.kpndomain.com to it (that nginx owns :80 for every app on
+# this server).
 #
 # Required next to this file:
 #   staging.conf — the nginx config from deploy/nginx/staging.conf
@@ -17,9 +18,8 @@ services:
       # instead of a same-host api container.
       - ./staging.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      # :80 so http://test-pct.kpndomain.com needs no port suffix.
-      - "0.0.0.0:80:80"
-      # 3050 kept during the cutover: existing bookmarks and the IP URL keep
-      # working, and there is a way in if DNS is not resolving yet. Drop this
-      # line once the subdomain is the only entry point.
+      # 3050, NOT 80. Port 80 on this host belongs to a package-installed nginx
+      # that fronts the other applications sharing the server, so the subdomain
+      # reaches us through a vhost there rather than by taking the port —
+      # see Docs/DEPLOY_STAGING.md 8.2.
       - "0.0.0.0:3050:80"

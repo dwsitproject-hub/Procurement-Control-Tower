@@ -539,3 +539,101 @@ never rolls back — migrations are additive and dataset versions immutable.
   against production Coupa. Admin → FX rates shows the source per rate.
 - Coupa production credentials are over-scoped (TECH_04 §2) — keep staging on
   the kpn-test client until the read-only production client exists.
+
+---
+
+## 8. Put staging behind http://test-pct.kpndomain.com
+
+No rebuild is involved. The frontend calls the API with relative paths and the
+CSP is entirely `'self'`, so nothing in the bundle knows its own hostname — this
+is DNS, one published port, and three lines of config.
+
+### 8.1 DNS (infra)
+
+An **A record** `test-pct.kpndomain.com` → **172.28.92.56**. That is a private
+address, so it has to be the internal resolver; a public zone cannot answer for
+it usefully. Confirm from a machine that will actually use the dashboard, not
+from the server:
+
+```bash
+nslookup test-pct.kpndomain.com
+```
+
+### 8.2 Free port 80 on the FE server (172.28.92.56)
+
+The URL carries no port, so nginx has to answer on 80. Check nothing else holds
+it first — this is the one step that can break a working service:
+
+```bash
+ss -ltnp | grep -w ':80' || echo 'port 80 is free'
+```
+
+If something is listening, decide what it is before continuing. If it is free:
+
+```bash
+cd /opt/pct/src && git pull
+cp src/deploy/staging/fe.compose.yml compose.yml
+cp src/deploy/nginx/staging.conf staging.conf
+docker compose -f compose.yml up -d
+docker compose -f compose.yml ps
+```
+
+The compose file now publishes **both 80 and 3050**. That is deliberate: the IP
+URL and existing bookmarks keep working, so there is a way in if DNS has not
+propagated. Drop the 3050 line once the subdomain is the only entry point.
+
+### 8.3 Tell the backend where it lives (172.28.92.57)
+
+`APP_BASE_URL` is what the backend uses to build absolute links and the OIDC
+redirect, so it must match what the browser typed:
+
+```bash
+cd /opt/pct
+sed -i 's|^APP_BASE_URL=.*|APP_BASE_URL=http://test-pct.kpndomain.com|' staging.env
+grep APP_BASE_URL staging.env
+docker compose -f compose.yml up -d --force-recreate api
+```
+
+### 8.4 Verify
+
+```bash
+curl -s -o /dev/null -w 'root %{http_code}
+' http://test-pct.kpndomain.com/
+curl -s -o /dev/null -w 'deep link %{http_code}
+' http://test-pct.kpndomain.com/po-analysis
+curl -s -o /dev/null -w 'api %{http_code}
+' http://test-pct.kpndomain.com/api/v1/kpi
+```
+
+Expect `200`, `200`, `401`. The 401 is correct — the API is reachable and
+refusing an unauthenticated call. Then sign in through the browser and confirm
+the session sticks across a page reload: that exercises the cookie, which is the
+part a hostname change breaks if `proxy_set_header Host $host` were missing (it
+is present).
+
+Existing sessions do NOT carry over — cookies were issued for the old host, so
+everyone signs in once more.
+
+### 8.5 SSO, if and when it is enabled
+
+The redirect URI is matched **byte-exactly** by the Hub. Re-register it as
+`http://test-pct.kpndomain.com/auth/oidc/callback` and set `OIDC_REDIRECT_URI`
+to the same string. The old `172.28.92.56:3050` URI will fail with
+`invalid_grant` once `APP_BASE_URL` changes.
+
+### 8.6 The TLS question this raises
+
+A real hostname is the point at which HTTP stops being defensible: sessions and
+passwords cross the network in clear text. Worth planning now, because two
+settings are coupled to it and boot validation enforces both:
+
+| | Today (HTTP) | With TLS |
+|---|---|---|
+| `SESSION_COOKIE_SECURE` | `false` | `true` |
+| `NODE_ENV` | `development` | `production` |
+| `LOCAL_AUTH_REQUIRE_MFA` | `false` | **`true` — production refuses local auth without it** |
+
+So `NODE_ENV=production` is not a flag to flip on its own: it demands a
+certificate AND MFA enrolment for every local account, and it also stops the dev
+admin seed from running. Staging stays in development mode until those are in
+place, which is why the cookie is not Secure today.

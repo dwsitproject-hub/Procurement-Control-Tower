@@ -265,8 +265,14 @@ export function buildRouter(): Router {
       res.json({ userId: principal.userId, email: principal.email, displayName: principal.displayName });
     } catch (e) {
       if (e instanceof AuthError) {
-        const status = e.code === 'account-locked' ? 423 : 401;
-        throw new HttpProblem(status, e.code, 'Sign-in failed', 'Invalid email or password.');
+        // 'disabled' is only ever thrown AFTER the password verified, so its
+        // message is safe to pass through; 401 keeps one uniform sentence so a
+        // wrong password and an unknown user stay indistinguishable.
+        const status = e.code === 'account-locked' ? 423 : e.code === 'disabled' ? 403 : 401;
+        throw new HttpProblem(
+          status, e.code, 'Sign-in failed',
+          status === 401 ? 'Invalid email or password.' : e.message,
+        );
       }
       throw e;
     }

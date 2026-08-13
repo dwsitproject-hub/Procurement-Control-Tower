@@ -146,6 +146,29 @@ export async function localLogin(
     throw new AuthError('account-locked', 'account is temporarily locked');
   }
 
+  /**
+   * A correct password on a disabled account is NOT a credential failure, and
+   * saying "invalid email or password" for it sends the user to reset a
+   * password that was never the problem — exactly what happened after an admin
+   * reset the password of a deactivated account and the sign-in kept refusing
+   * it.
+   *
+   * Disclosing the real reason is safe HERE and only here: the caller has
+   * already proven they hold the credential, so naming the account state tells
+   * them nothing they could not confirm anyway. Wrong password and unknown user
+   * keep the single uniform message below, which is what stops enumeration.
+   *
+   * No failed-attempt is recorded either: the credential was right, and locking
+   * a disabled account out of a lockout counter helps nobody.
+   */
+  if (row && valid && !row.is_active) {
+    await recordAudit({
+      action: 'auth.login', actorUserId: row.id, actorEmail: email, outcome: 'denied',
+      detail: { method: 'local', reason: 'account-disabled' }, ip: req.ip,
+    });
+    throw new AuthError('disabled', 'this account is disabled — ask an administrator to re-enable it');
+  }
+
   if (!row || !valid || !row.is_active) {
     if (row) {
       const attempts = row.failed_attempts + 1;
@@ -166,7 +189,7 @@ export async function localLogin(
   }
 
   if (row.expires_at && row.expires_at < new Date().toISOString().slice(0, 10)) {
-    throw new AuthError('disabled', 'account has expired');
+    throw new AuthError('disabled', 'this account has expired — ask an administrator to extend it');
   }
 
   if (env.LOCAL_AUTH_REQUIRE_MFA && !row.mfa_enabled) {

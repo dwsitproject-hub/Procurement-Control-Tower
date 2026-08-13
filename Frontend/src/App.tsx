@@ -963,7 +963,12 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
       setError(
         err instanceof ApiError && err.status === 423
           ? 'Account temporarily locked after repeated failures.'
-          : 'Invalid email or password.',
+          // 403 means the credential was accepted and the ACCOUNT was refused —
+          // disabled or expired. Showing "invalid password" there sends people
+          // to reset a password that already works.
+          : err instanceof ApiError && err.status === 403
+            ? (err.problem.detail || 'This account cannot sign in — ask an administrator.')
+            : 'Invalid email or password.',
       );
     } finally {
       setBusy(false);

@@ -646,12 +646,76 @@ is present).
 Existing sessions do NOT carry over — cookies were issued for the old host, so
 everyone signs in once more.
 
-### 8.5 SSO, if and when it is enabled
+### 8.5 Enable DWS Hub SSO
 
-The redirect URI is matched **byte-exactly** by the Hub. Re-register it as
-`http://test-pct.kpndomain.com/auth/oidc/callback` and set `OIDC_REDIRECT_URI`
-to the same string. The old `172.28.92.56:3050` URI will fail with
-`invalid_grant` once `APP_BASE_URL` changes.
+The Hub runs on the SAME nginx as the dashboard —
+`test-dwshub.kpndomain.com`, found in that host's vhost list — so it is
+reachable from the BE server without any network change.
+
+**1. Confirm the discovery document FROM THE BE SERVER (172.28.92.57).** The
+backend performs the token exchange server-to-server, so the browser reaching
+the Hub proves nothing. Try both schemes; the vhost list shows the Hub on
+port 80, so plain HTTP is the likely answer:
+
+```bash
+for u in https://test-dwshub.kpndomain.com http://test-dwshub.kpndomain.com; do
+  printf '%s -> ' "$u"
+  curl -s -o /dev/null -w '%{http_code}
+' --max-time 8     "$u/api/sso/.well-known/openid-configuration"
+done
+```
+
+Whichever returns `200`, read it and keep the issuer and endpoints:
+
+```bash
+curl -s http://test-dwshub.kpndomain.com/api/sso/.well-known/openid-configuration | head -c 600
+```
+
+**2. Register the dashboard in the Hub** (Admin → Applications):
+
+| Field | Value |
+|---|---|
+| Redirect URI | `http://test-pct.kpndomain.com/auth/oidc/callback` |
+| Client type | **public / PKCE** — no client secret exists |
+
+The Hub matches the redirect URI **byte-exactly**: a trailing slash, `https`
+instead of `http`, or the old `172.28.92.56:3050` form all fail with
+`invalid_grant`. Note the `client_id` it assigns.
+
+**3. Fill the three variables** in `/opt/pct/staging.env` — all three or none,
+which boot validation enforces:
+
+```env
+OIDC_DISCOVERY_URL=http://test-dwshub.kpndomain.com/api/sso/.well-known/openid-configuration
+OIDC_CLIENT_ID=<the client_id the Hub assigned>
+OIDC_REDIRECT_URI=http://test-pct.kpndomain.com/auth/oidc/callback
+```
+
+```bash
+cd /opt/pct && docker compose -f compose.yml up -d --force-recreate api
+docker logs pct-api --tail 5 | grep -o 'sso=[a-z]*'
+```
+
+Expect `sso=configured`. While the Hub is unreachable or misconfigured the login
+page simply hides the SSO button and local credentials keep working, so a
+mistake here cannot lock anyone out.
+
+**4. The first SSO sign-in needs an admin afterwards.** A user arriving through
+the Hub is provisioned with the `viewer` role and **deliberately no data scope**
+(`app.data_scope` is left empty on purpose), so they will see *"No data access
+granted"* rather than the dashboard. That is the intended default — access is
+granted, never assumed. In Admin → Users, for that account:
+
+- **Grant all data** (or **Scope…** for specific company/plant/purchasing org), and
+- set their **Department** and **Role**, which is what the page-permission
+  matrix reads. With neither set, every page resolves to `none`.
+
+> **SSO over plain HTTP.** The authorization code and the returned ID token
+> cross the network in clear text. PKCE stops another application replaying the
+> code, but it does not hide the token from anyone watching the wire. This is
+> the same exposure as the password login today, and the same argument for
+> putting a certificate on `test-pct.kpndomain.com` before real users arrive
+> (see 8.6).
 
 ### 8.6 The TLS question this raises
 

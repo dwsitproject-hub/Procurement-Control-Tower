@@ -812,3 +812,131 @@ template: nothing read them, so the file claimed the scheduler was on while it
 was off. The enable flag, folders, patterns and times all live in `rule_config`
 and are edited in the panel, which is also why they take effect without a
 restart — the poller re-reads them every tick.
+
+---
+
+## 10. Unblocking the Synology NAS (Docker took the NAS's subnet)
+
+The share is unreachable from the BE server, and **not** because of a firewall.
+Evidence from 172.28.92.57 (7 Aug 2026):
+
+```
+ip route get 172.30.1.94
+  172.30.1.94 dev br-bd97d660ae6d src 172.30.0.1     <- a DOCKER BRIDGE
+docker network ls / inspect
+  project-management-v20_default   172.30.0.0/16     (bridge DOWN, no containers)
+```
+
+The NAS lives at **172.30.1.94**. Another application's Docker network claimed
+`172.30.0.0/16`, so the host believes that address is a local container and ARPs
+for it on the bridge instead of routing it. `nc` reports `No route to host`
+because the packets never leave the VM.
+
+Docker's default pools span 172.17–172.31, and it skips ranges that clash with
+an existing host ROUTE. There was no specific route to the NAS — it would have
+gone via the default gateway — so nothing stopped Docker taking that block.
+
+> **`172.28.0.0/16` is the only 172.x block still unclaimed on this host, and it
+> is the servers' own LAN.** The next network created is one allocation away
+> from cutting the box off from FE↔BE traffic and from PuTTY. Phase 3 is not
+> optional tidying.
+
+### Phase 1 — free the subnet (reversible, ~1 minute)
+
+The owning stack is **another application**. Its bridge is DOWN, so this is
+low-risk, but tell whoever owns `project-management-v20` first — Compose will
+recreate the network next time that stack starts.
+
+```bash
+docker network inspect project-management-v20_default \
+  --format 'attached: {{range .Containers}}{{.Name}} {{end}}'
+docker ps -a --filter network=project-management-v20_default --format '{{.Names}}\t{{.Status}}'
+```
+
+Only if nothing is attached:
+
+```bash
+docker network rm project-management-v20_default
+ip route get 172.30.1.94        # must NO LONGER name a br-* device
+nc -zv 172.30.1.94 445
+```
+
+`nc` succeeding means the collision was the whole problem. If it now reports a
+timeout rather than `No route to host`, the routing is fixed and a firewall is
+the remaining obstacle — that is an infra request, with much better evidence
+than before.
+
+### Phase 2 — mount the share read-only
+
+`/etc/smb-eos.creds` already holds `username=app-prj` and the NAS address; it is
+EOS's account, so confirm with IT that reusing it is acceptable, or ask for a
+`pct` account and point `credentials=` at a new file.
+
+```bash
+chmod 600 /etc/smb-eos.creds          # it was world-readable
+apt-get install -y cifs-utils smbclient
+smbclient -L //172.30.1.94 -A /etc/smb-eos.creds     # confirm the share name
+mkdir -p /mnt/synology-apps
+mount -t cifs //172.30.1.94/APPs /mnt/synology-apps \
+  -o ro,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8
+stat -f -c '%T  %n' /mnt/synology-apps               # must print cifs
+ls -la /mnt/synology-apps/dev
+```
+
+`ro` because this app only reads the exports; `uid=1001` because CIFS ignores
+the server's POSIX ownership and the API container runs as uid 1001 — without it
+the mount is healthy and unreadable.
+
+Persist it, or a reboot silently returns to an empty local directory:
+
+```bash
+printf '//172.30.1.94/APPs /mnt/synology-apps cifs ro,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8,_netdev 0 0\n' >> /etc/fstab
+mount -a && findmnt /mnt/synology-apps
+```
+
+### Phase 3 — stop Docker taking those ranges again
+
+Phase 1 only frees the block; the next `docker compose up` on that stack can
+take it straight back. Either is sufficient, and both need a maintenance window
+because they restart every container on this shared host:
+
+**A static route** also fixes it, because Docker then sees the clash and skips
+the range:
+
+```bash
+ip route add 172.30.1.0/24 via <the LAN gateway> dev <the LAN interface>
+```
+
+**Or constrain Docker's pools** in `/etc/docker/daemon.json` (there is none
+today), keeping it away from every corporate 172.x range:
+
+```json
+{ "default-address-pools": [ { "base": "10.240.0.0/12", "size": 24 } ] }
+```
+
+```bash
+systemctl restart docker      # restarts EVERY container on this host
+```
+
+### Phase 4 — point the app at the NAS
+
+```bash
+cd /opt/pct
+sed -i 's|^# STORAGE_TYPE=local|STORAGE_TYPE=local|;
+        s|^# STORAGE_SYNOLOGY_ROOT=|STORAGE_SYNOLOGY_ROOT=|;
+        s|^# STORAGE_DEPLOYMENT=|STORAGE_DEPLOYMENT=|;
+        s|^# STORAGE_PROJECT_SLUG=|STORAGE_PROJECT_SLUG=|' staging.env
+grep '^STORAGE_' staging.env
+docker compose -f compose.yml up -d --force-recreate api
+docker logs pct-api --tail 6 | grep -iE 'storage|WARNING'
+```
+
+Expect `storage=synology:/mnt/synology-apps/dev/pct` and **no** `WARNING
+storage:` line. The boot probe compares the folder's filesystem against the
+container root, so a missing bind mount is reported rather than silently read as
+an empty directory.
+
+Finally, in Admin → SAP Data Upload, the six folders still point at
+`/mnt/sap_exports`: saved settings outrank the environment on purpose. The panel
+flags the rows as **outside the storage folder** and offers **Use the NAS folder
+for all** — click it, Save, then **Test / preview folders**.

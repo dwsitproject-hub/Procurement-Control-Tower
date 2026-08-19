@@ -314,18 +314,31 @@ printf '//%s/APPs /mnt/synology-apps cifs ro,credentials=/etc/pct-nas.cred,uid=1
 mount -a && findmnt /mnt/synology-apps
 ```
 
-Then confirm the project folder exists (`APPs → dev → pct`; create it or ask
-infra — note the neighbouring app uses a lowercase slug, and case matters), and
-uncomment the four `STORAGE_*` lines in `/opt/pct/staging.env`:
+**The share's layout, read off the mount rather than assumed:**
+
+```text
+APPs/
+  EXIM  JETTYPLANNING  LOGISTIC  PM  SUSTAINABILITY-PORTAL  eos   <- production
+  dev/
+    EXIM  JETTYPLANNING  LOGISTIC  PM  SUSTAINABILITY-PORTAL      <- development
+```
+
+So an app gets a folder at the root for production and one under `dev/` for
+development, and the names are **UPPERCASE** — which matters, because case is
+significant on a cifs mount. There was no `pct` folder in either place as at
+19 Aug 2026; create `APPs/dev/PCT` in **File Station**, since the mount here is
+read-only by design and the server cannot create it.
+
+Then uncomment the four `STORAGE_*` lines in `/opt/pct/staging.env`:
 
 ```env
 STORAGE_TYPE=local
 STORAGE_SYNOLOGY_ROOT=/mnt/synology-apps
 STORAGE_DEPLOYMENT=dev
-STORAGE_PROJECT_SLUG=pct
+STORAGE_PROJECT_SLUG=PCT
 ```
 
-Resolved folder: `/mnt/synology-apps/dev/pct`. All three of root/deployment/slug
+Resolved folder: `/mnt/synology-apps/dev/PCT`. All three of root/deployment/slug
 must be set together — a partial set is refused at boot on purpose, because
 falling back silently gives you a healthy-looking dashboard reading the wrong
 folder.

@@ -733,3 +733,82 @@ So `NODE_ENV=production` is not a flag to flip on its own: it demands a
 certificate AND MFA enrolment for every local account, and it also stops the dev
 admin seed from running. Staging stays in development mode until those are in
 place, which is why the cookie is not Secure today.
+
+---
+
+## 9. Scheduled pickup from the share folder
+
+The scheduler READS a folder. It does not fetch from SAP and it does not copy
+anything — something else has to put the six exports there. Decide that first,
+because the schedule is worthless without it:
+
+| Delivery | Status |
+|---|---|
+| Synology NAS mount | **blocked** — see 8.2 note and the NAS section; the share is unreachable from this VM |
+| Manual copy to `/opt/pct/assets` | works today (`pscp` from a workstation, or any scheduled job on the network) |
+| Admin → SAP Data Upload | works today, but it is a manual upload, not a schedule |
+
+`/opt/pct/assets` on the BE server is bind-mounted **read-only** into the API as
+`/mnt/sap_exports`, so that container path is what the panel is configured with.
+
+### 9.1 Confirm the container can see the files
+
+```bash
+ls -la /opt/pct/assets
+docker exec pct-api ls -la /mnt/sap_exports
+```
+
+Both must list the same six workbooks. If the host directory has them and the
+container does not, the bind mount is missing — recreate the container.
+
+### 9.2 Configure the schedule (Admin → SAP Data Upload → SAP Data Sync)
+
+Per file: a folder, a name pattern, and up to three daily pickup times in
+**Asia/Jakarta**. The defaults match the SAP export names, so usually only the
+folder and the times need setting:
+
+| File | Folder | Pattern |
+|---|---|---|
+| PR Report | `/mnt/sap_exports` | `PR Report*.XLSX` |
+| PO Report | `/mnt/sap_exports` | `PO Report*.XLSX` |
+| GR List | `/mnt/sap_exports` | `GR List*.XLSX` |
+| PR Release | `/mnt/sap_exports` | `PR Release*.XLSX` |
+| PO Release | `/mnt/sap_exports` | `PO Release*.XLSX` |
+| Rate Conversion | `/mnt/sap_exports` | `Rate Conversion*.xlsx` |
+
+**Same folder for all** fills the column in one click. Set the times *after* the
+export job that produces the files, then tick **Scheduled sync** and **Save
+schedule**.
+
+Press **Test / preview folders** before trusting it: each row shows the file
+that pickup would choose, and the panel says whether all six were found. It
+reads the values in the form, so nothing has to be saved first.
+
+### 9.3 What a pickup actually does
+
+- A dataset is published **complete or not at all**. A slot therefore decides
+  *when that file's folder is read again*; when one fires, the newest matching
+  file from every folder is assembled into one bundle.
+- Unchanged files produce `noop_unchanged` and **no new version**. Re-dropping
+  the same exports costs nothing and creates no duplicate.
+- A file modified in the last `INGEST_FILE_SETTLE_SECONDS` (5) is skipped until
+  the next slot, so a half-written export is never read.
+- A missed slot — server down — fires on the next tick rather than being lost.
+
+### 9.4 Turn on the emails, or nobody learns it failed
+
+Admin → Notifications: add recipients and keep both SAP toggles on. A scheduled
+run then reports rows loaded per file and the change against the previous
+version on success, and on failure names what was missing and why. Without
+recipients a failed 06:00 pickup is silent until someone notices stale figures.
+
+Verify the mail path once with **Send test email** (staging is configured for
+`mail.energi-up.com:465`, implicit TLS).
+
+### 9.5 The switch is NOT in staging.env
+
+`INGEST_AUTOPOLL_ENABLED` and `SHARE_POLL_CRON_MINUTES` were removed from the
+template: nothing read them, so the file claimed the scheduler was on while it
+was off. The enable flag, folders, patterns and times all live in `rule_config`
+and are edited in the panel, which is also why they take effect without a
+restart — the poller re-reads them every tick.

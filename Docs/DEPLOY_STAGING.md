@@ -329,6 +329,63 @@ significant on a cifs mount. There was no `pct` folder in either place as at
 19 Aug 2026; create `APPs/dev/PCT` in **File Station**, since the mount here is
 read-only by design and the server cannot create it.
 
+#### Creating the project folder in File Station
+
+DSM runs on the NAS itself, not on the app servers, so this is done from a
+browser that can reach `172.30.1.94`. Check that first — the app servers sit on
+`172.28.92.x` and needed a routing fix to see the NAS at all, so a workstation
+may not reach DSM either:
+
+```bash
+curl -s -o /dev/null -w 'dsm http  %{http_code}
+' --max-time 6 http://172.30.1.94:5000/
+curl -sk -o /dev/null -w 'dsm https %{http_code}
+' --max-time 6 https://172.30.1.94:5001/
+```
+
+A `200` on either means DSM is reachable at that address. Then:
+
+1. Open DSM (`http://172.30.1.94:5000` or `https://172.30.1.94:5001`) and sign in
+   with an account that can **write** to the `APPs` share. The `app-prj` service
+   account in `/etc/smb-eos.creds` is for mounting, not administration — use a
+   DSM user with write permission on that share.
+2. Open **File Station** from the main menu (the folder icon).
+3. In the left tree, expand the **APPs** shared folder, then click **dev**.
+   Confirm the breadcrumb reads `APPs / dev` before creating anything: a folder
+   made at the share root becomes a PRODUCTION folder instead.
+4. **Create → Create folder**, and name it exactly `PCT` — uppercase, no spaces.
+   Case matters on a cifs mount, so `pct` or `Pct` will not be found.
+5. The new folder inherits the parent's permissions, which is what the mount
+   relies on. Do not narrow them; the app reads as `app-prj`.
+
+Verify from the BE server, which is the only check that proves the mount can see
+it (DSM showing the folder is not the same thing):
+
+```bash
+ls -la /mnt/synology-apps/dev/ | grep -i pct
+docker exec pct-api ls -la /mnt/synology-apps/dev/PCT
+```
+
+The second command matters more than the first: it proves the folder is readable
+as uid 1001 from inside the container, which is the identity that will actually
+read the exports. An empty listing is success here — the folder exists and is
+readable, it just has no files yet.
+
+> **If DSM is unreachable and you cannot wait**, the folder can be created from
+> the BE server by remounting read-write for one command. It writes to a shared
+> NAS using another application's service account, so prefer File Station when
+> there is a choice, and put it straight back to read-only:
+>
+> ```bash
+> umount /mnt/synology-apps
+> mount -t cifs //172.30.1.94/APPs /mnt/synology-apps -o rw,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,dir_mode=0770,file_mode=0660,vers=3.0,iocharset=utf8
+> mkdir -p /mnt/synology-apps/dev/PCT
+> umount /mnt/synology-apps && mount -a && findmnt /mnt/synology-apps | grep -o ' ro,'
+> ```
+>
+> That last `grep` must print ` ro,` — confirmation the share is back to
+> read-only, which is what stops an ingest defect ever modifying a source export.
+
 Then uncomment the four `STORAGE_*` lines in `/opt/pct/staging.env`:
 
 ```env

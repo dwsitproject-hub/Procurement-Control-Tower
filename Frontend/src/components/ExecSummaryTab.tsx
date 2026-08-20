@@ -221,6 +221,15 @@ export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }:
     },
   ];
 
+  // Read from the chart rather than a KPI: this is a statement ABOUT the chart's
+  // own completeness, so it must move with the chart and not with a separate
+  // aggregate that could be computed over a different population.
+  const catTotal = (byCategory?.series[0]?.points ?? [])
+    .reduce((a, p) => a + (p.value ?? 0), 0);
+  const catUnmapped = (byCategory?.series[0]?.points ?? [])
+    .find((p) => p.bucketKey === '(unmapped)')?.value ?? 0;
+  const unmappedShare = byCategory && catTotal > 0 ? (catUnmapped / catTotal) * 100 : null;
+
   const top5 = val('top5_category_share_pct');
   const linesTail = val('lines_under_25jt_pct');
   const valueTail = val('value_under_25jt_pct');
@@ -276,13 +285,39 @@ export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }:
           ? <RankedBars data={byCategory} onDrill={onDrill} emphasiseTop={5} />
           : <div className="spinner" />}
         <p className="note" style={{ marginTop: '.5rem' }}>
-          The <strong>top five</strong> categories are shaded; together they are{' '}
-          <strong>{pct(top5)}</strong> of committed value. Categories resolve from the
-          business mapping first, then SAP&apos;s material master.{' '}
-          <code>(no material code)</code> is shown as itself rather than folded into a
-          category — it is service and text lines, and burying it would misstate every
-          share above it.
+          {/*
+            The top-five claim is suppressed when there are five or fewer
+            categories. It stays TRUE in that case — five of five is 100% — but
+            "the top five are 100.0%" of two rows reads as a broken page, which
+            is how a real mapping failure was first spotted rather than the
+            claim itself being wrong.
+          */}
+          {(byCategory?.buckets.length ?? 0) > 5 && (
+            <>
+              The <strong>top five</strong> categories are shaded; together they are{' '}
+              <strong>{pct(top5)}</strong> of committed value.{' '}
+            </>
+          )}
+          Categories resolve from the business mapping first, then SAP&apos;s material
+          master. <code>(no material code)</code> is shown as itself rather than folded
+          into a category — it is service and text lines, and burying it would misstate
+          every share above it.
         </p>
+        {/*
+          A mapping failure is loud rather than silent. When most of the value
+          cannot be attributed to a business category, the page says so instead
+          of presenting '(unmapped)' as though it were a category the business
+          would recognise.
+        */}
+        {unmappedShare !== null && unmappedShare > 20 && (
+          <p className="note">
+            <span className="bs sa">mapping incomplete</span>{' '}
+            <strong>{pct(unmappedShare)}</strong> of committed value has a material code
+            that is not in the spend-category mapping or SAP&apos;s material master, so it
+            is shown as <code>(unmapped)</code> rather than attributed to a category. The
+            shares above are therefore not yet a reliable category picture.
+          </p>
+        )}
       </div>
 
       <div className="panel">

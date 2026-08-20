@@ -1000,15 +1000,36 @@ export async function runTransform(
     [versionId],
   );
 
+  // ── reference / master data (018) ──
+  // The four SAP master exports. Kept separate from the conformed dimensions
+  // above because those are DERIVED FROM THE FACTS of this version, while these
+  // come from their own files and describe what a code means today.
+  //
+  // Global and last-writer-wins, matching dim_company / dim_purch_group. Nothing
+  // here can move a published figure: every attribute a number depends on is
+  // already denormalised onto the facts at this point.
+  //
+  // Each is skipped silently when its feed is absent from the bundle — that is
+  // the whole point of them being optional, and a bundle of six files must not
+  // wipe reference data loaded by an earlier bundle of ten.
+  await upsertReferenceData(client, batchId);
+
   // ── Executive Summary attributes (020) ──
   // Stamped onto the fact, not joined at read time, for the reason stated in the
   // migration: a chart point and its drill predicate must filter the same
   // column, and the parity sweep checks that they agree. A category that lived
   // only in a join could not be a drill filter at all.
   //
-  // Runs AFTER the reference upserts above, because the fallback in the
-  // resolution order reads dim_material_master — which those upserts have just
-  // refreshed from this same bundle.
+  // ORDER MATTERS AND IS LOAD-BEARING. The resolution order below reads
+  // dim_material_master, which upsertReferenceData() populates from THIS
+  // bundle — so this must run after that call, and it now does.
+  //
+  // This was wrong once and shipped, because the failure only appears on a
+  // FIRST run. Any environment that had transformed before already had a
+  // populated dim_material_master from an earlier version, so the join found
+  // rows and the ordering bug was invisible; on staging's first run the table
+  // was still empty inside the transaction and 68% of committed value resolved
+  // to '(unmapped)'. Hence the coverage check below rather than trust.
   await client.query(
     `UPDATE core.fact_po_line f
         SET size_band = ${sizeBandSql('f.net_order_value_idr')},
@@ -1032,19 +1053,33 @@ export async function runTransform(
     [versionId],
   );
 
-  // ── reference / master data (018) ──
-  // The four SAP master exports. Kept separate from the conformed dimensions
-  // above because those are DERIVED FROM THE FACTS of this version, while these
-  // come from their own files and describe what a code means today.
-  //
-  // Global and last-writer-wins, matching dim_company / dim_purch_group. Nothing
-  // here can move a published figure: every attribute a number depends on is
-  // already denormalised onto the facts at this point.
-  //
-  // Each is skipped silently when its feed is absent from the bundle — that is
-  // the whole point of them being optional, and a bundle of six files must not
-  // wipe reference data loaded by an earlier bundle of ten.
-  await upsertReferenceData(client, batchId);
+  // Coverage check. Not a blocker — a low mapping rate is a data question, not a
+  // reason to refuse a dataset whose figures are otherwise correct — but it is
+  // loud, because "everything is unmapped" is indistinguishable from "the page
+  // is broken" when you are looking at the page.
+  {
+    const cov = await client.query<{ unmapped: string; total: string; master: string }>(
+      `SELECT
+         COALESCE(sum(net_order_value_idr) FILTER (WHERE spend_category = '(unmapped)'), 0)::text AS unmapped,
+         COALESCE(sum(net_order_value_idr), 0)::text AS total,
+         (SELECT count(*) FROM core.dim_material_master)::text AS master
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
+      [versionId],
+    );
+    const row = cov.rows[0];
+    if (row) {
+      const total = Number(row.total);
+      const share = total > 0 ? (Number(row.unmapped) / total) * 100 : 0;
+      if (share > 20) {
+        console.warn(
+          `spend_category: ${share.toFixed(1)}% of committed value is '(unmapped)' `
+          + `with ${row.master} rows in dim_material_master. Either the material master `
+          + 'does not cover these codes, or it was written after this stamp ran.',
+        );
+      }
+    }
+  }
 
   await client.query(
     `ANALYZE core.fact_pr_item_v${versionId};

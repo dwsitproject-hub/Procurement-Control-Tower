@@ -47,6 +47,11 @@ const JOINED_ALIAS: Record<string, { kind: FactKind; alias: string }> = {
   single_source_spend_idr: { kind: 'po_line', alias: 'p.' },
   urgent_po_before_pr: { kind: 'po_line', alias: 'pol.' },
   pr_approval_lead_time: { kind: 'pr_item', alias: 'i.' },
+  // Joins fact_pr_release r to fact_pr_item i; both carry plant and
+  // company_code, so an unqualified clause is an ambiguous-column error. The
+  // requisition side is the right one to filter: it is where plant, company and
+  // the month basis live.
+  worst_approver_gap: { kind: 'pr_item', alias: 'i.' },
 };
 
 function targetOf(id: string, grain: string | undefined): { kind: FactKind; alias: string } {

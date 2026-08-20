@@ -731,22 +731,28 @@ export const PARITY_KPIS: KpiSpec[] = [
     // name rides in the detail jsonb via the extra-column mechanism.
     id: 'worst_approver_gap',
     unit: 'days',
-    sql: `WITH g AS (
+    // One population CTE, read twice. It used to scan the facts a SECOND time for
+    // `sample`, under its own version anchor — and injectFilter patches exactly
+    // one — so under a filter the value was filtered while the sample size next
+    // to it was not. The new guard in injectFilter refuses that shape outright,
+    // which turned the card into "cannot be filtered"; this makes it genuinely
+    // filterable instead, with both numbers drawn from the same rows.
+    sql: `WITH pop AS (
             SELECT r.pic_release,
-                   percentile_cont(0.5) WITHIN GROUP (ORDER BY (r.approve_date - i.requisition_date)) AS med,
-                   count(*)::int AS n
+                   (r.approve_date - i.requisition_date) AS gap
               FROM core.fact_pr_release r
               JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
                            AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
              WHERE r.dataset_version_id = $1
                AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL
-             GROUP BY r.pic_release HAVING count(*) >= 30)
+          ), g AS (
+            SELECT pic_release,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) AS med,
+                   count(*)::int AS n
+              FROM pop GROUP BY pic_release HAVING count(*) >= 30
+          )
           SELECT max(med) AS value,
-                 (SELECT count(*)::int FROM core.fact_pr_release r
-                    JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
-                                 AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
-                   WHERE r.dataset_version_id = $1
-                     AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL) AS sample,
+                 (SELECT count(*)::int FROM pop) AS sample,
                  (SELECT pic_release FROM g ORDER BY med DESC LIMIT 1) AS worst_pic
             FROM g`,
     drill: { grain: 'pr_release', filters: { gapEvaluable: true } },

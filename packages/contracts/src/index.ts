@@ -228,6 +228,7 @@ export const KPI_IDS = [
   // page is built to state.
   'active_purch_groups','desks_for_80pct_value','vendors_for_80pct_value',
   'top5_category_share_pct','lines_under_25jt_pct','value_under_25jt_pct',
+  'ho_share_value_pct','ho_share_lines_pct',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -309,6 +310,8 @@ export const KPI_TITLES: Record<KpiId, string> = {
   top5_category_share_pct: 'Top 5 categories (% of value)',
   lines_under_25jt_pct: 'PO lines under Rp 25 Jt',
   value_under_25jt_pct: 'Value on lines under Rp 25 Jt',
+  ho_share_value_pct: 'Head Office share of value',
+  ho_share_lines_pct: 'Head Office share of PO lines',
 };
 
 export const KpiValueSchema = z.object({

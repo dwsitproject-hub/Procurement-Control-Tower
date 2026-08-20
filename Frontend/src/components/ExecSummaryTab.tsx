@@ -237,6 +237,8 @@ export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }:
   const desksAll = val('active_purch_groups');
   const vend80 = val('vendors_for_80pct_value');
   const vendAll = val('unique_suppliers');
+  const hoValue = val('ho_share_value_pct');
+  const hoLines = val('ho_share_lines_pct');
   const n = (v: number | null): string => (v === null ? '—' : formatNumber(v));
 
   return (
@@ -351,14 +353,24 @@ export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }:
                   <strong>{n(vend80)}</strong> of {n(vendAll)} vendors hold 80% of committed value
                 </td>
               </tr>
+              <tr className="re">
+                <td>Head Office share</td>
+                <td>
+                  <strong>{pct(hoValue)}</strong> of committed value and{' '}
+                  <strong>{pct(hoLines)}</strong> of PO lines are raised by an HQ purchasing
+                  organisation
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>
         <p className="note" style={{ marginTop: '.5rem' }}>
-          This replaces a Head-Office-versus-site split. That split cannot be measured on
-          this data: no Head-Office purchasing group appears in these orders at all, so it
-          computes to 2% against 98% and would state the opposite of the truth. Desk and
-          vendor concentration makes the same point from what is actually here.
+          Head Office is read from the purchasing <strong>organisation</strong>, not the
+          purchasing group. The group is the buyer&apos;s desk; the HQ-versus-site
+          distinction lives on the organisation, and measuring it on the group gives 2%
+          against 98% — the opposite of the truth. Two organisations are judgement calls
+          and between them 0.4% of value: <code>Jakarta-PPIC</code> (planning) and{' '}
+          <code>LEGAL LICENSE DWS</code> count as non-HQ.
         </p>
       </div>
 
@@ -379,6 +391,11 @@ export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }:
             <strong>Work is fragmented.</strong> {pct(linesTail)} of PO lines are under
             Rp 25 Jt and carry {pct(valueTail)} of the value — most of the effort buys
             almost none of the spend.
+          </li>
+          <li>
+            <strong>Control and execution sit apart.</strong> HQ raises {pct(hoValue)} of the
+            value on {pct(hoLines)} of the lines — so the money is decided centrally while
+            the volume of paperwork is spread much wider.
           </li>
           <li>
             <strong>The two do not overlap.</strong> Price belongs on the few large

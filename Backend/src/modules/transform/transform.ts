@@ -1194,10 +1194,17 @@ async function upsertReferenceData(client: pg.PoolClient, batchId: number): Prom
       descs.push(s(r.payload['description']) ?? '');
     }
     if (codes.length > 0) {
+      // is_ho is derived here rather than trusted from the file, which carries no
+      // such column — the same arrangement as dim_purch_group (017), and the
+      // same rule shape. See migration 021 for the eleven organisations this
+      // classifies today and the two judgement calls in it.
       await client.query(
-        `INSERT INTO core.dim_purch_org (code, description)
-         SELECT c, d FROM unnest($1::text[], $2::text[]) AS t(c, d)
-         ON CONFLICT (code) DO UPDATE SET description = EXCLUDED.description`,
+        `INSERT INTO core.dim_purch_org (code, description, is_ho)
+         SELECT c, d, (d LIKE 'HQ%' OR d LIKE 'HO %' OR d LIKE 'HO-%')
+           FROM unnest($1::text[], $2::text[]) AS t(c, d)
+         ON CONFLICT (code) DO UPDATE
+           SET description = EXCLUDED.description,
+               is_ho       = EXCLUDED.is_ho`,
         [codes, descs],
       );
     }

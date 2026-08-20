@@ -96,6 +96,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'total_po_amount', 'po_line_items', 'unique_suppliers', 'active_purch_groups',
     'top5_category_share_pct', 'lines_under_25jt_pct', 'value_under_25jt_pct',
     'desks_for_80pct_value', 'vendors_for_80pct_value',
+    'ho_share_value_pct', 'ho_share_lines_pct',
   ],
   // Ordered to mirror v1's page layouts.
   executive: [

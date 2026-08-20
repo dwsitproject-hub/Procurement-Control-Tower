@@ -537,6 +537,43 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
   },
 
+  {
+    // The reference design's "control versus execution": Head Office holds the
+    // money, sites run the paperwork.
+    //
+    // Keyed on purchasing ORGANISATION, not purchasing group. 020 checked it on
+    // dim_purch_group.is_ho, got 2% against 98%, concluded the split could not be
+    // measured here and dropped the panel. That was the wrong column: the group
+    // is the buyer's desk, the organisation is the HQ-versus-site distinction.
+    // On the right column it is 98.3% of value and 73% of lines, matching the
+    // design's 92% / 51% in shape and magnitude.
+    //
+    // LEFT JOIN with COALESCE(false): an organisation missing from the master is
+    // counted as non-HQ rather than dropped, so the two shares always sum with
+    // the whole population and cannot quietly exclude rows.
+    id: 'ho_share_value_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `SELECT 100.0 * COALESCE(sum(f.net_order_value_idr)
+                   FILTER (WHERE COALESCE(o.is_ho, false)), 0)
+                 / NULLIF(sum(f.net_order_value_idr), 0) AS value,
+                 count(*)::int AS sample
+            FROM ${POL} f
+            LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
+           WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'ho_share_lines_pct',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE COALESCE(o.is_ho, false))
+                 / NULLIF(count(*), 0) AS value, count(*)::int AS sample
+            FROM ${POL} f
+            LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
+           WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+
   // ── G6.3: the v1-only registry KPIs, promoted (decision 3 Aug 2026) ──
   {
     // v1 'Tail Spend % (IDR)': share of IDR spend in the bottom 80% of PO

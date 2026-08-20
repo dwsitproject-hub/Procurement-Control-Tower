@@ -609,6 +609,7 @@ export default function App() {
               // 2023 while the orders are 2026, and this page reports orders.
               asOfDate={dataset?.poDateRange?.to ?? dataset?.asOfDate ?? null}
               firstDate={dataset?.poDateRange?.from ?? null}
+              filterQuery={gfQuery}
             />
           </PageChunk>
         ) : tab === 'vendors' ? (

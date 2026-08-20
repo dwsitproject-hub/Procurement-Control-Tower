@@ -70,3 +70,16 @@ export function sizeBandSql(column: string): string {
     : `WHEN ${column} >= ${b.min} AND ${column} < ${b.max} THEN '${b.key}'`));
   return `CASE WHEN ${column} IS NULL OR ${column} < 0 THEN NULL\n       ${arms.join('\n       ')}\n       ELSE NULL END`;
 }
+
+/**
+ * The band LABEL as a SQL CASE, so the precomputed mart and the live filtered
+ * query print the same text.
+ *
+ * Without this the label lived in TypeScript for one path and would have had to
+ * be retyped in SQL for the other — two places to disagree about what "Rp 25 -
+ * 100 Jt" is called, on a chart whose whole point is the band axis.
+ */
+export function sizeBandLabelSql(column: string): string {
+  const arms = SIZE_BANDS.map((b) => `WHEN ${column} = '${b.key}' THEN '${b.label}'`);
+  return `CASE ${arms.join(' ')} ELSE ${column} END`;
+}

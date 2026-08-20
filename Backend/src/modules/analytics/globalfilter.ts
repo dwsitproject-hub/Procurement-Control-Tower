@@ -18,6 +18,28 @@ export interface GlobalFilter {
   monthKey?: string[];
   /** v1's per-page "Show: All | Open Only | Complete (GR)" toggle (G2.2). */
   scope?: 'open' | 'complete';
+
+  // ── Executive Summary dimensions (022) ──
+  //
+  // These exist so a figure on that page can be opened into the Overview
+  // structure with the SAME slice applied — clicking METHANOL shows the whole
+  // Overview filtered to METHANOL rather than a bare line list.
+
+  /** core.fact_po_line.spend_category (020). */
+  spendCategory?: string[];
+  /** core.fact_po_line.size_band ordinal key, '1'..'7' (020). */
+  sizeBand?: string[];
+  /**
+   * The Executive Summary's Open/Closed split: true = status 'Delivered'
+   * (Closed), false = everything else (Open).
+   *
+   * DELIBERATELY NOT `scope`. That toggle's 'open' means OPEN_STATUSES, which
+   * omits 'Fully Reversed' — so scope='open' and "not Delivered" disagree by 17
+   * lines in the current data. Small, but the two would then be two different
+   * definitions of the same word on one screen, and a chart series and the drill
+   * behind it would not tie out. One extra field is cheaper than that.
+   */
+  delivered?: boolean;
 }
 
 /** The status set v1 (and the drill `open` filter) treat as open. */
@@ -31,6 +53,9 @@ export function isEmptyFilter(f: GlobalFilter): boolean {
     (f.plant?.length ?? 0) === 0 &&
     (f.purchOrg?.length ?? 0) === 0 &&
     (f.monthKey?.length ?? 0) === 0 &&
+    (f.spendCategory?.length ?? 0) === 0 &&
+    (f.sizeBand?.length ?? 0) === 0 &&
+    f.delivered === undefined &&
     f.scope === undefined
   );
 }
@@ -87,6 +112,55 @@ export function buildFilterClause(
     n += 1;
   }
 
+  /**
+   * The Executive Summary dimensions live on the PO line. On the PR grain they
+   * are resolved through the linked PO lines — the same device `scope` already
+   * uses below, and for the same reason: a requisition has no spend category or
+   * order value of its own, but "requisitions that became METHANOL orders" is a
+   * meaningful and answerable question.
+   *
+   * On the GR grain they throw, so the caller reports the figure as unfilterable
+   * rather than quietly returning an unfiltered number.
+   */
+  const poScoped = (predicate: (t: string) => string) => {
+    if (kind === 'gr_posting') {
+      throw new Error('Executive Summary filters do not apply to GR postings');
+    }
+    if (kind === 'pr_item') {
+      const outer = alias !== '' ? alias : 'core.fact_pr_item.';
+      parts.push(
+        `EXISTS (SELECT 1 FROM core.fact_po_line _xs
+                  WHERE _xs.dataset_version_id = ${outer}dataset_version_id
+                    AND _xs.pr_no = ${outer}pr_no AND _xs.pr_item = ${outer}pr_item
+                    AND ${predicate('_xs.')})`,
+      );
+    } else {
+      parts.push(predicate(alias));
+    }
+  };
+
+  if (f.spendCategory && f.spendCategory.length > 0) {
+    params.push(f.spendCategory);
+    const i = n;
+    poScoped((t) => `${t}spend_category = ANY($${i})`);
+    n += 1;
+  }
+
+  if (f.sizeBand && f.sizeBand.length > 0) {
+    params.push(f.sizeBand);
+    const i = n;
+    poScoped((t) => `${t}size_band = ANY($${i})`);
+    n += 1;
+  }
+
+  if (f.delivered !== undefined) {
+    // Written as an explicit comparison rather than parameterised: the value is a
+    // boolean the parser already validated, so there is nothing user-supplied to
+    // bind, and the SQL reads as the rule it implements.
+    const op = f.delivered ? '=' : '<>';
+    poScoped((t) => `${t}status ${op} 'Delivered'`);
+  }
+
   if (f.scope !== undefined) {
     // GR postings carry no lifecycle status; a spec on that grain cannot be
     // scoped honestly — the caller reports it unavailable instead.
@@ -132,21 +206,35 @@ export function buildFilterClause(
 /**
  * Inject the clause into a spec's SQL.
  *
- * Every spec anchors on `dataset_version_id = $1`. Only the FIRST occurrence is
- * patched: in a joined spec the second table is correlated to the first on that
- * column, so filtering the driving table is sufficient and correct.
+ * Every spec anchors on `dataset_version_id = $1`, and exactly ONE anchor gets
+ * the clause — a joined spec correlates its second table on
+ * `b.dataset_version_id = a.dataset_version_id`, never on `$1`, so filtering the
+ * driving table carries the whole query.
+ *
+ * A SECOND literal `= $1` is therefore not a correlated join but an independent
+ * scan of the facts, and the two halves would then disagree: one filtered, one
+ * not. Such a spec must say which scan the clause belongs to by marking it (the
+ * F-marker below), and this refuses to guess if it does not — the caller then
+ * reports the figure as unfilterable, which is recoverable, where a
+ * half-filtered number is not.
  */
 export function injectFilter(sql: string, clause: Clause): string {
   if (clause.sql === '') return sql;
-  // A spec whose FIRST anchor is not its driving table (e.g. a scalar subquery
-  // in the SELECT list) marks the true injection point with /*F*/ — otherwise
-  // the filter would silently land on the wrong table.
+  // The marker also covers the case where the FIRST anchor is not the driving
+  // table at all (e.g. a scalar subquery in the SELECT list) — without it the
+  // filter would silently land on the wrong one.
   const mark = sql.indexOf('/*F*/');
   if (mark >= 0) return sql.slice(0, mark) + clause.sql + sql.slice(mark);
   const anchor = 'dataset_version_id = $1';
   const at = sql.indexOf(anchor);
   if (at < 0) {
     throw new Error('spec SQL has no dataset_version_id = $1 anchor to filter on');
+  }
+  if (sql.indexOf(anchor, at + anchor.length) >= 0) {
+    throw new Error(
+      'spec SQL scans the facts at $1 more than once and has no /*F*/ marker; '
+      + 'filtering only the first scan would half-filter the figure',
+    );
   }
   return sql.slice(0, at + anchor.length) + clause.sql + sql.slice(at + anchor.length);
 }
@@ -197,12 +285,17 @@ export function parseGlobalFilter(q: Record<string, unknown>): GlobalFilter {
     return cleaned.length > 0 ? cleaned : undefined;
   };
   const rawScope = q['scope'] === undefined ? undefined : String(q['scope']);
+  // 'open' | 'closed' on the wire, because that is what the page calls them.
+  const rawLifecycle = q['lifecycle'] === undefined ? undefined : String(q['lifecycle']);
   return {
     companyCode: list('company'),
     plant: list('plant'),
     purchOrg: list('purchOrg'),
     monthKey: list('monthKey'),
     scope: rawScope === 'open' || rawScope === 'complete' ? rawScope : undefined,
+    spendCategory: list('spendCategory'),
+    sizeBand: list('sizeBand'),
+    delivered: rawLifecycle === 'closed' ? true : rawLifecycle === 'open' ? false : undefined,
   };
 }
 
@@ -214,5 +307,8 @@ export function describeFilter(f: GlobalFilter): Record<string, unknown> {
   if (f.purchOrg?.length) out['purchOrg'] = f.purchOrg;
   if (f.monthKey?.length) out['monthKey'] = f.monthKey;
   if (f.scope) out['scope'] = f.scope;
+  if (f.spendCategory?.length) out['spendCategory'] = f.spendCategory;
+  if (f.sizeBand?.length) out['sizeBand'] = f.sizeBand;
+  if (f.delivered !== undefined) out['lifecycle'] = f.delivered ? 'closed' : 'open';
   return out;
 }

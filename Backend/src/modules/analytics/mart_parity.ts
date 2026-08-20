@@ -9,6 +9,7 @@
  */
 
 import type pg from 'pg';
+import { sizeBandLabelSql } from '@pct/rules';
 import { insertMany } from '../../db/client.js';
 
 // Statuses v1 treats as "open".
@@ -856,6 +857,156 @@ const DIST_ORDER = `CASE WHEN d <= 3 THEN 1 WHEN d <= 7 THEN 2 WHEN d <= 14 THEN
                          WHEN d <= 30 THEN 4 WHEN d <= 60 THEN 5 ELSE 6 END`;
 
 export const PARITY_CHARTS: ChartSpec[] = [
+  // ── Executive Summary charts (022) ──
+  //
+  // These exist HERE, not only in mart.ts, because a chart is only filterable if
+  // it has a live spec: liveChartAvailable() consults this registry, and without
+  // an entry the global filter bar silently does nothing to the panel. That was
+  // the state on the Executive Summary until now.
+  //
+  // Each category and each size band splits into OPEN (status <> 'Delivered')
+  // and CLOSED (status = 'Delivered'). Stacked, the two segments still sum to the
+  // bucket's total, so the ranking and the share the panel is read for survive
+  // the split rather than being replaced by it.
+  //
+  // The percentage denominators use window functions over the SAME filtered CTE,
+  // so under a filter the shares are shares OF THE FILTERED POPULATION. Taking
+  // them from the precomputed total instead would make a filtered panel's bars
+  // sum to something other than 100% with no indication why.
+  {
+    chartId: 'exec_txn_size', seriesKey: 'open_value', seriesLabel: 'Open — % of value', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS part,
+                   count(*) FILTER (WHERE status <> 'Delivered')::int AS n,
+                   sum(sum(v)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_v > 0 THEN 100.0 * part / total_v ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'closed_value', seriesLabel: 'Closed — % of value', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS part,
+                   count(*) FILTER (WHERE status = 'Delivered')::int AS n,
+                   sum(sum(v)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_v > 0 THEN 100.0 * part / total_v ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'open_lines', seriesLabel: 'Open — % of lines', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   count(*) FILTER (WHERE status <> 'Delivered')::numeric AS part,
+                   count(*) FILTER (WHERE status <> 'Delivered')::int AS n,
+                   sum(sum(1)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_n > 0 THEN 100.0 * part / total_n ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'closed_lines', seriesLabel: 'Closed — % of lines', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   count(*) FILTER (WHERE status = 'Delivered')::numeric AS part,
+                   count(*) FILTER (WHERE status = 'Delivered')::int AS n,
+                   sum(sum(1)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_n > 0 THEN 100.0 * part / total_n ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'open', seriesLabel: 'Open', unit: 'idr',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'closed', seriesLabel: 'Closed', unit: 'idr',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
   {
     chartId: 'items_by_priority', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
     sql: `SELECT COALESCE(priority_label,'(unlabelled)') AS bucket_key,
@@ -1484,6 +1635,23 @@ export const PARITY_CHARTS: ChartSpec[] = [
   // `value` is the metric the bar shows (billions of IDR, then document count);
   // `row_count` is the LINES behind it, which is what the drill opens — the same
   // entity-vs-row convention the PO Hold card uses.
+  //
+  // Two CTEs, and which one the global filter lands on is the whole point:
+  //
+  //   `docs`  sizes each document over ALL its IDR lines and is deliberately
+  //           NOT filtered. A 300 JT order does not become a small order
+  //           because you are looking at only its open lines, and the drill's
+  //           poDocBracket brackets on that same unfiltered document total —
+  //           re-bracketing on the filtered subset would put chart and drill on
+  //           two different definitions of "0 - 5 JT".
+  //   `lines` is the line population the bar measures, and IS filtered. It
+  //           carries the /*F*/ marker because the spec's FIRST
+  //           dataset_version_id anchor belongs to `docs`; without it
+  //           injectFilter would filter the sizing and leave the measurement
+  //           alone, which is exactly backwards.
+  //
+  // `value` and `row_count` both read off `lines`, so the bar, its count and the
+  // rows the drill opens can never be three different populations.
   {
     chartId: 'po_bracket_value', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'idr',
     sql: `WITH docs AS (
@@ -1491,14 +1659,18 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 0 AND d.total < 5000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 0 AND d.total < 5000000) AS row_count,
+                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 0 AND d.total < 5000000)::numeric AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 0 AND d.total < 5000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1510,13 +1682,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 0 AND d.total < 5000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 0 AND d.total < 5000000) AS row_count,
+                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 0 AND d.total < 5000000) AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 0 AND d.total < 5000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1528,14 +1704,18 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 5000000 AND d.total < 25000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 5000000 AND d.total < 25000000) AS row_count,
+                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 5000000 AND d.total < 25000000)::numeric AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 5000000 AND d.total < 25000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1547,13 +1727,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 5000000 AND d.total < 25000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 5000000 AND d.total < 25000000) AS row_count,
+                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 5000000 AND d.total < 25000000) AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 5000000 AND d.total < 25000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1565,14 +1749,18 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 25000000 AND d.total < 100000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 25000000 AND d.total < 100000000) AS row_count,
+                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 25000000 AND d.total < 100000000)::numeric AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 25000000 AND d.total < 100000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1584,13 +1772,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 25000000 AND d.total < 100000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 25000000 AND d.total < 100000000) AS row_count,
+                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 25000000 AND d.total < 100000000) AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 25000000 AND d.total < 100000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1602,14 +1794,18 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 100000000 AND d.total < 500000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 100000000 AND d.total < 500000000) AS row_count,
+                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 100000000 AND d.total < 500000000)::numeric AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 100000000 AND d.total < 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1621,13 +1817,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 100000000 AND d.total < 500000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 100000000 AND d.total < 500000000) AS row_count,
+                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 100000000 AND d.total < 500000000) AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 100000000 AND d.total < 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1639,14 +1839,18 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(d.total) FROM docs d WHERE d.total >= 500000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 500000000) AS row_count,
+                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 500000000)::numeric AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1658,13 +1862,17 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0)
+                GROUP BY 1 HAVING sum(net_order_value) > 0),
+               lines AS (
+               SELECT po_no, net_order_value
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted/*F*/)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(*)::numeric FROM docs d WHERE d.total >= 500000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 500000000) AS row_count,
+                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 500000000) AS value,
+                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
+                    WHERE d.total >= 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,

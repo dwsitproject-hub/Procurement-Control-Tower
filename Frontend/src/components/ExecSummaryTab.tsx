@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, type ChartResponse, type Kpi } from '../lib/api';
-import { formatNumber } from '../lib/format';
+import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
 
 /**
@@ -90,13 +90,27 @@ function pct(v: number | null, dp = 1): string {
  * — "Open METHANOL" — rather than a bare row list. Rows drilling to lines is
  * still available from inside that panel.
  */
-function RankedBars({ data, onFocus, emphasiseTop }: {
+function RankedBars({ data, onFocus, emphasiseTop, currency }: {
   data: ChartResponse;
   onFocus: (title: string, subtitle: string, slice: string) => void;
   emphasiseTop: number;
+  currency: 'USD' | 'IDR';
 }) {
-  const openS = data.series.find((x) => x.key === 'open');
-  const closedS = data.series.find((x) => x.key === 'closed');
+  /**
+   * The currency toggle picks between twin series, the same `*_idr` suffix
+   * convention ChartPanel uses. The panel previously read the IDR series
+   * unconditionally and formatted it with the rupiah ladder, so switching the
+   * header to USD changed the tiles and left this panel saying Rp.
+   */
+  const suffix = currency === 'IDR' ? '_idr' : '';
+  const openS = data.series.find((x) => x.key === `open${suffix}`)
+    ?? data.series.find((x) => x.key === 'open_idr');
+  const closedS = data.series.find((x) => x.key === `closed${suffix}`)
+    ?? data.series.find((x) => x.key === 'closed_idr');
+  // Whichever twin was actually resolved decides the formatting, so a fallback
+  // can never print USD figures with a rupiah label.
+  const money = (v: number | null): string =>
+    (openS?.key.endsWith('_idr') ?? true) ? rupiah(v) : formatMoney(v, 'USD');
   if (!openS && !closedS) return <p className="muted">No data.</p>;
 
   const at = (key: string, s: typeof openS) =>
@@ -132,12 +146,12 @@ function RankedBars({ data, onFocus, emphasiseTop }: {
             type="button"
             className={`xs-seg ${cls}`}
             style={{ width: `${w(pt.value ?? 0)}%` }}
-            title={`${what} ${r.label} — ${rupiah(pt.value)}, ${formatNumber(pt.rowCount)} PO lines. Click for the Overview of this slice.`}
+            title={`${what} ${r.label} — ${money(pt.value)}, ${formatNumber(pt.rowCount)} PO lines. Click for the Overview of this slice.`}
             onClick={(e) => {
               e.stopPropagation();
               onFocus(
                 `${r.label} — ${what}`,
-                `${rupiah(pt.value)} · ${formatNumber(pt.rowCount)} PO lines`,
+                `${money(pt.value)} · ${formatNumber(pt.rowCount)} PO lines`,
                 `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
               );
             }}
@@ -152,7 +166,7 @@ function RankedBars({ data, onFocus, emphasiseTop }: {
               {seg(r.c, 'xs-closed', 'Closed')}
             </span>
             <span className="xs-bar-value">
-              {rupiah(r.total)} <span className="muted">({share.toFixed(1)}%)</span>
+              {money(r.total)} <span className="muted">({share.toFixed(1)}%)</span>
             </span>
           </div>
         );
@@ -289,7 +303,7 @@ export function ExecSummaryTab({
       label: 'committed value',
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
-        : totalUsd !== null ? '$ ' + formatNumber(Math.round(totalUsd)) : '—',
+        : formatMoney(totalUsd, 'USD'),
       sub: 'net order value — STO and deleted excluded',
       ...(totalKpi ? { kpi: totalKpi } : {}),
     },
@@ -385,7 +399,7 @@ export function ExecSummaryTab({
           Where the value is <span className="muted">— committed value by spend category</span>
         </h3>
         {byCategory
-          ? <RankedBars data={byCategory} onFocus={openFocus} emphasiseTop={5} />
+          ? <RankedBars data={byCategory} onFocus={openFocus} emphasiseTop={5} currency={currency} />
           : <div className="spinner" />}
         <p className="note" style={{ marginTop: '.5rem' }}>
           {/*
@@ -432,6 +446,12 @@ export function ExecSummaryTab({
           Bands are ordered by size, never by measure. Lines with no rupiah value are
           excluded rather than counted as zero, which would inflate the smallest band —
           the band the whole fragmentation argument rests on.
+        </p>
+        <p className="note">
+          <span className="bs sl">rupiah basis</span> This panel does not follow the
+          currency toggle, and cannot: the bands <em>are</em> rupiah brackets, and the two
+          measures are shares rather than amounts, so there is no figure here to restate in
+          dollars. Switching to USD changes the tiles and the category panel above.
         </p>
       </div>
 

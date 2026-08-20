@@ -717,23 +717,25 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .xs-band-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
 /* Value and volume must be distinguishable without colour: value is solid, and
    volume is lighter AND labelled, so the pair reads in greyscale too. */
-.xs-band-fill.xs-v { background: var(--accent); }
-.xs-band-fill.xs-n { background: var(--neutral); opacity: .45; }
 .xs-band-num { font-size: .62rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .xs-means { margin: .2rem 0 0; padding-left: 1.1rem; font-size: .74rem; line-height: 1.55; }
 .xs-means li { margin-bottom: .35rem; }
 
 /* Executive Summary: stacked Open/Closed segments (022).
-   Open is the accent, Closed is a muted tint of it — same hue so the two read as
-   parts of one total, different lightness so they separate in greyscale too. */
+   Open is AMBER and Closed is BLUE (user decision, 20 Aug 2026). Amber for the
+   work still outstanding reads the same way it does on the aging cells and the
+   freshness banner, so the page agrees with the rest of the app about what amber
+   means. The two hues also differ in lightness, so the split survives greyscale
+   printing and the common forms of colour blindness — and each segment carries a
+   text tooltip naming Open or Closed, so colour is never the only channel. */
 .xs-legend {
   display: flex; gap: 1rem; font-size: .66rem; color: var(--muted);
   margin-bottom: .35rem; flex-wrap: wrap;
 }
 .xs-key { display: inline-block; width: .6rem; height: .6rem; border-radius: 2px; margin-right: .25rem; }
-.xs-key.xs-open { background: var(--accent); }
-.xs-key.xs-closed { background: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.xs-key.xs-open { background: var(--warn); }
+.xs-key.xs-closed { background: var(--accent); }
 
 .xs-bar-track, .xs-band-track {
   display: flex; background: var(--border); border-radius: 3px; overflow: hidden;
@@ -742,8 +744,8 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .xs-band-track { height: 100%; flex: 1; min-width: 0; }
 .xs-seg { border: 0; padding: 0; height: 100%; cursor: pointer; min-width: 2px; }
 .xs-seg:disabled { cursor: default; }
-.xs-seg.xs-open { background: var(--accent); }
-.xs-seg.xs-closed { background: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.xs-seg.xs-open { background: var(--warn); }
+.xs-seg.xs-closed { background: var(--accent); }
 .xs-seg:hover:not(:disabled) { filter: brightness(1.15); }
 .xs-seg:focus-visible { outline: 2px solid var(--heading); outline-offset: -2px; }
 /* The rows are containers now, not buttons — the segments inside are the

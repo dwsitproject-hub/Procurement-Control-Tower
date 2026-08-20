@@ -23,7 +23,9 @@ export const CHART_META: ChartMeta[] = [
     title: 'Committed value by spend category',
     tab: 'execsummary',
     grain: 'po_line',
-    unit: 'idr',
+    // Base unit is USD with an *_idr twin, so the header's currency toggle
+    // switches the panel instead of it always reading rupiah.
+    unit: 'usd',
     notes: [
       'STO and deleted lines excluded',
       'Category resolves: mapping file, then SAP material master, then unmapped',

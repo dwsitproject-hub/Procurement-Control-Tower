@@ -1060,8 +1060,51 @@ export const PARITY_CHARTS: ChartSpec[] = [
                                       'notSto', true, 'notDeleted', true)) AS drill
             FROM g ORDER BY size_band`,
   },
+  // USD siblings of the two series below. The catalogue's convention is a base
+  // series plus an `*_idr` twin over the SAME rows with the SAME drill, and the
+  // frontend switches between them on the currency toggle — without these the
+  // panel showed rupiah no matter what the header said.
+  //
+  // Plain sum(net_order_value_usd), matching po_value_by_category: an unrated
+  // line contributes null and is skipped. That is the catalogue's existing
+  // behaviour for chart money, and the strict-FX treatment stays where it
+  // belongs, on the KPI cards that declare a currencyBasis.
   {
-    chartId: 'exec_value_by_category', seriesKey: 'open', seriesLabel: 'Open', unit: 'idr',
+    chartId: 'exec_value_by_category', seriesKey: 'open', seriesLabel: 'Open (USD)', unit: 'usd',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_usd AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'closed', seriesLabel: 'Closed (USD)', unit: 'usd',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_usd AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'open_idr', seriesLabel: 'Open (IDR)', unit: 'idr',
     sql: `WITH b AS (
             SELECT spend_category, status, net_order_value_idr AS v
               FROM ${POL}
@@ -1078,7 +1121,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM b GROUP BY 1,2 ORDER BY 1`,
   },
   {
-    chartId: 'exec_value_by_category', seriesKey: 'closed', seriesLabel: 'Closed', unit: 'idr',
+    chartId: 'exec_value_by_category', seriesKey: 'closed_idr', seriesLabel: 'Closed (IDR)', unit: 'idr',
     sql: `WITH b AS (
             SELECT spend_category, status, net_order_value_idr AS v
               FROM ${POL}

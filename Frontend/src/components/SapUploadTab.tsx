@@ -36,6 +36,12 @@ const EXPECTED = [
   { feed: 'prel', label: 'PR Release', hint: 'requisition release/approval steps' },
   { feed: 'por', label: 'PO Release', hint: 'purchase-order release steps' },
   { feed: 'fx', label: 'Rate Conversion', hint: 'monthly FX rate table' },
+  // Reference data — optional. Listed so an operator can see and schedule them,
+  // but a bundle without them publishes normally.
+  { feed: 'pgrp', label: 'Purchasing Groups', hint: 'P Grp — buyer desk master', optional: true },
+  { feed: 'porg', label: 'Purchasing Orgs', hint: 'P Org — purchasing org master', optional: true },
+  { feed: 'matm', label: 'Material Master', hint: 'Mat group — material code, description, SAP category', optional: true },
+  { feed: 'zuser', label: 'SAP Users', hint: 'zuser — user id to name', optional: true },
 ];
 
 const SEV_PILL: Record<Finding['severity'], string> = {
@@ -92,6 +98,8 @@ interface FeedScan {
 const FEED_LABEL: Record<string, string> = {
   pr: 'PR Report', po: 'PO Report', gr: 'GR List',
   prel: 'PR Release', por: 'PO Release', fx: 'Rate Conversion',
+  pgrp: 'Purchasing Groups', porg: 'Purchasing Orgs',
+  matm: 'Material Master', zuser: 'SAP Users',
 };
 
 /**
@@ -668,7 +676,15 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
                   return (
                     <tr key={e.feed} className={i % 2 ? '' : 're'}>
                       <td><code>{e.feed}</code></td>
-                      <td>{e.label}</td>
+                      <td>
+                        {e.label}{' '}
+                        {'optional' in e && e.optional && (
+                          // Stated on the row so nobody concludes a bundle now
+                          // needs ten files: the six transactional exports are
+                          // still all-or-nothing, these four are not.
+                          <span className="bs sl">optional</span>
+                        )}
+                      </td>
                       <td className="muted">{e.hint}</td>
                       <td>
                         {guess
@@ -687,7 +703,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
               ref={inputRef}
               type="file"
               multiple
-              accept=".xlsx,.XLSX,.xls,.XLS"
+              accept=".xlsx,.XLSX,.xls,.XLS,.csv,.CSV"
               onChange={(e) => pick(e.target.files)}
               aria-label="SAP export files"
             />

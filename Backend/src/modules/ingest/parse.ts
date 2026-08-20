@@ -43,7 +43,87 @@ export async function readSheet(path: string): Promise<SheetData> {
   return readSheetFromBuffer(buf);
 }
 
+/**
+ * Does this buffer look like an XLSX (a ZIP container) rather than text?
+ *
+ * Checked by content, not by extension, because the SAP reference exports are
+ * tab-delimited TEXT named `.csv` — trusting the name would send them to the
+ * workbook reader and fail with a confusing ZIP error.
+ */
+function looksLikeZip(buf: Buffer | Uint8Array): boolean {
+  return buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+}
+
+/**
+ * Read SAP list output — the plain-text form of an ALV list, saved with a .csv
+ * extension but delimited with TABS.
+ *
+ * Everything here is driven by the actual files, not by a general CSV notion:
+ *
+ *   * The first line is blank and the header is on the second (P Grp, P Org),
+ *     or the first line is a report title with a page number and the header is
+ *     on the third (zuser). So the header is FOUND, not assumed to be row 0.
+ *   * Data rows begin with the delimiter, giving an empty leading field. It is
+ *     dropped, otherwise every column is off by one.
+ *   * In the user listing the header is PIPE-delimited (`|Client|User |...`)
+ *     while its data rows are TAB-delimited. The two are split on their own
+ *     delimiters rather than one guess for the whole file — this is the detail
+ *     that makes a naive reader silently produce a single-column sheet.
+ *   * Blank separator lines between the header and the data are skipped.
+ *
+ * Values come back as strings; coercion stays where it already lives, in the
+ * contract-driven extraction below.
+ */
+function readSapListFromBuffer(buf: Buffer | Uint8Array): SheetData {
+  const text = Buffer.from(buf).toString('utf8').replace(/^\uFEFF/, '');
+  const lines = text.split(/\r?\n/);
+
+  const split = (line: string): string[] => {
+    // Pick the delimiter per line: the header may use a different one from the
+    // data it describes.
+    const TAB = '\t';
+    const delim = line.includes(TAB) ? TAB : line.includes('|') ? '|' : TAB;
+    const parts = line.split(delim).map((c) => c.trim());
+    // A leading delimiter yields an empty first field; likewise a trailing one.
+    while (parts.length > 0 && parts[0] === '') parts.shift();
+    while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+    return parts;
+  };
+
+  // The header is the first line that yields two or more non-empty fields. A
+  // title line ("07.08.2026   User_Listing (07.08.2026)   1") collapses to one
+  // field once split, which is exactly what disqualifies it.
+  let headerIdx = -1;
+  let headers: string[] = [];
+  for (let i = 0; i < lines.length && i < 50; i += 1) {
+    const line = lines[i];
+    if (line === undefined || line.trim() === '') continue;
+    const parts = split(line);
+    if (parts.length >= 2 && parts.every((x) => x !== '')) {
+      headerIdx = i;
+      headers = parts;
+      break;
+    }
+  }
+  if (headerIdx < 0) throw new Error('no header row found in list output');
+
+  const rows: unknown[][] = [];
+  for (let i = headerIdx + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line === undefined || line.trim() === '') continue;
+    const parts = split(line);
+    if (parts.length === 0) continue;
+    // Pad or trim to the header width so downstream indexing is positional.
+    const row: unknown[] = headers.map((_, c) => (parts[c] === undefined ? null : parts[c]));
+    if (row.some((c) => c !== null && c !== '')) rows.push(row);
+  }
+
+  return { sheetName: 'list', headers, rows };
+}
+
 export function readSheetFromBuffer(buf: Buffer | Uint8Array): SheetData {
+  if (!looksLikeZip(buf)) return readSapListFromBuffer(buf);
+
   const wb = XLSX.read(buf, {
     type: 'buffer',
     cellDates: false,

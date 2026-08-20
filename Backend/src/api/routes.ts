@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
-import { KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
+import { FEEDS, KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
 import { resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
 import { healthCheck, query, queryOne } from '../db/client.js';
@@ -219,7 +219,10 @@ export function buildRouter(): Router {
   const r = express.Router();
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: env.UPLOAD_MAX_FILE_MB * 1024 * 1024, files: 6 },
+    // FEEDS.length, not 6: the bundle grew by four optional reference files
+    // (018) and multer silently rejects the surplus, which would surface as a
+    // confusing "incomplete bundle" for a user who selected all ten.
+    limits: { fileSize: env.UPLOAD_MAX_FILE_MB * 1024 * 1024, files: FEEDS.length },
   });
 
   // ── auth ──
@@ -906,7 +909,7 @@ export function buildRouter(): Router {
 
   // Multer parses the multipart body first; role() then authorises before any
   // file is written to the spool.
-  r.post('/api/v1/ingest/upload', upload.array('files', 6), role('steward', async (req, res, ctx) => {
+  r.post('/api/v1/ingest/upload', upload.array('files', FEEDS.length), role('steward', async (req, res, ctx) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (files.length === 0) throw new HttpProblem(400, 'invalid-body', 'No files supplied');
 

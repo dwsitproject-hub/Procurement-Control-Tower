@@ -64,7 +64,11 @@ export class ShareFolderSource implements FileSource {
     const now = Date.now();
 
     for (const name of names) {
-      if (!/\.xlsx$/i.test(name)) continue;
+      // Workbooks and SAP list output. The reference exports are TAB-delimited
+      // text saved as .csv (018); the content is still verified by
+      // assertMagicBytes below, so the extension only decides what to look at,
+      // never what to trust.
+      if (!/\.(xlsx|csv)$/i.test(name)) continue;
       if (name.startsWith('~$')) continue; // Excel lock file
 
       const full = join(this.root, name);
@@ -148,13 +152,36 @@ export const DEFAULT_SAFETY: SafetyLimits = {
 };
 
 export function assertMagicBytes(buf: Buffer, displayName: string): void {
-  // A valid XLSX is a ZIP container: it must begin PK\x03\x04.
-  if (buf.length < 4 || buf[0] !== 0x50 || buf[1] !== 0x4b || buf[2] !== 0x03 || buf[3] !== 0x04) {
-    throw new Error(`${displayName}: not a valid XLSX file (magic-byte check failed)`);
+  const isZip = buf.length >= 4
+    && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+
+  if (isZip) {
+    // A real XLSX always contains the content-types part. A renamed .zip will not.
+    if (!buf.includes(Buffer.from('[Content_Types].xml'))) {
+      throw new Error(`${displayName}: not a valid XLSX file (missing [Content_Types].xml)`);
+    }
+    return;
   }
-  // A real XLSX always contains the content-types part. A renamed .zip will not.
-  if (!buf.includes(Buffer.from('[Content_Types].xml'))) {
-    throw new Error(`${displayName}: not a valid XLSX file (missing [Content_Types].xml)`);
+
+  // Not a ZIP: the only other thing the reader accepts is SAP list output —
+  // tab-delimited text saved with a .csv extension. It is admitted on CONTENT,
+  // not on the extension, and only if it is genuinely text: a binary blob must
+  // still be refused here rather than reaching a parser that would misread it.
+  //
+  // Tab, LF and CR are exactly what these exports are made of, so they are
+  // allowed; a NUL or any other C0 byte means binary.
+  if (buf.length === 0) {
+    throw new Error(`${displayName}: file is empty`);
+  }
+  const probe = buf.subarray(0, Math.min(buf.length, 8192));
+  for (const byte of probe) {
+    const isTextControl = byte === 0x09 || byte === 0x0a || byte === 0x0d;
+    if (byte < 0x20 && !isTextControl) {
+      throw new Error(
+        `${displayName}: not a valid XLSX or text export (binary content at byte 0x${
+          byte.toString(16).padStart(2, '0')})`,
+      );
+    }
   }
 }
 

@@ -583,7 +583,7 @@ DISCOVERED → SCANNING → PARSING → VALIDATING → TRANSFORMING → READY �
 ### 10.3 Path 2 — Manual upload
 
 1. A Data Steward or Admin opens **Data → Upload**.
-2. Drag-and-drop or select up to six files. Client-side pre-checks (extension, size, count) give immediate feedback; they are advisory only — the server re-checks everything.
+2. Drag-and-drop or select up to ten files (the six transactional exports plus the four optional reference exports of Annex A.13). Client-side pre-checks (extension, size, count) give immediate feedback; they are advisory only — the server re-checks everything.
 3. Each file streams to `UPLOAD_SPOOL_PATH` under a generated name. **The user's filename is never used as a path component** and is escaped wherever displayed.
 4. Server-side gates, in order: size cap → extension → **magic-byte check** (a valid XLSX begins `PK\x03\x04` and must contain `[Content_Types].xml`) → ClamAV scan → XLSX safety limits (§19.6) → header-signature classification.
 5. The classification result is shown before commitment: which file mapped to which feed, row counts, and any drift. The user confirms or cancels.
@@ -1364,7 +1364,7 @@ Uploads are the largest attack surface in the system. Every gate below is mandat
 | Gate | Rule |
 |---|---|
 | Size | ≤ `UPLOAD_MAX_FILE_MB` per file; ≤ `UPLOAD_MAX_BATCH_MB` per batch; enforced at nginx and again in the app |
-| Count | ≤ 6 files per batch |
+| Count | ≤ 10 files per batch |
 | Extension | `.xlsx` / `.XLSX` only (`.xls` and `.xlsm` rejected — no legacy binary, no macros) |
 | Magic bytes | Must begin `PK\x03\x04` and contain `[Content_Types].xml` |
 | Filename | Never used as a filesystem path; stored under a generated UUID; HTML-escaped everywhere it is displayed |

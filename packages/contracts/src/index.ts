@@ -9,8 +9,25 @@ import { z } from 'zod';
 
 // ─────────────────────────────────────────────────────────────── feeds & roles
 
-export const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
+/**
+ * Every feed the ingest can recognise.
+ *
+ * The first six are TRANSACTIONAL and required: a dataset publishes with all of
+ * them or not at all, so a figure can never be assembled from a partial bundle.
+ * The last four are REFERENCE data — SAP master exports that describe what a
+ * code means. They are optional by design (see REQUIRED_FEEDS in
+ * Backend/src/modules/ingest/contracts.ts): they refresh on their own cadence,
+ * and a missing one must not stop the daily PR/PO pickup.
+ */
+export const FEEDS = [
+  'pr', 'prel', 'po', 'por', 'gr', 'fx',
+  'pgrp', 'porg', 'matm', 'zuser',
+] as const;
 export type Feed = (typeof FEEDS)[number];
+
+/** Feeds that carry reference/master data rather than transactions. */
+export const REFERENCE_FEEDS = ['pgrp', 'porg', 'matm', 'zuser'] as const;
+export type ReferenceFeed = (typeof REFERENCE_FEEDS)[number];
 
 export const FEED_LABELS: Record<Feed, string> = {
   pr: 'PR Report',
@@ -19,6 +36,10 @@ export const FEED_LABELS: Record<Feed, string> = {
   por: 'PO Release',
   gr: 'GR List',
   fx: 'FX Rates',
+  pgrp: 'Purchasing Groups',
+  porg: 'Purchasing Orgs',
+  matm: 'Material Master',
+  zuser: 'SAP Users',
 };
 
 export const ROLES = ['viewer', 'analyst', 'manager', 'auditor', 'steward', 'admin'] as const;

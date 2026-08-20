@@ -34,8 +34,19 @@ export interface ClassifyResult {
   healedFields: string[];
 }
 
-/** Order matters: most specific signature first. */
-const EVALUATION_ORDER: Feed[] = ['po', 'gr', 'por', 'prel', 'pr', 'fx'];
+/**
+ * Order matters: most specific signature first.
+ *
+ * The four reference feeds are evaluated LAST on purpose. Their signatures are
+ * short — a two-column file cannot say much about itself — so letting them run
+ * first risks a transactional export matching a master-data contract. Checking
+ * the six rich signatures first means a tie can only ever resolve in favour of
+ * the transactional feed.
+ */
+const EVALUATION_ORDER: Feed[] = [
+  'po', 'gr', 'por', 'prel', 'pr', 'fx',
+  'matm', 'zuser', 'pgrp', 'porg',
+];
 
 export function classifyHeaders(
   headers: readonly string[],

@@ -50,6 +50,15 @@ export const FEED_META: { feed: Feed; label: string; defaultPattern: string }[] 
   { feed: 'prel', label: 'PR Release', defaultPattern: 'PR Release*.XLSX' },
   { feed: 'por', label: 'PO Release', defaultPattern: 'PO Release*.XLSX' },
   { feed: 'fx', label: 'Rate Conversion', defaultPattern: 'Rate Conversion*.xlsx' },
+  // Reference/master data (018). Optional: a slot left empty simply means this
+  // file is not picked up on a schedule, and the six transactional feeds keep
+  // publishing without it. Patterns are name-anchored so the extra files that
+  // share these folders are never mistaken for one another — note that the user
+  // listing embeds its export date in the filename.
+  { feed: 'pgrp', label: 'Purchasing Groups', defaultPattern: 'P Grp*.csv' },
+  { feed: 'porg', label: 'Purchasing Orgs', defaultPattern: 'P Org*.csv' },
+  { feed: 'matm', label: 'Material Master', defaultPattern: 'Mat group*.xlsx' },
+  { feed: 'zuser', label: 'SAP Users', defaultPattern: 'zuser*.csv' },
 ];
 
 export interface FeedConfig {
@@ -226,7 +235,7 @@ async function scanFeed(f: FeedConfig, settleSeconds: number): Promise<FeedScan>
   for (const name of names) {
     let reason: string | null = null;
     if (name.startsWith('~$')) reason = 'Excel lock file';
-    else if (!/\.xlsx$/i.test(name)) reason = 'not an .xlsx file';
+    else if (!/\.(xlsx|csv)$/i.test(name)) reason = 'not an .xlsx or .csv file';
     else if (!matchesPattern(name, f.pattern)) reason = 'does not match the pattern';
 
     let size = 0;

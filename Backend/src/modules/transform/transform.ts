@@ -999,6 +999,20 @@ export async function runTransform(
     [versionId],
   );
 
+  // ── reference / master data (018) ──
+  // The four SAP master exports. Kept separate from the conformed dimensions
+  // above because those are DERIVED FROM THE FACTS of this version, while these
+  // come from their own files and describe what a code means today.
+  //
+  // Global and last-writer-wins, matching dim_company / dim_purch_group. Nothing
+  // here can move a published figure: every attribute a number depends on is
+  // already denormalised onto the facts at this point.
+  //
+  // Each is skipped silently when its feed is absent from the bundle — that is
+  // the whole point of them being optional, and a bundle of six files must not
+  // wipe reference data loaded by an earlier bundle of ten.
+  await upsertReferenceData(client, batchId);
+
   await client.query(
     `ANALYZE core.fact_pr_item_v${versionId};
      ANALYZE core.fact_po_line_v${versionId};
@@ -1061,6 +1075,135 @@ export async function runTransform(
   );
 
   return { datasetVersionId: versionId, asOfDate, metrics };
+}
+
+/**
+ * Load the four SAP reference exports into their dimension tables.
+ *
+ * Each feed is independent: a bundle may carry all four, one, or none. An absent
+ * feed is a no-op rather than a delete — reference data persists across bundles
+ * that do not re-supply it.
+ */
+async function upsertReferenceData(client: pg.PoolClient, batchId: number): Promise<void> {
+  // ── Purchasing groups ──
+  // is_ho is recomputed here with 017's rule rather than trusted from the file,
+  // which carries no such column: a desk is Head Office when its code starts
+  // '@', or its description starts "HO", or contains "HO-".
+  const pgrp = await loadStaged(batchId, 'pgrp');
+  if (pgrp.length > 0) {
+    const rows = pgrp
+      .map((r) => {
+        const code = s(r.payload['code']);
+        const description = s(r.payload['description']);
+        return { code, description };
+      })
+      .filter((r): r is { code: string; description: string } => r.code !== null && r.code !== '');
+    if (rows.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_purch_group (code, description, is_ho, source)
+         SELECT c, d,
+                (c LIKE '@%' OR d LIKE 'HO%' OR d LIKE '%HO-%'),
+                'sap_export'
+           FROM unnest($1::text[], $2::text[]) AS t(c, d)
+         ON CONFLICT (code) DO UPDATE
+           SET description = EXCLUDED.description,
+               is_ho       = EXCLUDED.is_ho,
+               source      = EXCLUDED.source`,
+        [rows.map((r) => r.code), rows.map((r) => r.description ?? '')],
+      );
+    }
+  }
+
+  // ── Purchasing organisations ──
+  const porg = await loadStaged(batchId, 'porg');
+  if (porg.length > 0) {
+    const codes: string[] = [];
+    const descs: string[] = [];
+    for (const r of porg) {
+      const code = s(r.payload['code']);
+      if (code === null || code === '') continue;
+      codes.push(code);
+      descs.push(s(r.payload['description']) ?? '');
+    }
+    if (codes.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_purch_org (code, description)
+         SELECT c, d FROM unnest($1::text[], $2::text[]) AS t(c, d)
+         ON CONFLICT (code) DO UPDATE SET description = EXCLUDED.description`,
+        [codes, descs],
+      );
+    }
+  }
+
+  // ── Material master ──
+  // The export has a handful of duplicate material codes (11,134 rows for
+  // 11,131 codes), so the same statement would hit "cannot affect row a second
+  // time". DISTINCT ON keeps the last occurrence, matching the file's own order.
+  const matm = await loadStaged(batchId, 'matm');
+  if (matm.length > 0) {
+    const codes: string[] = [];
+    const descs: (string | null)[] = [];
+    const cats: (string | null)[] = [];
+    for (const r of matm) {
+      const code = s(r.payload['materialCode']);
+      if (code === null || code === '') continue;
+      codes.push(code);
+      descs.push(s(r.payload['description']));
+      cats.push(s(r.payload['category']));
+    }
+    if (codes.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_material_master (material_code, description, category)
+         SELECT DISTINCT ON (c) c, d, k
+           FROM unnest($1::text[], $2::text[], $3::text[]) WITH ORDINALITY AS t(c, d, k, n)
+          ORDER BY c, n DESC
+         ON CONFLICT (material_code) DO UPDATE
+           SET description = EXCLUDED.description,
+               category    = EXCLUDED.category`,
+        [codes, descs, cats],
+      );
+    }
+  }
+
+  // ── SAP users ──
+  // display_name is precomputed because either part can be blank (background
+  // jobs have no first name), so it is not simply first || ' ' || last. When
+  // both are blank the id itself is the label — never an empty string, which
+  // would render as a gap in a table with no way to tell what it meant.
+  const zuser = await loadStaged(batchId, 'zuser');
+  if (zuser.length > 0) {
+    const clients: string[] = [];
+    const ids: string[] = [];
+    const firsts: (string | null)[] = [];
+    const lasts: (string | null)[] = [];
+    const displays: string[] = [];
+    for (const r of zuser) {
+      const userId = s(r.payload['userId']);
+      if (userId === null || userId === '') continue;
+      const first = s(r.payload['firstName']);
+      const last = s(r.payload['lastName']);
+      const display = [first, last].filter((x) => x !== null && x !== '').join(' ').trim();
+      clients.push(s(r.payload['client']) ?? '');
+      ids.push(userId);
+      firsts.push(first);
+      lasts.push(last);
+      displays.push(display === '' ? userId : display);
+    }
+    if (ids.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_sap_user (client, user_id, first_name, last_name, display_name)
+         SELECT DISTINCT ON (cl, u) cl, u, f, l, dn
+           FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+                WITH ORDINALITY AS t(cl, u, f, l, dn, n)
+          ORDER BY cl, u, n DESC
+         ON CONFLICT (client, user_id) DO UPDATE
+           SET first_name   = EXCLUDED.first_name,
+               last_name    = EXCLUDED.last_name,
+               display_name = EXCLUDED.display_name`,
+        [clients, ids, firsts, lasts, displays],
+      );
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────── FX

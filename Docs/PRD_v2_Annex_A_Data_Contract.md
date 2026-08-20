@@ -22,6 +22,7 @@ Every column list, type, nullability figure, domain value and cardinality below 
 - [A.10 Semantic assertions](#a10-semantic-assertions)
 - [A.11 Cross-feed referential rules](#a11-cross-feed-referential-rules)
 - [A.12 Known dead columns](#a12-known-dead-columns)
+- [A.13 Feeds 7-10 — SAP reference exports (optional)](#a13-feeds-7-10--sap-reference-exports-optional)
 
 ---
 
@@ -518,6 +519,153 @@ Ingested for lineage completeness; never read analytically. Reported once per te
 | GR List | `Ext. Amount in Local Currency` · `Sales Value` · `Sales Value inc. VAT` (all single-valued at 0) |
 
 If a future export populates any of these, V-S03 raises a `WARNING` so the change is noticed rather than absorbed silently.
+
+---
+
+## A.13 Feeds 7-10 — SAP reference exports (optional)
+
+Added 20 Aug 2026. Four SAP master-data exports that describe what a code
+*means*. They differ from feeds 1-6 in three ways, each of which is a deliberate
+design property rather than an accident of implementation:
+
+| | Feeds 1-6 (transactional) | Feeds 7-10 (reference) |
+|---|---|---|
+| Required for a publish | **Yes** — all six or nothing | **No** — absent is a no-op |
+| Destination | version-partitioned facts | global `core.dim_*` tables |
+| Cadence | daily | when master data changes |
+| Format | XLSX workbook | 3 of 4 are tab-delimited text named `.csv` |
+
+**Why optional.** A purchasing group is created once a quarter; PR and PO exports
+land daily. Requiring these would stop the daily pickup because nobody
+re-exported a file that had not changed. `REQUIRED_FEEDS` in
+`Backend/src/modules/ingest/contracts.ts` therefore still lists exactly the six
+transactional feeds.
+
+**Why global rather than version-scoped.** Facts are partitioned by
+`dataset_version_id` so a published figure never moves. Reference data is the
+opposite: it answers "what does this code mean *today*", and a corrected
+description should appear everywhere at once. Nothing here can move a published
+number — every attribute a figure depends on is already denormalised onto the
+fact at transform time.
+
+**An absent feed never deletes.** Reference rows persist across bundles that do
+not re-supply them, so a six-file pickup does not wipe master data loaded by an
+earlier ten-file one. Verified by publishing a bundle with two reference files
+removed and confirming both tables retained their row counts.
+
+### A.13.1 Feed 7 — Purchasing groups (`pgrp`)
+
+Reference file `P Grp.csv` · 300 rows · tab-delimited · header on line 2.
+
+| Column | Status | Field | Notes |
+|---|---|---|---|
+| `PGr` | PK | `code` | |
+| `Description` | REQ | `description` | buyer desk or person's name |
+| `Telephone` | IGN | — | present in the header, empty in all 300 rows |
+| `Fax Number` | IGN | — | as above |
+
+Target `core.dim_purch_group`. `is_ho` is **recomputed** with migration 017's
+rule (code starts `@`, or description starts `HO`, or contains `HO-`) because the
+file carries no such column: 48 Head Office desks, 252 site units.
+
+This feed replaces a hardcoded 299-row seed. The export adds `P61` (Dela
+Oktakia) and disagrees on one description — `L3C` is `Supian Suri` in the seed
+and `INACTIVESupianSuri` in SAP, which is live status a hardcoded map cannot
+know. A `source` column records whether a row came from the seed or the export.
+
+Note that two rows carry an inactive marker typed by hand and inconsistently
+(`INACTIVESupianSuri`, `Inactive-Marrdiana`). Two rows is not a convention, so
+the text is carried through verbatim rather than parsed into a status flag.
+
+### A.13.2 Feed 8 — Purchasing organisations (`porg`)
+
+Reference file `P Org.csv` · 491 rows · tab-delimited.
+
+| Column | Status | Field |
+|---|---|---|
+| `POrg` | PK | `code` |
+| `Purch. org. descr.` | REQ | `description` |
+
+Target `core.dim_purch_org` (new). Covers 100% of the `purch_org` values present
+in the PR and PO facts.
+
+### A.13.3 Feed 9 — Material master (`matm`)
+
+Reference file `Mat group.xlsx` · 11,134 rows → 11,131 codes.
+
+| Column | Status | Field | Notes |
+|---|---|---|---|
+| `No` | IGN | — | row counter in the export, not a business key |
+| `Code` | PK | `materialCode` | |
+| `Desc` | REQ | `description` | |
+| `Category` | REQ | `category` | SAP spend category |
+
+**The filename is misleading**: this is keyed by material CODE, not material
+group. The export contains 3 duplicate codes, so the upsert keeps the last
+occurrence in file order.
+
+13 categories: MRO GENERAL (6,523), MRO SPECIFIC (2,177), HEVE (795), OFFICE IT
+(673), CAPEX (367), CHEMICAL (346), PACKAGING (139), FUEL & ENERGY (104), COAL
+(4), METHANOL (1), FUEL (1), SERVICES (1), one blank.
+
+> **This is NOT `material_category`.** The `material_category` column on the
+> facts is v1's rule keyed by material GROUP, and it rests on a parity heuristic
+> — even group number becomes Spare Parts-General, odd becomes Spare
+> Parts-Factory — which `packages/rules/src/category.ts` explicitly flags as
+> unconfirmed. `dim_material_master.category` is a **different vocabulary at a
+> different grain from an authoritative source**. Repointing the existing charts
+> at it would silently restate every category figure and break v1 parity, so it
+> is stored alongside and nothing is repointed. Whether it *should* replace the
+> heuristic is a business decision for the category managers.
+
+### A.13.4 Feed 10 — SAP user directory (`zuser`)
+
+Reference file `zuser <yyyymmdd>.csv` · 2,073 rows · title line, **pipe**-delimited
+header, **tab**-delimited data.
+
+| Column | Status | Field | Notes |
+|---|---|---|---|
+| `Client` | PK | `client` | `300` throughout |
+| `User` | PK | `userId` | |
+| `First Name` | OPT | `firstName` | blank for background-job users |
+| `Last Name` | REQ | `lastName` | |
+
+Target `core.dim_sap_user` (new). Turns the SAP user id into a person: covers
+**100%** of the distinct `created_by` values on the PR and PO facts and of
+`login_name` on PR release steps, background jobs included.
+
+`display_name` is precomputed because either name part can be blank, so it is
+not simply `first || ' ' || last`; when both are blank the id itself is the
+label, never an empty string.
+
+> **Personal data.** `fact_pr_item.requisitioner` and `.created_by` are already
+> annotated "personal data: restricted display" in migration 002. This feed does
+> not widen *who* can see a document — it makes an id already on screen legible —
+> but it does turn an opaque code into a named employee. It is therefore kept as
+> its own table, joined for display, rather than materialised onto the facts, so
+> there is one place to gate, mask or purge it. No masking is currently enforced
+> anywhere in the API.
+
+Note that `requisitioner` is **not** a user id and does not join here: it is a
+free-text SAP field holding values like `FAIQ MTC` alongside non-names such as
+`STANDARD` and `URGENT`.
+
+### A.13.5 Reading SAP list output
+
+Three of these four are not spreadsheets. The reader
+(`Backend/src/modules/ingest/parse.ts`) is driven by what the files actually
+contain:
+
+- The header is **found**, not assumed to be row 0 — line 1 is blank in `P Grp`
+  and `P Org`, and `zuser` opens with a report title and page number.
+- Data rows begin with the delimiter, giving an empty leading field that must be
+  dropped or every column shifts by one.
+- In `zuser` the header is pipe-delimited while its data rows are tab-delimited.
+  Each line is split on its own delimiter; one guess for the whole file yields a
+  single-column sheet.
+- Format is decided by **content, not extension**: a ZIP signature goes to the
+  workbook reader, anything else is checked for C0 control bytes and refused if
+  binary.
 
 ---
 

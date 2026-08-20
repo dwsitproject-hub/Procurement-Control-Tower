@@ -871,6 +871,78 @@ const DIST_BUCKETS = `CASE WHEN d <= 3 THEN '0-3' WHEN d <= 7 THEN '4-7' WHEN d 
 const DIST_ORDER = `CASE WHEN d <= 3 THEN 1 WHEN d <= 7 THEN 2 WHEN d <= 14 THEN 3
                          WHEN d <= 30 THEN 4 WHEN d <= 60 THEN 5 ELSE 6 END`;
 
+/**
+ * v1's PO value brackets — ch-po-brkval / ch-po-brkcnt. "JT" = juta, million IDR.
+ *
+ * The bracket is a property of the DOCUMENT, not of the line and not of the
+ * slice: v1's renderPOBrackets sums a PO's IDR lines and brackets that total,
+ * and the drill's `poDocBracket` predicate re-aggregates the same way. So under
+ * a global filter the bracket stays the WHOLE document's total while the
+ * measures — the amount, the document count, and the lines the drill opens —
+ * cover only the surviving lines. A 30 Jt PO with 4 Jt still open is a
+ * "25 - 100 JT" document with 4 Jt open, not a "0 - 5 JT" one.
+ *
+ * Bracketing on the filtered total instead would put the same PO in different
+ * brackets on different toggles, and would disagree with the drill by a few
+ * dozen lines in each direction under scope=open (user decision, 20 Aug 2026).
+ */
+const PO_BRACKETS: { key: string; lo: number; hi: number | null }[] = [
+  { key: '0 - 5 JT', lo: 0, hi: 5_000_000 },
+  { key: '5 - 25 JT', lo: 5_000_000, hi: 25_000_000 },
+  { key: '25 - 100 JT', lo: 25_000_000, hi: 100_000_000 },
+  { key: '100 - 500 JT', lo: 100_000_000, hi: 500_000_000 },
+  { key: '>500 JT', lo: 500_000_000, hi: null },
+];
+
+// `slice` is the filtered population — one row per PO of the lines that survive
+// the global filter. `total` is deliberately a SECOND, UNFILTERED pass over the
+// same lines, because it supplies the bracket rather than a measure; the join
+// then drops it if the document is not worth anything, exactly as the drill's
+// `_t.total > 0` does.
+//
+// The injection point is pinned with /*F*/ rather than left to injectFilter's
+// "first dataset_version_id = $1 wins" rule, because here the two anchors mean
+// different things and landing on the wrong one is silent.
+//
+// NOTE: do not write the anchor text itself in a SQL comment in this file.
+// injectFilter searches the raw SQL string, so a comment that mentions it
+// becomes the first match and the filter clause is appended INSIDE the comment -
+// silently dropped, while its bind parameter is still supplied. That surfaces as
+// a 'bind message supplies 2 parameters' error, nowhere near the real cause.
+//
+// row_count is the LINES behind the bar, which is what the drill opens — the
+// same entity-vs-row convention the PO Hold card uses.
+function poBracketSql(
+  b: { key: string; lo: number; hi: number | null },
+  metric: 'amount' | 'documents',
+): string {
+  const range = b.hi === null ? `d.total >= ${b.lo}` : `d.total >= ${b.lo} AND d.total < ${b.hi}`;
+  const bucket = metric === 'amount' ? 'Amount in Local Currency' : 'PO Count';
+  const value = metric === 'amount'
+    ? `(SELECT sum(d.amount) FROM docs d WHERE ${range})::numeric`
+    : `(SELECT count(*)::numeric FROM docs d WHERE ${range})`;
+  return `WITH slice AS (
+               SELECT po_no, sum(net_order_value) AS amount, count(*) AS lines
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted /*F*/
+                GROUP BY 1),
+             docs AS (
+               SELECT s.amount, s.lines, t.total
+                 FROM slice s
+                 JOIN (SELECT po_no, sum(net_order_value) AS total
+                         FROM ${POL}
+                        WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                          AND NOT is_sto AND NOT is_deleted
+                        GROUP BY 1 HAVING sum(net_order_value) > 0) t ON t.po_no = s.po_no)
+           SELECT '${bucket}' AS bucket_key, '${bucket}' AS bucket_label,
+                  ${value} AS value,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d WHERE ${range}) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','${b.key}','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`;
+}
+
 export const PARITY_CHARTS: ChartSpec[] = [
   // ── Executive Summary charts (022) ──
   //
@@ -1674,231 +1746,21 @@ export const PARITY_CHARTS: ChartSpec[] = [
   // out becomes the first match and the clause is appended inside the comment:
   // silently dropped, bind parameter still supplied, and it surfaces as a "bind
   // message supplies 2 parameters" error nowhere near the cause.
-  {
-    chartId: 'po_bracket_value', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'idr',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'Amount in Local Currency' AS bucket_key,
-                  'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 0 AND d.total < 5000000)::numeric AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 0 AND d.total < 5000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_count', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'count',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 0 AND d.total < 5000000) AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 0 AND d.total < 5000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_value', seriesKey: '5 - 25 JT', seriesLabel: '5 - 25 JT', unit: 'idr',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'Amount in Local Currency' AS bucket_key,
-                  'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 5000000 AND d.total < 25000000)::numeric AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 5000000 AND d.total < 25000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_count', seriesKey: '5 - 25 JT', seriesLabel: '5 - 25 JT', unit: 'count',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 5000000 AND d.total < 25000000) AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 5000000 AND d.total < 25000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_value', seriesKey: '25 - 100 JT', seriesLabel: '25 - 100 JT', unit: 'idr',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'Amount in Local Currency' AS bucket_key,
-                  'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 25000000 AND d.total < 100000000)::numeric AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 25000000 AND d.total < 100000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_count', seriesKey: '25 - 100 JT', seriesLabel: '25 - 100 JT', unit: 'count',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 25000000 AND d.total < 100000000) AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 25000000 AND d.total < 100000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_value', seriesKey: '100 - 500 JT', seriesLabel: '100 - 500 JT', unit: 'idr',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'Amount in Local Currency' AS bucket_key,
-                  'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 100000000 AND d.total < 500000000)::numeric AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 100000000 AND d.total < 500000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_count', seriesKey: '100 - 500 JT', seriesLabel: '100 - 500 JT', unit: 'count',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 100000000 AND d.total < 500000000) AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 100000000 AND d.total < 500000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_value', seriesKey: '>500 JT', seriesLabel: '>500 JT', unit: 'idr',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'Amount in Local Currency' AS bucket_key,
-                  'Amount in Local Currency' AS bucket_label,
-                  (SELECT sum(x.net_order_value) FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 500000000)::numeric AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 500000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
-  {
-    chartId: 'po_bracket_count', seriesKey: '>500 JT', seriesLabel: '>500 JT', unit: 'count',
-    sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted
-                GROUP BY 1 HAVING sum(net_order_value) > 0),
-               lines AS (
-               SELECT po_no, net_order_value
-                 FROM ${POL}
-                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
-                  AND NOT is_sto AND NOT is_deleted/*F*/)
-           SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
-                  (SELECT count(DISTINCT x.po_no)::numeric FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 500000000) AS value,
-                  (SELECT count(*)::int FROM lines x JOIN docs d ON d.po_no = x.po_no
-                    WHERE d.total >= 500000000) AS row_count,
-                  jsonb_build_object('grain','po_line','filters',
-                    jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
-                                       'notSto',true,'notDeleted',true)) AS drill`,
-  },
+  // Value first, then count, per bracket — the order the two panels draw their
+  // stacked series in. Generated rather than written ten times: the SQL is
+  // identical apart from the range and the metric, and ten hand-maintained
+  // copies is precisely how the row_count half of them came to be filtered
+  // differently from the value half.
+  ...PO_BRACKETS.flatMap((b): ChartSpec[] => [
+    {
+      chartId: 'po_bracket_value', seriesKey: b.key, seriesLabel: b.key, unit: 'idr',
+      sql: poBracketSql(b, 'amount'),
+    },
+    {
+      chartId: 'po_bracket_count', seriesKey: b.key, seriesLabel: b.key, unit: 'count',
+      sql: poBracketSql(b, 'documents'),
+    },
+  ]),
   // ── v1's ch-po-issued: Head Office desks vs site UNITs ──
   {
     chartId: 'po_issued_by', seriesKey: 'documents', seriesLabel: 'PO documents', unit: 'count',

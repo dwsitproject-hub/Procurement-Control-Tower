@@ -836,6 +836,15 @@ interface ChartSpec {
   unit: string;
   /** Must return bucket_key, bucket_label, value, row_count, drill (jsonb). */
   sql: string;
+  /**
+   * Table alias the global-filter clause must qualify, when this SERIES joins two
+   * facts. Per-series, not per-chart: aging_by_priority's first series is a
+   * single-table query on fact_pr_item (no alias) while its second joins pol to
+   * pri and needs 'pol.'. A chart-level alias cannot be right for both, and
+   * before all series were computed under a filter only the first ever ran, so
+   * the mismatch was invisible.
+   */
+  filterAlias?: string;
 }
 
 /** Six PO-approval bands (user decision 4 Aug 2026), same-day first. */
@@ -1031,6 +1040,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'aging_by_priority', seriesKey: 'e2e', seriesLabel: 'E2E', unit: 'days',
+    filterAlias: 'pol.',
     sql: `SELECT COALESCE(pol.priority_label,'(unlabelled)') AS bucket_key,
                  COALESCE(pol.priority_label,'(unlabelled)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric(8,1) AS value,
@@ -1652,6 +1662,12 @@ export const PARITY_CHARTS: ChartSpec[] = [
   //
   // `value` and `row_count` both read off `lines`, so the bar, its count and the
   // rows the drill opens can never be three different populations.
+  //
+  // Keep the anchor text out of any -- comment INSIDE these template literals.
+  // injectFilter scans the raw SQL string, so a comment that spells the anchor
+  // out becomes the first match and the clause is appended inside the comment:
+  // silently dropped, bind parameter still supplied, and it surfaces as a "bind
+  // message supplies 2 parameters" error nowhere near the cause.
   {
     chartId: 'po_bracket_value', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'idr',
     sql: `WITH docs AS (

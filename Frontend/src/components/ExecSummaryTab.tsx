@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatNumber } from '../lib/format';
+import { ExecFocusModal } from './ExecFocusModal';
 
 /**
  * Executive Summary — the one page that states a conclusion rather than
@@ -44,6 +45,9 @@ interface Props {
    * these two now do (see PARITY_CHARTS).
    */
   filterQuery: string;
+  /** The Overview's own KPI and chart lists, so the focus panel mirrors it. */
+  overviewKpis: string[];
+  overviewCharts: string[];
   onDrill: (token: string, label: string) => void;
   currency: 'USD' | 'IDR';
   asOfDate: string | null;
@@ -93,9 +97,9 @@ function pct(v: number | null, dp = 1): string {
  * Each SEGMENT is separately clickable and carries its own drill, so "Open
  * METHANOL" opens exactly those lines.
  */
-function RankedBars({ data, onDrill, emphasiseTop }: {
+function RankedBars({ data, onFocus, emphasiseTop }: {
   data: ChartResponse;
-  onDrill: (token: string, label: string) => void;
+  onFocus: (title: string, subtitle: string, slice: string) => void;
   emphasiseTop: number;
 }) {
   const openS = data.series.find((x) => x.key === 'open');
@@ -135,11 +139,14 @@ function RankedBars({ data, onDrill, emphasiseTop }: {
             type="button"
             className={`xs-seg ${cls}`}
             style={{ width: `${w(pt.value ?? 0)}%` }}
-            disabled={!pt.drillToken}
-            title={`${what} ${r.label} — ${rupiah(pt.value)}, ${formatNumber(pt.rowCount)} PO lines`}
+            title={`${what} ${r.label} — ${rupiah(pt.value)}, ${formatNumber(pt.rowCount)} PO lines. Click for the Overview of this slice.`}
             onClick={(e) => {
               e.stopPropagation();
-              if (pt.drillToken) onDrill(pt.drillToken, `${r.label} — ${what}`);
+              onFocus(
+                `${r.label} — ${what}`,
+                `${rupiah(pt.value)} · ${formatNumber(pt.rowCount)} PO lines`,
+                `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
+              );
             }}
           />
         ) : null);
@@ -174,9 +181,9 @@ function RankedBars({ data, onDrill, emphasiseTop }: {
  * "100-500 Jt" above "500 Jt - 1 Bio"; on an interval scale that destroys the
  * distribution shape the panel exists to show.
  */
-function BandPairs({ data, onDrill }: {
+function BandPairs({ data, onFocus }: {
   data: ChartResponse;
-  onDrill: (token: string, label: string) => void;
+  onFocus: (title: string, subtitle: string, slice: string) => void;
 }) {
   const S = (k: string) => data.series.find((x) => x.key === k);
   const ov = S('open_value'); const cv = S('closed_value');
@@ -189,15 +196,18 @@ function BandPairs({ data, onDrill }: {
 
   const seg = (
     pt: { value: number | null; rowCount: number; drillToken: string | null } | null,
-    cls: string, label: string, band: string,
+    cls: string, label: string, band: string, bandKey: string,
   ) => (pt && (pt.value ?? 0) > 0 ? (
     <button
       type="button"
       className={`xs-seg ${cls}`}
       style={{ width: `${pt.value ?? 0}%` }}
-      disabled={!pt.drillToken}
-      title={`${label} ${band} — ${(pt.value ?? 0).toFixed(1)}%, ${formatNumber(pt.rowCount)} PO lines`}
-      onClick={() => pt.drillToken && onDrill(pt.drillToken, `${band} — ${label}`)}
+      title={`${label} ${band} — ${(pt.value ?? 0).toFixed(1)}%, ${formatNumber(pt.rowCount)} PO lines. Click for the Overview of this slice.`}
+      onClick={() => onFocus(
+        `${band} — ${label}`,
+        `${(pt.value ?? 0).toFixed(1)}% · ${formatNumber(pt.rowCount)} PO lines`,
+        `sizeBand=${encodeURIComponent(bandKey)}&lifecycle=${label === 'Open' ? 'open' : 'closed'}`,
+      )}
     />
   ) : null);
 
@@ -216,15 +226,15 @@ function BandPairs({ data, onDrill }: {
             <span className="xs-band-bars">
               <span className="xs-band-line">
                 <span className="xs-band-track">
-                  {seg(at(ov, b.key), 'xs-open', 'Open', b.label)}
-                  {seg(at(cv, b.key), 'xs-closed', 'Closed', b.label)}
+                  {seg(at(ov, b.key), 'xs-open', 'Open', b.label, b.key)}
+                  {seg(at(cv, b.key), 'xs-closed', 'Closed', b.label, b.key)}
                 </span>
                 <span className="xs-band-num">{pct(vTot)} of value</span>
               </span>
               <span className="xs-band-line">
                 <span className="xs-band-track">
-                  {seg(at(ol, b.key), 'xs-open', 'Open', b.label)}
-                  {seg(at(cl, b.key), 'xs-closed', 'Closed', b.label)}
+                  {seg(at(ol, b.key), 'xs-open', 'Open', b.label, b.key)}
+                  {seg(at(cl, b.key), 'xs-closed', 'Closed', b.label, b.key)}
                 </span>
                 <span className="xs-band-num">{pct(lTot)} of lines</span>
               </span>
@@ -237,8 +247,21 @@ function BandPairs({ data, onDrill }: {
 }
 
 export function ExecSummaryTab({
-  kpis, onDrill, currency, asOfDate, firstDate, filterQuery,
+  kpis, onDrill, currency, asOfDate, firstDate, filterQuery, overviewKpis, overviewCharts,
 }: Props) {
+  /**
+   * The focus panel's slice, or null when it is closed.
+   *
+   * `slice` is a query fragment, not a drill token: a token identifies ROWS,
+   * and this panel needs to re-run every Overview figure over a POPULATION.
+   * Those are different things, which is why the global filter had to learn
+   * these dimensions rather than the panel borrowing the drill's token.
+   */
+  const [focus, setFocus] = useState<{ title: string; subtitle: string; slice: string } | null>(null);
+
+  const openFocus = useCallback((title: string, subtitle: string, slice: string) => {
+    setFocus({ title, subtitle, slice });
+  }, []);
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -347,9 +370,14 @@ export function ExecSummaryTab({
               key={t.label}
               type="button"
               className="xs-tile"
-              disabled={!t.kpi?.drillToken}
-              onClick={() => t.kpi?.drillToken && onDrill(t.kpi.drillToken, t.kpi.title)}
-              title={t.kpi?.drillToken ? 'Click to open the underlying lines' : undefined}
+              onClick={() => openFocus(
+                t.kpi?.title ?? t.label,
+                `${t.value} — ${t.label}`,
+                // No extra slice: a headline tile IS the current scope, so the
+                // panel shows the Overview for exactly what the page is showing.
+                '',
+              )}
+              title="Click for the Overview of this figure's scope"
             >
               <span className="xs-tile-value">{t.value}</span>
               <span className="xs-tile-label">{t.label}</span>
@@ -364,7 +392,7 @@ export function ExecSummaryTab({
           Where the value is <span className="muted">— committed value by spend category</span>
         </h3>
         {byCategory
-          ? <RankedBars data={byCategory} onDrill={onDrill} emphasiseTop={5} />
+          ? <RankedBars data={byCategory} onFocus={openFocus} emphasiseTop={5} />
           : <div className="spinner" />}
         <p className="note" style={{ marginTop: '.5rem' }}>
           {/*
@@ -406,7 +434,7 @@ export function ExecSummaryTab({
         <h3 className="pr-tbl-h">
           Transaction size <span className="muted">— share of value against share of lines</span>
         </h3>
-        {byBand ? <BandPairs data={byBand} onDrill={onDrill} /> : <div className="spinner" />}
+        {byBand ? <BandPairs data={byBand} onFocus={openFocus} /> : <div className="spinner" />}
         <p className="note" style={{ marginTop: '.5rem' }}>
           Bands are ordered by size, never by measure. Lines with no rupiah value are
           excluded rather than counted as zero, which would inflate the smallest band —
@@ -460,6 +488,21 @@ export function ExecSummaryTab({
         < Rp 25 Jt = 4% of value") — correct on the day it was drawn and wrong
         from the next refresh onwards.
       */}
+      {focus && (
+        <ExecFocusModal
+          title={focus.title}
+          subtitle={focus.subtitle}
+          // The clicked slice on top of the page's own filter, so the panel can
+          // never show a wider population than the page it was opened from.
+          filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}
+          kpiIds={overviewKpis}
+          chartIds={overviewCharts}
+          currency={currency}
+          onDrill={onDrill}
+          onClose={() => setFocus(null)}
+        />
+      )}
+
       <div className="panel">
         <h3 className="pr-tbl-h">What this means</h3>
         <ul className="xs-means">

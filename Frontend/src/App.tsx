@@ -610,6 +610,8 @@ export default function App() {
               asOfDate={dataset?.poDateRange?.to ?? dataset?.asOfDate ?? null}
               firstDate={dataset?.poDateRange?.from ?? null}
               filterQuery={gfQuery}
+              overviewKpis={TAB_KPIS.executive}
+              overviewCharts={TAB_CHARTS.executive}
             />
           </PageChunk>
         ) : tab === 'vendors' ? (

@@ -42,7 +42,7 @@ import {
   describeFilter, isEmptyFilter, parseGlobalFilter, type GlobalFilter,
 } from '../modules/analytics/globalfilter.js';
 import {
-  computeLiveChart, computeLiveKpis, globalFilterOptions, liveChartAvailable,
+  computeLiveChart, computeLiveChartSeries, computeLiveKpis, globalFilterOptions, liveChartAvailable,
 } from '../modules/analytics/live.js';
 import { mountExtraRoutes } from './routes_extra.js';
 
@@ -632,9 +632,25 @@ export function buildRouter(): Router {
     // Same rule as the KPI endpoint: filtered requests recompute live from the
     // spec SQL; the precomputed path is left alone.
     if (!isEmptyFilter(gf) && liveChartAvailable(meta.chartId)) {
-      const live = await computeLiveChart(v.id, meta.chartId, gf);
-      if (live) {
+      // Every series, not just the first: computeLiveChart used to return one,
+      // so a filtered multi-series panel silently lost the rest.
+      const liveSeries = await computeLiveChartSeries(v.id, meta.chartId, gf);
+      if (liveSeries) {
         const fpLive = sessionFingerprint(ctx.sid);
+        // Buckets are the UNION across series, ordered by the ordinal the specs
+        // assigned. A series may legitimately miss a bucket — a size band with
+        // only Delivered rows has no Open segment — so taking them from one
+        // series would drop columns from the axis.
+        const bucketOrder = new Map<string, { key: string; label: string; ordinal: number }>();
+        for (const one of liveSeries) {
+          for (const pt of one.points) {
+            if (!bucketOrder.has(pt.bucketKey)) {
+              bucketOrder.set(pt.bucketKey, {
+                key: pt.bucketKey, label: pt.bucketLabel, ordinal: pt.ordinal,
+              });
+            }
+          }
+        }
         res.json({
           datasetVersionId: v.id,
           asOfDate: v.asOfDate,
@@ -644,32 +660,28 @@ export function buildRouter(): Router {
           currencyBasis: null,
           computed: 'live',
           appliedFilters: describeFilter(gf),
-          buckets: live.points.map((pt) => ({
-            key: pt.bucketKey,
-            label: pt.bucketLabel,
-            ordinal: pt.ordinal,
+          buckets: [...bucketOrder.values()].sort((a, b) => a.ordinal - b.ordinal),
+          series: liveSeries.map((one) => ({
+            key: one.seriesKey,
+            label: one.seriesLabel,
+            points: one.points.map((pt) => ({
+              bucketKey: pt.bucketKey,
+              value: pt.value,
+              rowCount: pt.rowCount,
+              drillToken: issueDrillToken(
+                {
+                  ...(pt.drillPredicate as unknown as DrillPredicate),
+                  label: `${meta.title} — ${one.seriesLabel} — ${pt.bucketLabel}`,
+                },
+                v.id,
+                ctx.scope,
+                fpLive,
+              ),
+            })),
           })),
-          series: [
-            {
-              key: live.seriesKey,
-              label: live.seriesLabel,
-              points: live.points.map((pt) => ({
-                bucketKey: pt.bucketKey,
-                value: pt.value,
-                rowCount: pt.rowCount,
-                drillToken: issueDrillToken(
-                  {
-                    ...(pt.drillPredicate as unknown as DrillPredicate),
-                    label: `${meta.title} — ${pt.bucketLabel}`,
-                  },
-                  v.id,
-                  ctx.scope,
-                  fpLive,
-                ),
-              })),
-            },
-          ],
-          notes: live.points.length === 0 ? ['No rows match the active filter'] : (meta.notes ?? []),
+          notes: liveSeries.length === 0
+            ? ['No rows match the active filter']
+            : (meta.notes ?? []),
         });
         return;
       }

@@ -20,9 +20,25 @@ export interface Exclusions {
   docTypes: string[];
   purchGroups: string[];
   purchOrgs: string[];
+  /**
+   * Purchasing groups excluded from the COUPA store only (019).
+   *
+   * Separate from purchGroups on purpose. The three lists above are applied at
+   * transform time and need a recompute; this one is applied by views over
+   * ops.coupa_*, which is a shared continuously-polled dataset that is not
+   * rebuilt per version — so it takes effect the moment it is saved.
+   *
+   * It is also a different population: the desks that appear in Coupa are
+   * largely not the ones in the SAP facts, so folding them into purchGroups
+   * would mean an admin choosing from a list that cannot express what they need.
+   */
+  coupaPurchGroups: string[];
 }
 
-export const EXCLUSION_KEYS = ['exclusions.doc_types', 'exclusions.purch_groups', 'exclusions.purch_orgs'] as const;
+export const EXCLUSION_KEYS = [
+  'exclusions.doc_types', 'exclusions.purch_groups', 'exclusions.purch_orgs',
+  'exclusions.coupa_purch_groups',
+] as const;
 
 export async function loadExclusions(): Promise<Exclusions> {
   const rows = await query<{ rule_key: string; rule_value: unknown }>(
@@ -40,6 +56,7 @@ export async function loadExclusions(): Promise<Exclusions> {
     docTypes: get('exclusions.doc_types'),
     purchGroups: get('exclusions.purch_groups'),
     purchOrgs: get('exclusions.purch_orgs'),
+    coupaPurchGroups: get('exclusions.coupa_purch_groups'),
   };
 }
 
@@ -49,6 +66,7 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
     ['exclusions.doc_types', e.docTypes],
     ['exclusions.purch_groups', e.purchGroups],
     ['exclusions.purch_orgs', e.purchOrgs],
+    ['exclusions.coupa_purch_groups', e.coupaPurchGroups],
   ] as const) {
     await exec(
       `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
@@ -92,6 +110,91 @@ export interface ExclusionOption {
  * too: an excluded value is always listed, even when it would rank below the
  * cut.
  */
+/**
+ * A purchasing group as it appears in the COUPA store.
+ *
+ * Deliberately not ExclusionOption: that type counts PO lines and PR items,
+ * which are SAP fact populations. The Coupa question is a different one, and the
+ * counts an admin needs to answer it are order lines and quote requests.
+ */
+export interface CoupaExclusionOption {
+  value: string;
+  /** From the SAP purchasing-group master (018), so a code reads as a person. */
+  description: string | null;
+  poLines: number;
+  sourcingEvents: number;
+  receipts: number;
+  count: number;
+  excluded: boolean;
+}
+
+/**
+ * Purchasing groups present in the Coupa store, with what excluding each would
+ * remove.
+ *
+ * Counts come from the RAW tables, not the filtered views: the point of this
+ * list is to show what an exclusion would cost, so an already-excluded group
+ * must still report its true size rather than zero. That also keeps a saved
+ * exclusion reversible — the reason the SAP list unions in currently-excluded
+ * values too.
+ *
+ * Receipts are counted through their order line because a receipt carries no
+ * purchasing group of its own.
+ */
+export async function coupaExclusionOptions(): Promise<CoupaExclusionOption[]> {
+  const current = await loadExclusions();
+  const rows = await query<{
+    value: string; description: string | null;
+    po_lines: number; sourcing_events: number; receipts: number;
+  }>(
+    `WITH pol AS (
+       SELECT purch_group AS value, count(*)::int AS n
+         FROM ops.coupa_po_line
+        WHERE purch_group IS NOT NULL AND purch_group <> ''
+        GROUP BY 1
+     ), se AS (
+       SELECT purch_group AS value, count(*)::int AS n
+         FROM ops.coupa_sourcing_event
+        WHERE purch_group IS NOT NULL AND purch_group <> ''
+        GROUP BY 1
+     ), rcpt AS (
+       SELECT p.purch_group AS value, count(*)::int AS n
+         FROM ops.coupa_receipt r
+         JOIN ops.coupa_po_line p ON p.order_line_id = r.order_line_id
+        WHERE p.purch_group IS NOT NULL AND p.purch_group <> ''
+        GROUP BY 1
+     ), v AS (
+       SELECT value FROM pol
+       UNION SELECT value FROM se
+       UNION SELECT value FROM rcpt
+       UNION SELECT unnest($1::text[])
+     )
+     SELECT v.value,
+            g.description,
+            COALESCE(pol.n, 0) AS po_lines,
+            COALESCE(se.n, 0)  AS sourcing_events,
+            COALESCE(rcpt.n, 0) AS receipts
+       FROM v
+       LEFT JOIN pol  ON pol.value  = v.value
+       LEFT JOIN se   ON se.value   = v.value
+       LEFT JOIN rcpt ON rcpt.value = v.value
+       LEFT JOIN core.dim_purch_group g ON g.code = v.value
+      WHERE v.value IS NOT NULL AND v.value <> ''
+      ORDER BY (COALESCE(pol.n, 0) + COALESCE(se.n, 0)) DESC, v.value`,
+    [current.coupaPurchGroups],
+  );
+
+  return rows.map((r) => ({
+    value: r.value,
+    description: r.description,
+    poLines: r.po_lines,
+    sourcingEvents: r.sourcing_events,
+    receipts: r.receipts,
+    count: r.po_lines + r.sourcing_events,
+    excluded: current.coupaPurchGroups.includes(r.value),
+  }));
+}
+
 export async function exclusionOptions(versionId: number): Promise<{
   docTypes: ExclusionOption[];
   purchGroups: ExclusionOption[];

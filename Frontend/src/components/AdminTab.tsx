@@ -28,7 +28,23 @@ interface Opt {
   excluded?: boolean;
   inData?: boolean;
 }
-interface Exclusions { docTypes: string[]; purchGroups: string[]; purchOrgs: string[] }
+interface Exclusions {
+  docTypes: string[];
+  purchGroups: string[];
+  purchOrgs: string[];
+  /** Coupa-only (019). Enforced by views, so it needs no recompute. */
+  coupaPurchGroups: string[];
+}
+
+interface CoupaOpt {
+  value: string;
+  description: string | null;
+  poLines: number;
+  sourcingEvents: number;
+  receipts: number;
+  count: number;
+  excluded: boolean;
+}
 
 const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
 
@@ -128,12 +144,16 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [coupaOptions, setCoupaOptions] = useState<CoupaOpt[]>([]);
 
   useEffect(() => {
-    api.get<{ current: Exclusions; options: typeof options }>('/api/v1/admin/exclusions')
+    api.get<{ current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[] }>(
+      '/api/v1/admin/exclusions',
+    )
       .then((d) => {
         setCurrent(d.current);
         setOptions(d.options as never);
+        setCoupaOptions(d.coupaOptions ?? []);
       })
       .catch((e: Error) => setMsg(e instanceof ApiError && e.status === 403 ? 'Steward role required.' : e.message));
   }, []);
@@ -164,8 +184,18 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     setBusy('saving');
     setMsg(null);
     try {
-      await api.put('/api/v1/admin/exclusions', current);
+      const out = await api.put<{ recomputeRequired?: boolean }>(
+        '/api/v1/admin/exclusions', current,
+      );
       setDirty(false);
+      // A Coupa-only change is live already: the views read the rule store
+      // directly. Rebuilding every fact for it would cost a minute and change
+      // nothing, so the server tells us whether it is actually needed.
+      if (out.recomputeRequired === false) {
+        setMsg('Saved. Coupa exclusions are live immediately — no rebuild was needed.');
+        setBusy(null);
+        return;
+      }
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'save failed');
       setBusy(null);
@@ -231,6 +261,44 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     </details>
   );
 
+  /**
+   * The Coupa purchasing-group facet.
+   *
+   * Its own renderer rather than a parameter on group() above, because the
+   * counts mean different things: order lines and quote requests, not PO lines
+   * and PR items. It also shows the desk's NAME from the purchasing-group
+   * master, since these codes are people and "L3A" alone is not reviewable.
+   */
+  const coupaGroup = () => (
+    <details className="dt-facet" open={current.coupaPurchGroups.length > 0}>
+      <summary>
+        Coupa purchasing groups
+        {current.coupaPurchGroups.length > 0 && (
+          <span className="dt-badge">{current.coupaPurchGroups.length}</span>
+        )}
+      </summary>
+      <div className="dt-facet-list">
+        {[...coupaOptions].sort((a, b) => Number(b.excluded) - Number(a.excluded) || b.count - a.count)
+          .map((o) => (
+            <label key={o.value} className={`dt-chip${o.excluded ? ' dt-chip-off' : ''}`}>
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={current.coupaPurchGroups.includes(o.value)}
+                onChange={() => toggle('coupaPurchGroups', o.value)}
+              />
+              {o.value}
+              {o.description ? <>{' '}<strong>{o.description}</strong></> : null}{' '}
+              <span className="muted">
+                ({formatNumber(o.poLines)} PO lines · {formatNumber(o.sourcingEvents)} quote requests
+                {o.receipts > 0 ? ` · ${formatNumber(o.receipts)} receipts` : ''})
+              </span>
+            </label>
+          ))}
+      </div>
+    </details>
+  );
+
   return (
     <div className="panel">
       <h2>🎛 Data exclusions</h2>
@@ -248,7 +316,17 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         {group('Document types', 'docTypes', options.docTypes)}
         {group('Purchasing groups', 'purchGroups', options.purchGroups)}
         {group('Purchasing orgs', 'purchOrgs', options.purchOrgs)}
+        {coupaGroup()}
       </div>
+      <p className="note" style={{ marginTop: '.5rem' }}>
+        <span className="bs sl">Coupa only</span> The last group above applies to the{' '}
+        <strong>Coupa store alone</strong> — its purchase orders, quote requests, receipts and the
+        invoices drawn from them. It is separate from the SAP lists because the desks in Coupa are
+        largely not the ones in the SAP facts, and because it is enforced by database views rather
+        than by the transform: <strong>it takes effect the moment you save, with no rebuild</strong>.
+        A partially relevant invoice is kept, not dropped — an invoice disappears only when every
+        one of its linked lines is excluded.
+      </p>
       {isAdmin && (
         <div className="dt-toolbar" style={{ marginTop: '.6rem' }}>
           <button

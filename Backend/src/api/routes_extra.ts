@@ -18,7 +18,8 @@ import {
   topMaterialsSpend, vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
 } from '../modules/analytics/entity.js';
 import {
-  exclusionOptions, fxTable, loadExclusions, mappingStatus, saveExclusions, saveMapping,
+  coupaExclusionOptions, exclusionOptions, fxTable, loadExclusions, mappingStatus,
+  saveExclusions, saveMapping,
 } from '../modules/admin/steward.js';
 import {
   computeCustomChart, computeCustomKpi, customVocabulary, validateSpec,
@@ -721,15 +722,29 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     res.json({
       current: await loadExclusions(),
       options: await exclusionOptions(v.id),
+      coupaOptions: await coupaExclusionOptions(),
       note: 'Changes apply on the next recompute (Admin > Recompute), not instantly.',
+      // The Coupa list is the exception and the UI says so: it is enforced by
+      // views over a continuously-polled store, not by the transform, so it
+      // needs no rebuild.
+      coupaNote: 'Coupa purchasing-group exclusions apply immediately on save — no recompute needed.',
     });
   }));
 
   r.put('/api/v1/admin/exclusions', role('admin', async (req, res, ctx) => {
-    const b = (req.body ?? {}) as { docTypes?: unknown; purchGroups?: unknown; purchOrgs?: unknown };
-    const list = (x: unknown): string[] =>
-      Array.isArray(x) ? x.map(String).map((v2) => v2.trim()).filter((v2) => v2 !== '').slice(0, 50) : [];
-    const next = { docTypes: list(b.docTypes), purchGroups: list(b.purchGroups), purchOrgs: list(b.purchOrgs) };
+    const b = (req.body ?? {}) as {
+      docTypes?: unknown; purchGroups?: unknown; purchOrgs?: unknown; coupaPurchGroups?: unknown;
+    };
+    const list = (x: unknown, cap = 50): string[] =>
+      Array.isArray(x) ? x.map(String).map((v2) => v2.trim()).filter((v2) => v2 !== '').slice(0, cap) : [];
+    const next = {
+      docTypes: list(b.docTypes),
+      purchGroups: list(b.purchGroups),
+      purchOrgs: list(b.purchOrgs),
+      // A larger cap: Coupa carries far more purchasing groups than the SAP
+      // facts do, and the first real request named 16 at once.
+      coupaPurchGroups: list(b.coupaPurchGroups, 300),
+    };
 
     const before = await loadExclusions();
     await saveExclusions(next, ctx.principal.userId);
@@ -738,7 +753,13 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       actorEmail: ctx.principal.email, outcome: 'success',
       detail: { before, after: next }, ip: req.ip,
     });
-    res.json({ saved: next, appliesFromNextRecompute: true });
+    // Whether a rebuild is actually needed, so the UI does not spend a minute
+    // recomputing every fact when only the Coupa list moved (that list is
+    // enforced by views and is live the moment it is committed).
+    const sapChanged =
+      JSON.stringify([before.docTypes, before.purchGroups, before.purchOrgs])
+      !== JSON.stringify([next.docTypes, next.purchGroups, next.purchOrgs]);
+    res.json({ saved: next, appliesFromNextRecompute: sapChanged, recomputeRequired: sapChanged });
   }));
 
   r.get('/api/v1/admin/mappings/:feed', role('steward', async (req, res) => {
@@ -872,7 +893,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(DISTINCT supplier_name)::int AS suppliers,
               round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event,
               count(*) FILTER (WHERE awarded)::int AS awarded
-         FROM ops.coupa_supplier_response WHERE state = 'submitted'`,
+         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
     );
     const eventsByMonth = await query(
       `SELECT to_char(created_at,'YYYY-MM') AS mk, count(*)::int AS events,
@@ -889,8 +910,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*)::int AS awarded_bids,
               sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
               count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
-         FROM ops.coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+         FROM ops.v_coupa_supplier_response r
+         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
         WHERE r.awarded
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
     );
@@ -899,8 +920,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*)::int AS awarded_bids,
               sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
               count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
-         FROM ops.coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+         FROM ops.v_coupa_supplier_response r
+         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
         WHERE r.awarded AND r.supplier_name IS NOT NULL
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
     );
@@ -910,8 +931,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
               r.supplier_name, r.awarded, r.submitted_at, r.total_amount,
               COALESCE(NULLIF(r.currency,''), e.currency) AS currency
-         FROM ops.coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+         FROM ops.v_coupa_supplier_response r
+         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
         ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
         LIMIT 200`,
     );
@@ -974,7 +995,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
-              (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+              (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
          FROM ops.v_coupa_invoice i
         ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
     );
@@ -1008,7 +1029,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       `SELECT count(*)::int AS responses,
               count(DISTINCT quote_request_id)::int AS events_with_bids,
               round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event
-         FROM ops.coupa_supplier_response WHERE state = 'submitted'`,
+         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
     );
     const [invoice] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS invoices,
@@ -1022,7 +1043,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       `SELECT count(*)::int AS coupa_po_lines,
               count(*) FILTER (WHERE sap_po_no IS NOT NULL)::int AS with_sap_po,
               count(*) FILTER (WHERE need_by_date IS NOT NULL)::int AS with_need_by
-         FROM ops.coupa_po_line`,
+         FROM ops.v_coupa_po_line`,
     );
     const recentEvents = await query(
       `SELECT id, event_type, state, description, submit_time, end_time, plant, purch_org, sap_pr_no,
@@ -1033,7 +1054,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.currency, i.supplier_name, i.payment_term,
-              (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+              (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
          FROM ops.v_coupa_invoice i
         ORDER BY i.updated_at DESC NULLS LAST LIMIT 25`,
     );

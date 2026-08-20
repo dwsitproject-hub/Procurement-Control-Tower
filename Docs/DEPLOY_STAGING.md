@@ -329,7 +329,26 @@ significant on a cifs mount. There was no `pct` folder in either place as at
 19 Aug 2026; create `APPs/dev/PCT` in **File Station**, since the mount here is
 read-only by design and the server cannot create it.
 
-#### Creating the project folder in File Station
+#### Creating the project folder from Windows Explorer (simplest)
+
+DSM was not reachable from the workstation on 19 Aug 2026, but the SMB share
+was: `\172.30.1.94\APPs` browses fine in Explorer. That is enough, and it
+avoids DSM entirely.
+
+1. Open `\172.30.1.94\APPs` in Explorer (paste it into the address bar).
+2. Double-click **dev**, and check the address bar reads
+   `Network > 172.30.1.94 > APPs > dev`. Creating at the share root instead
+   would produce the PRODUCTION folder.
+3. **New → Folder**, then type `PCT` and press Enter. Uppercase, and no trailing
+   space — Explorer keeps one if it is typed, and cifs treats `PCT ` as a
+   different directory that the app will never find.
+
+The same window is also the delivery route for the SAP exports: whoever produces
+them can drop the six workbooks straight into
+`\172.30.1.94\APPs\dev\PCT`, or a scheduled `robocopy` can mirror them from
+wherever SAP writes them.
+
+#### Creating it in File Station instead
 
 DSM runs on the NAS itself, not on the app servers, so this is done from a
 browser that can reach `172.30.1.94`. Check that first — the app servers sit on

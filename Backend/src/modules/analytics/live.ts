@@ -102,10 +102,10 @@ export async function computeLiveKpis(
       continue;
     }
 
-    let row: { value?: unknown; numerator?: unknown; denominator?: unknown; sample?: unknown } = {};
+    let row: Record<string, unknown> = {};
     try {
       const r = await pool.query(sql, [versionId, ...clause.params]);
-      row = (r.rows[0] ?? {}) as typeof row;
+      row = (r.rows[0] ?? {}) as Record<string, unknown>;
     } catch (err) {
       out.push({
         kpiId: spec.id, status: 'unavailable', value: null, numerator: null, denominator: null,
@@ -120,23 +120,47 @@ export async function computeLiveKpis(
     }
 
     const value =
-      row.value === null || row.value === undefined || Number.isNaN(Number(row.value))
+      row['value'] === null || row['value'] === undefined || Number.isNaN(Number(row['value']))
         ? null
-        : Number(row.value);
+        : Number(row['value']);
+
+    /**
+     * Every extra column the spec returned, exactly as buildParityMart does for
+     * the precomputed path.
+     *
+     * This used to be `spec.entityUnit ? { entityUnit } : null`, which threw the
+     * rest away — including `value_idr`, the currency twin KpiCard reads. So
+     * under ANY global filter, on ANY page, every money card lost its IDR figure
+     * and fell back to USD captioned "IDR view unavailable (unrated period)"
+     * while the very same card still said "all currencies rated". Two
+     * contradictory statements on one card, and the toggle looked broken.
+     *
+     * It surfaced on the Executive Summary's focus panel because that panel is
+     * ALWAYS filtered, so it never once showed rupiah — but the fault was in the
+     * shared live path, not the panel.
+     */
+    const CORE_COLS = new Set(['value', 'numerator', 'denominator', 'sample']);
+    const detail: Record<string, unknown> = spec.entityUnit ? { entityUnit: spec.entityUnit } : {};
+    for (const [k, v] of Object.entries(row)) {
+      if (CORE_COLS.has(k) || v === null || v === undefined) continue;
+      detail[k] = Number.isNaN(Number(v)) ? v : Number(v);
+    }
 
     out.push({
       kpiId: spec.id,
       status: value === null ? 'unavailable' : 'ok',
       value,
-      numerator: row.numerator === null || row.numerator === undefined ? null : Number(row.numerator),
-      denominator:
-        row.denominator === null || row.denominator === undefined ? null : Number(row.denominator),
-      sampleSize: row.sample === null || row.sample === undefined ? null : Number(row.sample),
+      numerator: row['numerator'] === null || row['numerator'] === undefined
+        ? null : Number(row['numerator']),
+      denominator: row['denominator'] === null || row['denominator'] === undefined
+        ? null : Number(row['denominator']),
+      sampleSize: row['sample'] === null || row['sample'] === undefined
+        ? null : Number(row['sample']),
       unit: spec.unit,
       currencyBasis: spec.currencyBasis ?? null,
       severity: severityOf(value, spec.worseWhenHigh, spec.worseWhenLow),
       statusReason: value === null ? 'No qualifying rows under the active filter.' : null,
-      detail: spec.entityUnit ? { entityUnit: spec.entityUnit } : null,
+      detail: Object.keys(detail).length > 0 ? detail : null,
       // The drill must carry the same global filter, or the card and its drill
       // would disagree the moment a filter is applied.
       drillPredicate: mergeIntoPredicate(spec.drill, filter),

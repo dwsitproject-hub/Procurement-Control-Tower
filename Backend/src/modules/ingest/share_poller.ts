@@ -29,6 +29,7 @@ import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
 import { resolveStorage } from '../../config/storage.js';
 import { runIngest } from './pipeline.js';
+import { archiveBundle, archiveSummary, type ArchiveConfig, type ArchiveReport } from './archive.js';
 import { notify } from '../notify/mailer.js';
 import { ingestFailureBody, ingestSuccessBody } from '../notify/messages.js';
 import {
@@ -74,6 +75,8 @@ export interface ShareConfig {
   timezone: string;
   settleSeconds: number;
   feeds: FeedConfig[];
+  /** Move files aside once a run is done with them (see archive.ts). */
+  archive: ArchiveConfig;
 }
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -123,11 +126,28 @@ export async function loadShareConfig(): Promise<ShareConfig> {
     };
   });
 
+  /**
+   * Archiving defaults to the resolved storage root, so the folders sit next to
+   * the exports themselves: <root>/succeed and <root>/failed.
+   *
+   * It defaults to OFF, and that is deliberate rather than timid. The share is
+   * mounted READ-ONLY by design (Docs/SYNOLOGY-INTEGRATION.md), so switching
+   * this on before the mount is made writable would fail on every single run.
+   * Off by default means the feature waits for the infrastructure instead of
+   * filling the log with permission errors.
+   */
+  const archive: ArchiveConfig = {
+    enabled: rules['ingest.archive_enabled'] === true || rules['ingest.archive_enabled'] === 'true',
+    succeedDir: String(rules['ingest.archive_succeed_dir'] ?? join(defaultPath, 'succeed')),
+    failedDir: String(rules['ingest.archive_failed_dir'] ?? join(defaultPath, 'failed')),
+  };
+
   return {
     enabled: rules['ingest.autopoll_enabled'] === true || rules['ingest.autopoll_enabled'] === 'true',
     timezone: SYNC_TIMEZONE,
     settleSeconds: env.INGEST_FILE_SETTLE_SECONDS,
     feeds,
+    archive,
   };
 }
 
@@ -292,6 +312,19 @@ export async function scanShare(cfg: ShareConfig): Promise<{ feeds: FeedScan[]; 
 export class PerFeedShareSource implements FileSource {
   readonly kind = 'synology' as const;
 
+  /**
+   * The files this source handed to the pipeline on its last list().
+   *
+   * Remembered so the archive step can move exactly those, rather than
+   * re-scanning afterwards and possibly picking up a file that arrived in the
+   * meantime — which would file away an export nothing had read.
+   */
+  private listed: DiscoveredFile[] = [];
+
+  get lastListed(): readonly DiscoveredFile[] {
+    return this.listed;
+  }
+
   constructor(private readonly cfg: ShareConfig) {}
 
   async list(): Promise<DiscoveredFile[]> {
@@ -311,6 +344,7 @@ export class PerFeedShareSource implements FileSource {
         mtime: new Date(f.chosen.mtime),
       });
     }
+    this.listed = out;
     return out;
   }
 
@@ -332,10 +366,48 @@ export interface ShareRunResult {
   detail?: string;
   batchId?: number;
   datasetVersionId?: number;
+  archive?: ArchiveReport;
 }
 
 /** Outcomes that mean "nothing was published and something is wrong". */
 const FAILURE_OUTCOMES = new Set(['failed', 'incomplete_bundle', 'source_unavailable']);
+
+/**
+ * File the consumed exports away, after the pipeline and never inside it.
+ *
+ * Exported because BOTH entry points must do this: the scheduled pickup and the
+ * "Sync now" button. They already share PerFeedShareSource so they can never
+ * read different files — they must not diverge on what happens afterwards
+ * either, which is precisely what happened when this lived inline in the
+ * scheduled path and a manual sync quietly filed nothing.
+ *
+ * Never throws: the dataset is published and its figures are already correct by
+ * the time this runs, so a filesystem permission cannot be allowed to turn a
+ * good run bad.
+ */
+export async function archiveAfterRun(
+  source: PerFeedShareSource,
+  outcome: string,
+  batchId: number | null,
+  cfg: ShareConfig,
+): Promise<ArchiveReport> {
+  const archive = await archiveBundle({
+    files: source.lastListed.map((f) => ({ handle: f.handle, displayName: f.displayName })),
+    outcome,
+    batchId,
+    cfg: cfg.archive,
+  });
+  lastArchive = archive;
+  if (archive.failed > 0) {
+    // Worth its own log line: the run itself succeeded, so nothing else in the
+    // output would mention that the share could not be written.
+    console.warn(
+      `archive: ${archive.failed} file(s) could not be moved - `
+      + archive.files.filter((f) => !f.moved).map((f) => `${f.displayName}: ${f.error}`).join('; '),
+    );
+  }
+  return archive;
+}
 
 /**
  * One pass. Advisory-locked so overlapping ticks — or a manual sync at the same
@@ -350,16 +422,22 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
     );
     if (!lock.rows[0]?.ok) return { outcome: 'locked' };
 
-    const out = await runIngest({ source: new PerFeedShareSource(cfg), autoPublish: true });
+    const source = new PerFeedShareSource(cfg);
+    const out = await runIngest({ source, autoPublish: true });
+    const archive = await archiveAfterRun(source, out.outcome, 'batchId' in out ? out.batchId : null, cfg);
+
+    const base = 'missing' in out ? `missing ${out.missing.join(',')}`
+      : 'datasetVersionId' in out ? `v${out.datasetVersionId}`
+      : 'path' in out ? out.path
+      : 'reason' in out ? out.reason
+      : undefined;
+    const arch = archiveSummary(archive);
     return {
       outcome: out.outcome,
-      detail: 'missing' in out ? `missing ${out.missing.join(',')}`
-        : 'datasetVersionId' in out ? `v${out.datasetVersionId}`
-        : 'path' in out ? out.path
-        : 'reason' in out ? out.reason
-        : undefined,
+      detail: [base, arch].filter(Boolean).join(' · ') || undefined,
       batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
       datasetVersionId: 'datasetVersionId' in out ? out.datasetVersionId : undefined,
+      archive,
     };
   } finally {
     await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]).catch(() => undefined);
@@ -368,10 +446,16 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
 }
 
 let pollerStarted = false;
+let lastArchive: ArchiveReport | null = null;
 let lastResult: { at: string; outcome: string; detail?: string; slots?: string } | null = null;
 
 export function shareLastResult(): typeof lastResult {
   return lastResult;
+}
+
+/** The most recent archive attempt, for the Admin panel. */
+export function shareLastArchive(): ArchiveReport | null {
+  return lastArchive;
 }
 
 export async function recentSlotRuns(limit = 20): Promise<Record<string, unknown>[]> {

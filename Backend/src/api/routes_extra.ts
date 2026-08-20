@@ -32,7 +32,8 @@ import { loadRuleSnapshot } from '../modules/admin/rules.js';
 import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
 import { testBody } from '../modules/notify/messages.js';
 import {
-  FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastResult,
+  FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastArchive,
+  shareLastResult,
 } from '../modules/ingest/share_poller.js';
 import { loadEnv } from '../config/env.js';
 import { storageBasePath, storageHealth } from '../config/storage.js';
@@ -227,6 +228,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       storage: await storageHealth(),
       nowInZone: nowInZone().hhmm,
       lastResult: shareLastResult(),
+      lastArchive: shareLastArchive(),
       recentRuns: await recentSlotRuns(12),
     };
   };
@@ -293,10 +295,50 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       };
     }
 
+    /**
+     * Archive settings. The folders are validated exactly like a feed folder —
+     * same reasoning, same failure to avoid: a UNC address saved here would look
+     * fine and then fail at move time, long after anyone was watching.
+     */
+    const ab = (b['archive'] ?? {}) as Record<string, unknown>;
+    const archiveEnabled = ab['enabled'] === true;
+    const archiveDir = (raw: unknown, label: string, fallback: string): string => {
+      const v = String(raw ?? '').trim();
+      if (v === '') return fallback;
+      const BACKSLASH = String.fromCharCode(92);
+      if (v.startsWith('//') || v.startsWith(BACKSLASH) || /^[A-Za-z]:/.test(v)) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${label}: "${v}" is a network or Windows path. Use the folder as this server sees it, `
+          + `for example ${shareEnvPath()}/succeed.`,
+        );
+      }
+      if (!v.startsWith('/')) {
+        throw new HttpProblem(400, 'invalid-body', `${label}: "${v}" must start with "/".`);
+      }
+      return v;
+    };
+    const current = await loadShareConfig();
+    const archive = {
+      enabled: archiveEnabled,
+      succeedDir: archiveDir(ab['succeedDir'], 'Succeeded folder', current.archive.succeedDir),
+      failedDir: archiveDir(ab['failedDir'], 'Failed folder', current.archive.failedDir),
+    };
+    if (archive.succeedDir === archive.failedDir) {
+      throw new HttpProblem(
+        400, 'invalid-body',
+        'The succeeded and failed folders must differ, otherwise a failed run is '
+        + 'indistinguishable from a good one.',
+      );
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     for (const [key, value] of [
       ['ingest.autopoll_enabled', enabled],
       ['ingest.feeds', feeds],
+      ['ingest.archive_enabled', archive.enabled],
+      ['ingest.archive_succeed_dir', archive.succeedDir],
+      ['ingest.archive_failed_dir', archive.failedDir],
     ] as const) {
       await query(
         `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
@@ -310,7 +352,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     await recordAudit({
       action: 'admin.ingest.config', actorUserId: ctx.principal.userId,
       actorEmail: ctx.principal.email, outcome: 'success',
-      detail: { enabled, feeds }, ip: req.ip,
+      detail: { enabled, feeds, archive }, ip: req.ip,
     });
     res.json(await ingestConfigPayload());
   }));

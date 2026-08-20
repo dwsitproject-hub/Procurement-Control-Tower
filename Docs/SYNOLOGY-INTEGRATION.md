@@ -227,3 +227,74 @@ mismatch cannot pass unnoticed.
 | `deploy/env/staging.env` | The staging `STORAGE_*` block |
 | `Frontend/src/components/SapUploadTab.tsx` | Admin panel: NAS status, stray-folder warning |
 | `Docs/DEPLOY_STAGING.md` §3a | Mount check and cut-over steps |
+
+---
+
+## After-run filing (succeed / failed)
+
+Added 20 Aug 2026. With **Admin → SAP Data Upload → After a run** switched on,
+the files a run consumed are moved out of the pickup folder — into `succeed`
+when a dataset was published, into `failed` when the run failed.
+
+**This needs write access, and the share is deliberately mounted read-only.**
+Three separate gates must all be opened, in this order. Opening only some of
+them produces a run that publishes correctly and then silently files nothing —
+which is why the panel names the problem instead of leaving it to be discovered.
+
+1. **On the NAS (infra team).** The share user (`app-prj`) needs write
+   permission on `APPs/dev/PCT`. Nothing below matters until this is granted.
+
+2. **The host mount.** Both the `ro` flag AND the mode bits have to change —
+   `dir_mode=0550,file_mode=0440` carries no write bit, so `rw` alone is not
+   enough:
+
+   ```
+   //<nas>/APPs /mnt/synology-apps cifs rw,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0750,file_mode=0640,vers=3.0,iocharset=utf8,_netdev 0 0
+   ```
+
+   Remount and confirm with `touch /mnt/synology-apps/dev/PCT/.wtest && rm` it.
+
+3. **The container bind.** `be.compose.yml` binds the mount as
+   `${STORAGE_MOUNT_MODE:-ro}`, so the safe behaviour is what you get by not
+   thinking about it. Set `STORAGE_MOUNT_MODE=rw` in `/opt/pct/.env` next to
+   `be.compose.yml` and **recreate** the container — a bind mode is fixed at
+   container creation, so `restart` will not pick it up:
+
+   ```
+   cd /opt/pct && docker compose -f be.compose.yml up -d --force-recreate api
+   ```
+
+Only then switch the feature on in the panel. The **Resolved folder** block
+reports whether the folder is writable, and the panel refuses to let the
+succeeded and failed folders be the same value.
+
+### What it does and does not move
+
+| Run outcome | What happens |
+|---|---|
+| `published` | files the pipeline recognised → `succeed`; files it read but could not identify → `failed` |
+| `failed` | every file in the bundle → `failed` |
+| `incomplete_bundle` | **nothing moves** |
+| `noop_unchanged`, `source_unavailable` | nothing moves |
+
+Leaving an incomplete bundle alone is the important one. The scheduler picks up
+per feed, so the folder legitimately holds a partial set while the rest of the
+day's exports arrive; filing those away would mean the bundle could never
+complete — the PR export would be moved at 08:00 before the PO export landed at
+09:00.
+
+Each run files into its own dated subfolder, `succeed/2026-08-20_batch62/`.
+These filenames repeat (`Mat group.xlsx` is the same every day), so a flat
+destination would overwrite yesterday's export with today's and destroy the
+lineage the feature exists to preserve.
+
+A file matching **no feed name pattern** is never picked up in the first place,
+so it is never filed either — an unrelated file kept in the folder is not failed
+data. The pickup folder is therefore not guaranteed to end up empty.
+
+**A filing failure never fails the run.** The dataset is published and its
+figures are already correct by the time this happens; the outcome stays
+`published`, the per-file errors are reported in the panel and logged, and the
+run detail reads e.g. `v62 · archived 8/10, 2 could not be moved`. Where a move
+falls back to copy-then-delete and the delete fails, the file is left in both
+places — recoverable, and reported, rather than lost.

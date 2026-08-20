@@ -72,15 +72,31 @@ interface StorageInfo {
   mountWarning: string | null;
 }
 
+interface ArchiveCfg {
+  enabled: boolean;
+  succeedDir: string;
+  failedDir: string;
+}
+
+interface ArchiveReport {
+  attempted: number;
+  moved: number;
+  failed: number;
+  skipped?: string;
+  files: { displayName: string; to: 'succeed' | 'failed'; moved: boolean; error?: string }[];
+}
+
 interface SyncCfg {
   enabled: boolean;
   timezone: string;
   settleSeconds: number;
   feeds: FeedCfg[];
+  archive: ArchiveCfg;
   envPath: string;
   storage: StorageInfo;
   nowInZone: string;
   lastResult: { at: string; outcome: string; detail?: string; slots?: string } | null;
+  lastArchive: ArchiveReport | null;
   recentRuns: { feed: string; slot: number; ranOn: string; ranAt: string; outcome: string | null; detail: string | null }[];
 }
 
@@ -232,6 +248,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   const [cfg, setCfg] = useState<SyncCfg | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [feeds, setFeeds] = useState<FeedCfg[]>([]);
+  const [archive, setArchive] = useState<ArchiveCfg>({ enabled: false, succeedDir: '', failedDir: '' });
   const [scan, setScan] = useState<{ feeds: FeedScan[]; complete: boolean } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -242,6 +259,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         setCfg(x);
         setEnabled(x.enabled);
         setFeeds(x.feeds.map((f) => ({ ...f, slots: [...f.slots] as [string, string, string] })));
+        setArchive({ ...x.archive });
       })
       .catch((e: Error) => setMsg(e.message));
   }, []);
@@ -282,15 +300,16 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   const save = async () => {
     setBusy('save'); setMsg(null);
     try {
-      const out = await api.put<SyncCfg>('/api/v1/admin/ingest/config', { enabled, feeds });
+      const out = await api.put<SyncCfg>('/api/v1/admin/ingest/config', { enabled, feeds, archive });
       // Deliberately NOT setCfg(out): load() re-reads the full payload below.
       // Adopting a response as component state couples the panel to that
       // response carrying every field the render needs, which is exactly how
       // Save came to blank the page.
       const times = out.feeds.flatMap((f) => f.slots.filter(Boolean)).length;
-      setMsg(out.enabled
+      const arch = out.archive.enabled ? ' Files will be moved aside after each run.' : '';
+      setMsg((out.enabled
         ? `Saved — ${times} pickup time(s) armed, all times ${out.timezone}.`
-        : 'Saved — scheduled sync is off; use Sync now or a manual upload.');
+        : 'Saved — scheduled sync is off; use Sync now or a manual upload.') + arch);
       load();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'save failed');
@@ -355,6 +374,103 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         folder is assembled into one bundle and ingested — if nothing changed the run reports
         &quot;unchanged&quot; and no new version appears.
       </p>
+
+      {/*
+        After-run filing. Kept next to the schedule because it is part of the
+        same cycle: pick up, ingest, file away.
+
+        The writability warning is the important part of this block. The share is
+        mounted READ-ONLY by design, so switching this on without changing the
+        mount produces a run that publishes correctly and then cannot move a
+        single file — a failure mode that is invisible unless something says so
+        up front.
+      */}
+      <h3 className="pr-tbl-h">
+        📁 After a run <span className="muted">— move the files aside</span>
+      </h3>
+      <p className="note">
+        With this on, the files a run consumed are moved out of the pickup folder: into{' '}
+        <strong>succeeded</strong> when a dataset was published, into <strong>failed</strong> when
+        the run failed. Each run gets its own dated subfolder (<code>2026-08-20_batch61</code>)
+        because these filenames repeat — a flat folder would overwrite yesterday&apos;s export with
+        today&apos;s. A file the pipeline could not recognise goes to <strong>failed</strong> even
+        when the run itself succeeded. An <em>incomplete</em> bundle is left alone, so the rest of
+        the day&apos;s exports can still arrive.
+      </p>
+      {archive.enabled && cfg.storage.writable === false && (
+        <p className="note">
+          <span className="bs spdel">cannot write</span> The source folder is{' '}
+          <strong>not writable</strong> by this server, so no file can be moved. The share is
+          mounted read-only on purpose; it must be remounted read-write, and the folders below must
+          exist, before this can work. Runs will still publish normally — only the filing fails.
+        </p>
+      )}
+      <div className="table-wrap">
+        <table className="data dd-tbl">
+          <tbody>
+            <tr className="re">
+              <td>Move files after a run</td>
+              <td>
+                <label className="dt-check">
+                  <input
+                    type="checkbox"
+                    checked={archive.enabled}
+                    disabled={!isAdmin}
+                    onChange={(e) => setArchive((a) => ({ ...a, enabled: e.target.checked }))}
+                  />
+                  {archive.enabled ? 'on' : 'off'}
+                </label>
+              </td>
+            </tr>
+            <tr>
+              <td>Succeeded folder</td>
+              <td>
+                <input
+                  className="in"
+                  style={{ width: '100%' }}
+                  value={archive.succeedDir}
+                  disabled={!isAdmin}
+                  placeholder={`${cfg.storage.basePath}/succeed`}
+                  onChange={(e) => setArchive((a) => ({ ...a, succeedDir: e.target.value }))}
+                />
+              </td>
+            </tr>
+            <tr className="re">
+              <td>Failed folder</td>
+              <td>
+                <input
+                  className="in"
+                  style={{ width: '100%' }}
+                  value={archive.failedDir}
+                  disabled={!isAdmin}
+                  placeholder={`${cfg.storage.basePath}/failed`}
+                  onChange={(e) => setArchive((a) => ({ ...a, failedDir: e.target.value }))}
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {cfg.lastArchive && (
+        <p className="note">
+          {cfg.lastArchive.skipped
+            ? <>Last run: nothing filed — {cfg.lastArchive.skipped}.</>
+            : (
+              <>
+                Last run filed <strong>{cfg.lastArchive.moved}</strong> of{' '}
+                {cfg.lastArchive.attempted} file(s)
+                {cfg.lastArchive.failed > 0 && (
+                  <>
+                    {' '}— <span className="bs spdel">{cfg.lastArchive.failed} could not be moved</span>:{' '}
+                    {cfg.lastArchive.files.filter((f) => !f.moved)
+                      .map((f) => `${f.displayName} (${f.error ?? 'unknown error'})`).join('; ')}
+                  </>
+                )}
+                .
+              </>
+            )}
+        </p>
+      )}
 
       <div className="dt-toolbar" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
         <label className="dt-check">

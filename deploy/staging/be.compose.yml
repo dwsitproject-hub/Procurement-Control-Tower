@@ -62,7 +62,13 @@ services:
       # Docker CREATES AN EMPTY FOLDER instead of failing when the host path is
       # absent, which is why the API probes the mount at boot and the Admin ->
       # SAP Data Upload panel reports whether the folder is really the NAS.
-      - ${STORAGE_HOST_MOUNT:-/mnt/synology-apps}:/mnt/synology-apps:ro
+      # ${STORAGE_MOUNT_MODE} defaults to `ro` so the safe behaviour is the one you
+      # get by not thinking about it. Set STORAGE_MOUNT_MODE=rw in /opt/pct/.env
+      # ONLY to enable after-run filing (Admin -> SAP Data Upload -> After a
+      # run), and note that the container bind is just one of three gates: the
+      # HOST cifs mount must also be rw, its dir_mode/file_mode must carry a
+      # write bit, and the share user must have write permission on the NAS.
+      - ${STORAGE_HOST_MOUNT:-/mnt/synology-apps}:/mnt/synology-apps:${STORAGE_MOUNT_MODE:-ro}
       # Fallback source, used while STORAGE_* is unset in staging.env.
       - ./assets:/mnt/sap_exports:ro
       - spool:/var/lib/pct/spool

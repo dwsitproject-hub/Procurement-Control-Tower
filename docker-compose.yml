@@ -115,7 +115,9 @@ services:
       # explicit that Option B must not be used without the mount). To rehearse
       # the server layout locally, bind a folder at /mnt/synology/eos and set
       # STORAGE_SYNOLOGY_ROOT / STORAGE_DEPLOYMENT / STORAGE_PROJECT_SLUG.
-      - ./Assets:/mnt/sap_exports:ro
+      # rw locally so after-run filing can be exercised; staging keeps `ro` by
+      # default (deploy/staging/be.compose.yml).
+      - ./Assets:/mnt/sap_exports:rw
       - spool:/var/lib/pct/spool
     ports:
       - "127.0.0.1:3000:3000"

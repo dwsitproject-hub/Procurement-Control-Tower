@@ -33,7 +33,7 @@ import {
 import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
 import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
-import { PerFeedShareSource, loadShareConfig } from '../modules/ingest/share_poller.js';
+import { PerFeedShareSource, archiveAfterRun, loadShareConfig } from '../modules/ingest/share_poller.js';
 import { notify } from '../modules/notify/mailer.js';
 import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
@@ -883,13 +883,18 @@ export function buildRouter(): Router {
   r.post('/api/v1/ingest/sync', role('steward', async (req, res, ctx) => {
     // Same per-feed folders/patterns the scheduler uses, so "Sync now" and the
     // scheduled pickup can never read different files.
-    const source = new PerFeedShareSource(await loadShareConfig());
+    const shareCfg = await loadShareConfig();
+    const source = new PerFeedShareSource(shareCfg);
     const force = Boolean((req.body ?? {}).force);
     const out = await runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force });
+    // The same after-run filing the scheduled pickup does. Sharing one helper is
+    // the point: these two paths already share the source so they cannot read
+    // different files, and they must not diverge on what happens next either.
+    const archive = await archiveAfterRun(source, out.outcome, 'batchId' in out ? out.batchId : null, shareCfg);
     await recordAudit({
       action: 'ingest.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
       outcome: out.outcome === 'failed' ? 'failure' : 'success',
-      detail: { outcome: out.outcome, force }, ip: req.ip,
+      detail: { outcome: out.outcome, force, archive }, ip: req.ip,
     });
     // A manual sync notifies on FAILURE only: the person who pressed the button
     // is already looking at the result, but a failure is worth telling the team.

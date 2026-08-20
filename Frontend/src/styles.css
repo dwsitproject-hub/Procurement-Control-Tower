@@ -723,3 +723,30 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 
 .xs-means { margin: .2rem 0 0; padding-left: 1.1rem; font-size: .74rem; line-height: 1.55; }
 .xs-means li { margin-bottom: .35rem; }
+
+/* Executive Summary: stacked Open/Closed segments (022).
+   Open is the accent, Closed is a muted tint of it — same hue so the two read as
+   parts of one total, different lightness so they separate in greyscale too. */
+.xs-legend {
+  display: flex; gap: 1rem; font-size: .66rem; color: var(--muted);
+  margin-bottom: .35rem; flex-wrap: wrap;
+}
+.xs-key { display: inline-block; width: .6rem; height: .6rem; border-radius: 2px; margin-right: .25rem; }
+.xs-key.xs-open { background: var(--accent); }
+.xs-key.xs-closed { background: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+
+.xs-bar-track, .xs-band-track {
+  display: flex; background: var(--border); border-radius: 3px; overflow: hidden;
+}
+.xs-bar-track { height: .8rem; }
+.xs-band-track { height: 100%; flex: 1; min-width: 0; }
+.xs-seg { border: 0; padding: 0; height: 100%; cursor: pointer; min-width: 2px; }
+.xs-seg:disabled { cursor: default; }
+.xs-seg.xs-open { background: var(--accent); }
+.xs-seg.xs-closed { background: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.xs-seg:hover:not(:disabled) { filter: brightness(1.15); }
+.xs-seg:focus-visible { outline: 2px solid var(--heading); outline-offset: -2px; }
+/* The rows are containers now, not buttons — the segments inside are the
+   clickable things, so a row must not look interactive itself. */
+.xs-bar-row, .xs-band-row { cursor: default; }
+.xs-bar-row:hover, .xs-band-row:hover { background: transparent; }

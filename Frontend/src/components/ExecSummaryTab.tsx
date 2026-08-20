@@ -35,6 +35,15 @@ import { formatNumber } from '../lib/format';
 
 interface Props {
   kpis: Kpi[];
+  /**
+   * The global filter as a query string.
+   *
+   * Passed through to both chart fetches. Until now this page ignored it
+   * entirely: the filter bar sat at the top and did nothing to either panel,
+   * because a chart is only recomputed under a filter when it has a live spec —
+   * these two now do (see PARITY_CHARTS).
+   */
+  filterQuery: string;
   onDrill: (token: string, label: string) => void;
   currency: 'USD' | 'IDR';
   asOfDate: string | null;
@@ -67,47 +76,85 @@ function pct(v: number | null, dp = 1): string {
  * `emphasiseTop` shades the leading N bars, matching the design's red/grey cut.
  * The design left that cut unexplained; the caption states it.
  */
+/**
+ * A ranked horizontal bar list, each bar STACKED into Open and Closed.
+ *
+ * Stacked rather than grouped on purpose: open + closed is the category's total,
+ * so the ranking and the share the panel is read for survive the split instead of
+ * being replaced by two half-height bars that no longer show which category is
+ * biggest.
+ *
+ * Written rather than reusing ChartPanel because this is the page's signature
+ * panel and the design is horizontal-and-ranked — and because the ordering is the
+ * point. The reference chart was NOT correctly ranked (Coal at 127 Bio sat below
+ * Bleaching Earth at 85), so the order here is derived from the total and cannot
+ * be got wrong.
+ *
+ * Each SEGMENT is separately clickable and carries its own drill, so "Open
+ * METHANOL" opens exactly those lines.
+ */
 function RankedBars({ data, onDrill, emphasiseTop }: {
   data: ChartResponse;
   onDrill: (token: string, label: string) => void;
   emphasiseTop: number;
 }) {
-  const series = data.series[0];
-  if (!series) return <p className="muted">No data.</p>;
+  const openS = data.series.find((x) => x.key === 'open');
+  const closedS = data.series.find((x) => x.key === 'closed');
+  if (!openS && !closedS) return <p className="muted">No data.</p>;
 
-  const rows = series.points
-    .map((p) => ({
-      ...p,
-      label: data.buckets.find((b) => b.key === p.bucketKey)?.label ?? p.bucketKey,
-    }))
-    .filter((r) => r.value !== null)
-    .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  const at = (key: string, s: typeof openS) =>
+    s?.points.find((pt) => pt.bucketKey === key) ?? null;
 
-  const total = rows.reduce((a, r) => a + (r.value ?? 0), 0);
-  const max = rows.reduce((a, r) => Math.max(a, r.value ?? 0), 0);
+  const rows = data.buckets
+    .map((b) => {
+      const o = at(b.key, openS);
+      const c = at(b.key, closedS);
+      return { key: b.key, label: b.label, o, c, total: (o?.value ?? 0) + (c?.value ?? 0) };
+    })
+    .filter((r) => r.total > 0)
+    .sort((a, b) => b.total - a.total);
+
+  const grand = rows.reduce((a, r) => a + r.total, 0);
+  const max = rows.reduce((a, r) => Math.max(a, r.total), 0);
 
   return (
     <div className="xs-bars">
+      <div className="xs-legend">
+        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
+        <span><i className="xs-key xs-closed" /> Closed <span className="muted">(delivered)</span></span>
+      </div>
       {rows.map((r, i) => {
-        const share = total > 0 ? ((r.value ?? 0) / total) * 100 : 0;
-        const width = max > 0 ? ((r.value ?? 0) / max) * 100 : 0;
-        return (
+        const share = grand > 0 ? (r.total / grand) * 100 : 0;
+        const w = (v: number) => (max > 0 ? (v / max) * 100 : 0);
+        const seg = (
+          pt: { value: number | null; rowCount: number; drillToken: string | null } | null,
+          cls: string,
+          what: string,
+        ) => (pt && (pt.value ?? 0) > 0 ? (
           <button
-            key={r.bucketKey}
             type="button"
-            className={'xs-bar-row' + (i < emphasiseTop ? ' xs-hi' : '')}
-            disabled={!r.drillToken}
-            title={r.drillToken ? formatNumber(r.rowCount) + ' PO lines — click to open' : undefined}
-            onClick={() => r.drillToken && onDrill(r.drillToken, data.title + ' — ' + r.label)}
-          >
+            className={`xs-seg ${cls}`}
+            style={{ width: `${w(pt.value ?? 0)}%` }}
+            disabled={!pt.drillToken}
+            title={`${what} ${r.label} — ${rupiah(pt.value)}, ${formatNumber(pt.rowCount)} PO lines`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (pt.drillToken) onDrill(pt.drillToken, `${r.label} — ${what}`);
+            }}
+          />
+        ) : null);
+
+        return (
+          <div key={r.key} className={`xs-bar-row${i < emphasiseTop ? ' xs-hi' : ''}`}>
             <span className="xs-bar-label">{r.label}</span>
             <span className="xs-bar-track">
-              <span className="xs-bar-fill" style={{ width: width + '%' }} />
+              {seg(r.o, 'xs-open', 'Open')}
+              {seg(r.c, 'xs-closed', 'Closed')}
             </span>
             <span className="xs-bar-value">
-              {rupiah(r.value)} <span className="muted">({share.toFixed(1)}%)</span>
+              {rupiah(r.total)} <span className="muted">({share.toFixed(1)}%)</span>
             </span>
-          </button>
+          </div>
         );
       })}
     </div>
@@ -115,71 +162,100 @@ function RankedBars({ data, onDrill, emphasiseTop }: {
 }
 
 /**
- * The size-band panel: share of value against share of lines, on one band axis.
+ * The size-band panel: share of value against share of lines, each split into
+ * Open and Closed.
  *
- * Bands are ordered by the bucket ordinal, which is the band's own size rank —
- * never by measure. The reference design sorted these rows by % value and so
- * printed "100-500 Jt" above "500 Jt - 1 Bio"; on an interval scale that
- * destroys the distribution shape the panel exists to show.
+ * Two stacked bars per band. Stacking keeps open + closed equal to the band's
+ * total share, so the value-versus-volume comparison the panel exists for reads
+ * exactly as it did before the split.
+ *
+ * Bands are ordered by the bucket ordinal — the band's own size rank, never by
+ * measure. The reference design sorted these rows by % value and so printed
+ * "100-500 Jt" above "500 Jt - 1 Bio"; on an interval scale that destroys the
+ * distribution shape the panel exists to show.
  */
 function BandPairs({ data, onDrill }: {
   data: ChartResponse;
   onDrill: (token: string, label: string) => void;
 }) {
-  const valueSeries = data.series.find((s) => s.key === 'value_share');
-  const lineSeries = data.series.find((s) => s.key === 'line_share');
-  if (!valueSeries || !lineSeries) return <p className="muted">No data.</p>;
+  const S = (k: string) => data.series.find((x) => x.key === k);
+  const ov = S('open_value'); const cv = S('closed_value');
+  const ol = S('open_lines'); const cl = S('closed_lines');
+  if (!ov && !cv && !ol && !cl) return <p className="muted">No data.</p>;
 
   const buckets = [...data.buckets].sort((a, b) => a.ordinal - b.ordinal);
+  const at = (s: ReturnType<typeof S>, key: string) =>
+    s?.points.find((pt) => pt.bucketKey === key) ?? null;
+
+  const seg = (
+    pt: { value: number | null; rowCount: number; drillToken: string | null } | null,
+    cls: string, label: string, band: string,
+  ) => (pt && (pt.value ?? 0) > 0 ? (
+    <button
+      type="button"
+      className={`xs-seg ${cls}`}
+      style={{ width: `${pt.value ?? 0}%` }}
+      disabled={!pt.drillToken}
+      title={`${label} ${band} — ${(pt.value ?? 0).toFixed(1)}%, ${formatNumber(pt.rowCount)} PO lines`}
+      onClick={() => pt.drillToken && onDrill(pt.drillToken, `${band} — ${label}`)}
+    />
+  ) : null);
 
   return (
     <div className="xs-bands">
+      <div className="xs-legend">
+        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
+        <span><i className="xs-key xs-closed" /> Closed <span className="muted">(delivered)</span></span>
+      </div>
       {buckets.map((b) => {
-        const v = valueSeries.points.find((p) => p.bucketKey === b.key) ?? null;
-        const l = lineSeries.points.find((p) => p.bucketKey === b.key) ?? null;
-        const token = v?.drillToken ?? l?.drillToken ?? null;
+        const vTot = (at(ov, b.key)?.value ?? 0) + (at(cv, b.key)?.value ?? 0);
+        const lTot = (at(ol, b.key)?.value ?? 0) + (at(cl, b.key)?.value ?? 0);
         return (
-          <button
-            key={b.key}
-            type="button"
-            className="xs-band-row"
-            disabled={!token}
-            title={token ? formatNumber(v?.rowCount ?? 0) + ' PO lines — click to open' : undefined}
-            onClick={() => token && onDrill(token, data.title + ' — ' + b.label)}
-          >
+          <div key={b.key} className="xs-band-row">
             <span className="xs-band-label">{b.label}</span>
             <span className="xs-band-bars">
               <span className="xs-band-line">
-                <span className="xs-band-fill xs-v" style={{ width: (v?.value ?? 0) + '%' }} />
-                <span className="xs-band-num">{pct(v?.value ?? 0)} of value</span>
+                <span className="xs-band-track">
+                  {seg(at(ov, b.key), 'xs-open', 'Open', b.label)}
+                  {seg(at(cv, b.key), 'xs-closed', 'Closed', b.label)}
+                </span>
+                <span className="xs-band-num">{pct(vTot)} of value</span>
               </span>
               <span className="xs-band-line">
-                <span className="xs-band-fill xs-n" style={{ width: (l?.value ?? 0) + '%' }} />
-                <span className="xs-band-num">{pct(l?.value ?? 0)} of lines</span>
+                <span className="xs-band-track">
+                  {seg(at(ol, b.key), 'xs-open', 'Open', b.label)}
+                  {seg(at(cl, b.key), 'xs-closed', 'Closed', b.label)}
+                </span>
+                <span className="xs-band-num">{pct(lTot)} of lines</span>
               </span>
             </span>
-          </button>
+          </div>
         );
       })}
     </div>
   );
 }
 
-export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }: Props) {
+export function ExecSummaryTab({
+  kpis, onDrill, currency, asOfDate, firstDate, filterQuery,
+}: Props) {
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let dead = false;
+    const q = filterQuery ? `?${filterQuery}` : '';
+    setByCategory(null);
+    setByBand(null);
     Promise.all([
-      api.get<ChartResponse>('/api/v1/chart/exec_value_by_category'),
-      api.get<ChartResponse>('/api/v1/chart/exec_txn_size'),
+      api.get<ChartResponse>(`/api/v1/chart/exec_value_by_category${q}`),
+      api.get<ChartResponse>(`/api/v1/chart/exec_txn_size${q}`),
     ])
       .then(([c, b]) => { if (!dead) { setByCategory(c); setByBand(b); } })
       .catch((e: Error) => { if (!dead) setErr(e.message); });
     return () => { dead = true; };
-  }, []);
+  }, [filterQuery]);
 
   const k = (id: string): Kpi | undefined => kpis.find((x) => x.kpiId === id);
   const val = (id: string): number | null => k(id)?.value ?? null;
@@ -224,10 +300,14 @@ export function ExecSummaryTab({ kpis, onDrill, currency, asOfDate, firstDate }:
   // Read from the chart rather than a KPI: this is a statement ABOUT the chart's
   // own completeness, so it must move with the chart and not with a separate
   // aggregate that could be computed over a different population.
-  const catTotal = (byCategory?.series[0]?.points ?? [])
-    .reduce((a, p) => a + (p.value ?? 0), 0);
-  const catUnmapped = (byCategory?.series[0]?.points ?? [])
-    .find((p) => p.bucketKey === '(unmapped)')?.value ?? 0;
+  // Across BOTH lifecycle series, not series[0]: the chart split into Open and
+  // Closed, and reading one series would halve the denominator and report a
+  // mapping gap that is roughly double the real one.
+  const catPoints = (byCategory?.series ?? []).flatMap((x) => x.points);
+  const catTotal = catPoints.reduce((a, pt) => a + (pt.value ?? 0), 0);
+  const catUnmapped = catPoints
+    .filter((pt) => pt.bucketKey === '(unmapped)')
+    .reduce((a, pt) => a + (pt.value ?? 0), 0);
   const unmappedShare = byCategory && catTotal > 0 ? (catUnmapped / catTotal) * 100 : null;
 
   const top5 = val('top5_category_share_pct');

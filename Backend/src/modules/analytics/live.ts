@@ -158,6 +158,41 @@ export interface LiveChart {
   points: LiveChartPoint[];
 }
 
+/**
+ * Compute EVERY series of a chart under the filter.
+ *
+ * The single-spec version below was the only entry point, and it used find()
+ * rather than filter() — so a filtered multi-series chart silently lost all but
+ * its first series. Unfiltered the mart holds them all, so the panel looked
+ * complete until someone touched the filter bar and half of it vanished with no
+ * error. aging_by_priority, po_bracket_* and the Executive Summary's Open/Closed
+ * splits were all affected.
+ *
+ * A series whose SQL legitimately returns nothing is DROPPED rather than
+ * returned empty: under "Open only" there are no Delivered rows, and an empty
+ * "Closed" series in the response would draw a legend entry for something that
+ * cannot exist in that slice.
+ */
+export async function computeLiveChartSeries(
+  versionId: number,
+  chartId: string,
+  filter: GlobalFilter,
+): Promise<LiveChart[] | null> {
+  const specs = PARITY_CHARTS.filter((c) => c.chartId === chartId);
+  if (specs.length === 0) return null;
+
+  const out: LiveChart[] = [];
+  for (const spec of specs) {
+    const one = await computeLiveChartFor(spec, versionId, chartId, filter);
+    // A null here means the filter cannot be honoured for this spec at all; that
+    // is a property of the chart, not of one series, so the caller falls back to
+    // the precomputed chart with its "filter not applied" note.
+    if (one === null) return null;
+    if (one.points.length > 0) out.push(one);
+  }
+  return out;
+}
+
 export async function computeLiveChart(
   versionId: number,
   chartId: string,
@@ -165,6 +200,18 @@ export async function computeLiveChart(
 ): Promise<LiveChart | null> {
   const spec = PARITY_CHARTS.find((c) => c.chartId === chartId);
   if (!spec) return null;
+  return computeLiveChartFor(spec, versionId, chartId, filter);
+}
+
+async function computeLiveChartFor(
+  spec: {
+    chartId: string; seriesKey: string; seriesLabel: string; unit: string; sql: string;
+    filterAlias?: string;
+  },
+  versionId: number,
+  chartId: string,
+  filter: GlobalFilter,
+): Promise<LiveChart | null> {
 
   // Chart specs embed their own grain in the drill jsonb; infer from the SQL's
   // driving table instead, which is unambiguous.
@@ -173,7 +220,9 @@ export async function computeLiveChart(
     : spec.sql.includes('fact_gr_posting')
       ? 'gr_posting'
       : 'po_line';
-  const alias = JOINED_ALIAS[chartId]?.alias ?? '';
+  // Per-series alias first: a chart can have one single-table series and one
+  // joined series, and only the series itself knows which it is.
+  const alias = spec.filterAlias ?? JOINED_ALIAS[chartId]?.alias ?? '';
 
   // A scope toggle on a GR-grain chart cannot be honored; returning null makes
   // the route fall back to the precomputed chart with its explicit

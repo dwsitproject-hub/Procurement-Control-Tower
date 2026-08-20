@@ -9,6 +9,7 @@
  */
 
 import type pg from 'pg';
+import { sizeBandLabelSql } from '@pct/rules';
 import { insertMany } from '../../db/client.js';
 
 // Statuses v1 treats as "open".
@@ -835,6 +836,15 @@ interface ChartSpec {
   unit: string;
   /** Must return bucket_key, bucket_label, value, row_count, drill (jsonb). */
   sql: string;
+  /**
+   * Table alias the global-filter clause must qualify, when this SERIES joins two
+   * facts. Per-series, not per-chart: aging_by_priority's first series is a
+   * single-table query on fact_pr_item (no alias) while its second joins pol to
+   * pri and needs 'pol.'. A chart-level alias cannot be right for both, and
+   * before all series were computed under a filter only the first ever ran, so
+   * the mismatch was invisible.
+   */
+  filterAlias?: string;
 }
 
 /** Six PO-approval bands (user decision 4 Aug 2026), same-day first. */
@@ -856,6 +866,156 @@ const DIST_ORDER = `CASE WHEN d <= 3 THEN 1 WHEN d <= 7 THEN 2 WHEN d <= 14 THEN
                          WHEN d <= 30 THEN 4 WHEN d <= 60 THEN 5 ELSE 6 END`;
 
 export const PARITY_CHARTS: ChartSpec[] = [
+  // ── Executive Summary charts (022) ──
+  //
+  // These exist HERE, not only in mart.ts, because a chart is only filterable if
+  // it has a live spec: liveChartAvailable() consults this registry, and without
+  // an entry the global filter bar silently does nothing to the panel. That was
+  // the state on the Executive Summary until now.
+  //
+  // Each category and each size band splits into OPEN (status <> 'Delivered')
+  // and CLOSED (status = 'Delivered'). Stacked, the two segments still sum to the
+  // bucket's total, so the ranking and the share the panel is read for survive
+  // the split rather than being replaced by it.
+  //
+  // The percentage denominators use window functions over the SAME filtered CTE,
+  // so under a filter the shares are shares OF THE FILTERED POPULATION. Taking
+  // them from the precomputed total instead would make a filtered panel's bars
+  // sum to something other than 100% with no indication why.
+  {
+    chartId: 'exec_txn_size', seriesKey: 'open_value', seriesLabel: 'Open — % of value', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS part,
+                   count(*) FILTER (WHERE status <> 'Delivered')::int AS n,
+                   sum(sum(v)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_v > 0 THEN 100.0 * part / total_v ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'closed_value', seriesLabel: 'Closed — % of value', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS part,
+                   count(*) FILTER (WHERE status = 'Delivered')::int AS n,
+                   sum(sum(v)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_v > 0 THEN 100.0 * part / total_v ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'open_lines', seriesLabel: 'Open — % of lines', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   count(*) FILTER (WHERE status <> 'Delivered')::numeric AS part,
+                   count(*) FILTER (WHERE status <> 'Delivered')::int AS n,
+                   sum(sum(1)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_n > 0 THEN 100.0 * part / total_n ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'closed_lines', seriesLabel: 'Closed — % of lines', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   count(*) FILTER (WHERE status = 'Delivered')::numeric AS part,
+                   count(*) FILTER (WHERE status = 'Delivered')::int AS n,
+                   sum(sum(1)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_n > 0 THEN 100.0 * part / total_n ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'open', seriesLabel: 'Open', unit: 'idr',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'closed', seriesLabel: 'Closed', unit: 'idr',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
   {
     chartId: 'items_by_priority', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
     sql: `SELECT COALESCE(priority_label,'(unlabelled)') AS bucket_key,
@@ -880,6 +1040,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'aging_by_priority', seriesKey: 'e2e', seriesLabel: 'E2E', unit: 'days',
+    filterAlias: 'pol.',
     sql: `SELECT COALESCE(pol.priority_label,'(unlabelled)') AS bucket_key,
                  COALESCE(pol.priority_label,'(unlabelled)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric(8,1) AS value,
@@ -1487,7 +1648,20 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_value', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'idr',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
@@ -1495,10 +1669,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
                   (SELECT sum(d.total) FROM docs d WHERE d.total >= 0 AND d.total < 5000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 0 AND d.total < 5000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 0 AND d.total < 5000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1506,17 +1678,28 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_count', seriesKey: '0 - 5 JT', seriesLabel: '0 - 5 JT', unit: 'count',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
                 GROUP BY 1 HAVING sum(net_order_value) > 0)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
                   (SELECT count(*)::numeric FROM docs d WHERE d.total >= 0 AND d.total < 5000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 0 AND d.total < 5000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 0 AND d.total < 5000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','0 - 5 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1524,7 +1707,20 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_value', seriesKey: '5 - 25 JT', seriesLabel: '5 - 25 JT', unit: 'idr',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
@@ -1532,10 +1728,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
                   (SELECT sum(d.total) FROM docs d WHERE d.total >= 5000000 AND d.total < 25000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 5000000 AND d.total < 25000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 5000000 AND d.total < 25000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1543,17 +1737,28 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_count', seriesKey: '5 - 25 JT', seriesLabel: '5 - 25 JT', unit: 'count',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
                 GROUP BY 1 HAVING sum(net_order_value) > 0)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
                   (SELECT count(*)::numeric FROM docs d WHERE d.total >= 5000000 AND d.total < 25000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 5000000 AND d.total < 25000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 5000000 AND d.total < 25000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','5 - 25 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1561,7 +1766,20 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_value', seriesKey: '25 - 100 JT', seriesLabel: '25 - 100 JT', unit: 'idr',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
@@ -1569,10 +1787,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
                   (SELECT sum(d.total) FROM docs d WHERE d.total >= 25000000 AND d.total < 100000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 25000000 AND d.total < 100000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 25000000 AND d.total < 100000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1580,17 +1796,28 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_count', seriesKey: '25 - 100 JT', seriesLabel: '25 - 100 JT', unit: 'count',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
                 GROUP BY 1 HAVING sum(net_order_value) > 0)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
                   (SELECT count(*)::numeric FROM docs d WHERE d.total >= 25000000 AND d.total < 100000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 25000000 AND d.total < 100000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 25000000 AND d.total < 100000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','25 - 100 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1598,7 +1825,20 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_value', seriesKey: '100 - 500 JT', seriesLabel: '100 - 500 JT', unit: 'idr',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
@@ -1606,10 +1846,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
                   (SELECT sum(d.total) FROM docs d WHERE d.total >= 100000000 AND d.total < 500000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 100000000 AND d.total < 500000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 100000000 AND d.total < 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1617,17 +1855,28 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_count', seriesKey: '100 - 500 JT', seriesLabel: '100 - 500 JT', unit: 'count',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
                 GROUP BY 1 HAVING sum(net_order_value) > 0)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
                   (SELECT count(*)::numeric FROM docs d WHERE d.total >= 100000000 AND d.total < 500000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 100000000 AND d.total < 500000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 100000000 AND d.total < 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','100 - 500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1635,7 +1884,20 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_value', seriesKey: '>500 JT', seriesLabel: '>500 JT', unit: 'idr',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
@@ -1643,10 +1905,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
            SELECT 'Amount in Local Currency' AS bucket_key,
                   'Amount in Local Currency' AS bucket_label,
                   (SELECT sum(d.total) FROM docs d WHERE d.total >= 500000000)::numeric AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 500000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,
@@ -1654,17 +1914,28 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'po_bracket_count', seriesKey: '>500 JT', seriesLabel: '>500 JT', unit: 'count',
     sql: `WITH docs AS (
-               SELECT po_no, sum(net_order_value) AS total
+               -- count(*) here so row_count below is derived from this
+               -- already-filtered CTE. It used to re-scan the fact table under a
+               -- second version anchor, and injectFilter patches only the first
+               -- one it finds, so under a global filter the value was filtered
+               -- while row_count was not and the chart disagreed with its own
+               -- drill by a few hundred rows.
+               --
+               -- NOTE: do not write the anchor text itself in a comment here.
+               -- injectFilter searches the raw SQL string, so a comment that
+               -- mentions it becomes the first match and the filter clause is
+               -- appended INSIDE the comment - silently dropped, while its bind
+               -- parameter is still supplied. That is a 'bind message supplies 2
+               -- parameters' error at runtime, nowhere near the real cause.
+               SELECT po_no, sum(net_order_value) AS total, count(*) AS lines
                  FROM ${POL}
                 WHERE dataset_version_id = $1 AND currency_code = 'IDR'
                   AND NOT is_sto AND NOT is_deleted
                 GROUP BY 1 HAVING sum(net_order_value) > 0)
            SELECT 'PO Count' AS bucket_key, 'PO Count' AS bucket_label,
                   (SELECT count(*)::numeric FROM docs d WHERE d.total >= 500000000) AS value,
-                  (SELECT count(*)::int FROM ${POL} l JOIN docs d ON d.po_no = l.po_no
-                    WHERE l.dataset_version_id = $1 AND l.currency_code = 'IDR'
-                      AND NOT l.is_sto AND NOT l.is_deleted
-                      AND d.total >= 500000000) AS row_count,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d
+                    WHERE d.total >= 500000000) AS row_count,
                   jsonb_build_object('grain','po_line','filters',
                     jsonb_build_object('poDocBracket','>500 JT','currencyIs','IDR',
                                        'notSto',true,'notDeleted',true)) AS drill`,

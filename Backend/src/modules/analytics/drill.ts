@@ -367,6 +367,14 @@ const FILTERS: Record<string, Compiler> = {
   // the parity sweep asserts.
   spendCategory: (v, a, ps) => `${a}.spend_category = ${p(ps, String(v))}`,
   sizeBand: (v, a, ps) => `${a}.size_band = ${p(ps, String(v))}`,
+  /**
+   * The Executive Summary's Open/Closed split: true = Delivered (Closed).
+   *
+   * Not the same as the `open` filter, which uses OPEN_STATUSES and so omits
+   * 'Fully Reversed'. Kept separate so a chart series and the rows behind it
+   * cannot disagree — see GlobalFilter.delivered.
+   */
+  delivered: (v, a) => `${a}.status ${v === true ? '=' : '<>'} 'Delivered'`,
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
   requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
   // Purchasing group, blank-aware: the charts bucket blanks as 'N/A'/'(none)'.

@@ -69,18 +69,6 @@ function pct(v: number | null, dp = 1): string {
 }
 
 /**
- * A ranked horizontal bar list.
- *
- * Written rather than reusing ChartPanel's vertical bars because this is the
- * page's signature panel and the design is horizontal-and-ranked — and because
- * the ordering is the point. The reference chart was NOT correctly ranked (Coal
- * at 127 Bio sat below Bleaching Earth at 85), so the order here is derived
- * from the value itself and cannot be got wrong.
- *
- * `emphasiseTop` shades the leading N bars, matching the design's red/grey cut.
- * The design left that cut unexplained; the caption states it.
- */
-/**
  * A ranked horizontal bar list, each bar STACKED into Open and Closed.
  *
  * Stacked rather than grouped on purpose: open + closed is the category's total,
@@ -94,8 +82,13 @@ function pct(v: number | null, dp = 1): string {
  * Bleaching Earth at 85), so the order here is derived from the total and cannot
  * be got wrong.
  *
- * Each SEGMENT is separately clickable and carries its own drill, so "Open
- * METHANOL" opens exactly those lines.
+ * `emphasiseTop` shades the leading N bars, matching the design's red/grey cut;
+ * the caption below the panel states where the cut falls, which the reference
+ * design left unexplained.
+ *
+ * Each SEGMENT is separately clickable and opens the focus panel for that slice
+ * — "Open METHANOL" — rather than a bare row list. Rows drilling to lines is
+ * still available from inside that panel.
  */
 function RankedBars({ data, onFocus, emphasiseTop }: {
   data: ChartResponse;

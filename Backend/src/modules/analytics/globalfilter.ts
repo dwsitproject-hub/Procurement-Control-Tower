@@ -272,6 +272,27 @@ export function mergeIntoPredicate(
     filters['scopeComplete'] = true;
   }
 
+  // The Executive Summary dimensions (022). Omitting them here was a real
+  // defect: a chart recomputed under spendCategory= or sizeBand= was correct,
+  // but the drill token minted for each of its points did not carry the
+  // constraint, so opening a point returned the unfiltered population. Every
+  // dimension buildFilterClause understands must appear here too, or the
+  // chart-equals-drill guarantee holds only for the dimensions someone
+  // remembered.
+  if (f.spendCategory?.length) {
+    filters['spendCategoryIn'] = f.spendCategory;
+  }
+  if (f.sizeBand?.length) {
+    filters['sizeBandIn'] = f.sizeBand;
+  }
+  if (f.delivered !== undefined) {
+    // A DISTINCT key from the `delivered` a chart series sets for itself:
+    // `filters` is an object, so reusing the key would overwrite the spec's
+    // value instead of ANDing with it, and an Open series under a Closed filter
+    // would drill to rows its own bar reports as zero.
+    filters[f.delivered ? 'lifecycleClosed' : 'lifecycleOpen'] = true;
+  }
+
   return { ...predicate, filters };
 }
 

@@ -144,6 +144,24 @@ function monthExpr(alias: string, grain: Grain): string {
   return `to_char(${alias}.${col}, 'YYYY-MM')`;
 }
 
+/**
+ * Apply a PO-line predicate at whatever grain the drill is running on.
+ *
+ * The PO-line grain applies it directly; the PR grain reaches its linked PO
+ * lines. This is the drill-side twin of buildFilterClause's `poScoped`, and the
+ * two must stay identical: the chart aggregates with one and the drill filters
+ * with the other, and the sweep asserts they agree.
+ */
+function poLineScoped(grain: Grain | undefined, a: string, predicate: string): string {
+  if (grain === 'pr_item') {
+    return `EXISTS (SELECT 1 FROM core.fact_po_line _xs
+                     WHERE _xs.dataset_version_id = ${a}.dataset_version_id
+                       AND _xs.pr_no = ${a}.pr_no AND _xs.pr_item = ${a}.pr_item
+                       AND _xs.${predicate})`;
+  }
+  return `${a}.${predicate}`;
+}
+
 const FILTERS: Record<string, Compiler> = {
   // Filters the mart aggregates apply. Every predicate must carry the SAME
   // filters as the query that produced its number — the omission of these two is
@@ -365,16 +383,48 @@ const FILTERS: Record<string, Compiler> = {
   // Both filter a column stamped on the fact at transform time, so the drill
   // and the chart aggregate read the same value by construction — which is what
   // the parity sweep asserts.
-  spendCategory: (v, a, ps) => `${a}.spend_category = ${p(ps, String(v))}`,
-  sizeBand: (v, a, ps) => `${a}.size_band = ${p(ps, String(v))}`,
+  // ── Executive Summary dimensions (022) ──
+  //
+  // GRAIN-AWARE, and they must mirror buildFilterClause EXACTLY — the same
+  // requirement scopeOpen carries above, for the same reason. These columns live
+  // on the PO line; on the PR grain the clause builder resolves them through the
+  // linked PO lines, so a drill that applied them directly to fact_pr_item
+  // either errored (no such column) or silently returned nothing. Both happened:
+  // spendCategory= produced 25 chart errors and lifecycle=closed produced 99
+  // chart/drill mismatches before this was made grain-aware.
+  //
+  // GR postings carry neither, and buildFilterClause throws for that grain, so
+  // no drill on it can arrive here carrying one.
+  spendCategory: (v, a, ps, grain) => poLineScoped(grain, a, `spend_category = ${p(ps, String(v))}`),
+  spendCategoryIn: (v, a, ps, grain) =>
+    poLineScoped(grain, a, `spend_category = ANY(${p(ps, (v as unknown[]).map(String))})`),
+  sizeBand: (v, a, ps, grain) => poLineScoped(grain, a, `size_band = ${p(ps, String(v))}`),
+  sizeBandIn: (v, a, ps, grain) =>
+    poLineScoped(grain, a, `size_band = ANY(${p(ps, (v as unknown[]).map(String))})`),
   /**
    * The Executive Summary's Open/Closed split: true = Delivered (Closed).
    *
-   * Not the same as the `open` filter, which uses OPEN_STATUSES and so omits
+   * Not the same as scopeOpen, which uses the v1 open-status list and so omits
    * 'Fully Reversed'. Kept separate so a chart series and the rows behind it
    * cannot disagree — see GlobalFilter.delivered.
    */
-  delivered: (v, a) => `${a}.status ${v === true ? '=' : '<>'} 'Delivered'`,
+  delivered: (v, a, _ps, grain) =>
+    poLineScoped(grain, a, `status ${v === true ? '=' : '<>'} 'Delivered'`),
+  /**
+   * The GLOBAL filter's half of the same split, under distinct keys.
+   *
+   * It cannot reuse `delivered`: a chart series sets that key itself, and
+   * `filters` is an object, so a global value would OVERWRITE the spec's rather
+   * than AND with it. Under lifecycle=closed the Open series correctly aggregates
+   * to zero, but its drill was rewritten to Closed and returned rows the bar did
+   * not count — 26 mismatches. Distinct keys let both compile, and a genuine
+   * contradiction (Open series, Closed filter) then yields no rows, which is what
+   * the bar shows. This mirrors scopeOpen / scopeComplete for the same reason,
+   * and the *In suffixes above for the list dimensions.
+   */
+  lifecycleOpen: (_v, a, _ps, grain) => poLineScoped(grain, a, `status <> 'Delivered'`),
+  lifecycleClosed: (_v, a, _ps, grain) => poLineScoped(grain, a, `status = 'Delivered'`),
+
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
   requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
   // Purchasing group, blank-aware: the charts bucket blanks as 'N/A'/'(none)'.
@@ -534,6 +584,13 @@ function detailHandoffFor(filters: Record<string, unknown>): DrillPage['detailHa
       case 'plantIn': params['plant'] = (v as unknown[]).map(String).join(','); break;
       case 'purchOrg': params['purchOrg'] = String(v); break;
       case 'purchOrgIn': params['purchOrg'] = (v as unknown[]).map(String).join(','); break;
+      // spendCategory, sizeBand and delivered are DELIBERATELY absent, so they
+      // fall to the default below and are reported as unmapped. The detail view
+      // carries no spend_category or size_band column, so a param here would be
+      // accepted by the URL and then ignored by the query — the handoff would
+      // silently widen to the whole category while the UI claimed it was exact.
+      // Naming them unmapped makes the approximation visible, which is the
+      // behaviour this switch was built for.
       case 'purchGroup': params['purchGroup'] = String(v); break;
       case 'companyCode': params['company'] = String(v); break;
       case 'companyCodeIn': params['company'] = (v as unknown[]).map(String).join(','); break;

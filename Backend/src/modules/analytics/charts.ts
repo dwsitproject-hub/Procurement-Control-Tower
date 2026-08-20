@@ -14,6 +14,33 @@ export interface ChartMeta {
 }
 
 export const CHART_META: ChartMeta[] = [
+  // ── Executive Summary (020) ──
+  // Committed value, NOT "spend". net_order_value_idr is what was ORDERED; the
+  // reference design headed this figure "spend", which would disagree with
+  // finance. Naming it plainly here is the cheapest way to stop that argument.
+  {
+    chartId: 'exec_value_by_category',
+    title: 'Committed value by spend category',
+    tab: 'execsummary',
+    grain: 'po_line',
+    unit: 'idr',
+    notes: [
+      'STO and deleted lines excluded',
+      'Category resolves: mapping file, then SAP material master, then unmapped',
+      '"(no material code)" is shown rather than folded into a category',
+    ],
+  },
+  {
+    chartId: 'exec_txn_size',
+    title: 'Transaction size: value against volume',
+    tab: 'execsummary',
+    grain: 'po_line',
+    unit: 'percent',
+    notes: [
+      'Two series on one band axis: share of committed value, share of PO lines',
+      'Bands ordered by size, never by measure',
+    ],
+  },
   {
     chartId: 'status_mix',
     title: 'Documents by status',

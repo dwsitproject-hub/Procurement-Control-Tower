@@ -8,7 +8,9 @@
  */
 
 import type pg from 'pg';
-import { expediteEffectiveness, mean, median, percentile, shareOverThreshold } from '@pct/rules';
+import {
+  expediteEffectiveness, mean, median, percentile, shareOverThreshold, sizeBandLabel,
+} from '@pct/rules';
 import type { KpiId } from '@pct/contracts';
 import { insertMany } from '../../db/client.js';
 import { CHART_META } from './charts.js';
@@ -552,6 +554,57 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
       ordinal, value, count, unit, null, JSON.stringify(predicate),
     ]);
   };
+
+  // ── Executive Summary: committed value by spend category (020) ──
+  // Purchase lines only: STO is an internal transfer and deleted lines are not
+  // commitments, so including either would overstate the value the page leads
+  // with. The drill predicate carries the same two flags, which is what lets the
+  // parity sweep confirm the figure and its detail agree.
+  {
+    const r = await client.query<{ cat: string; v: string; n: number }>(
+      `SELECT spend_category AS cat, sum(net_order_value_idr)::text AS v, count(*)::int AS n
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+          AND spend_category IS NOT NULL
+        GROUP BY 1 ORDER BY sum(net_order_value_idr) DESC NULLS LAST`,
+      [versionId],
+    );
+    r.rows.forEach((x, i) =>
+      push('exec_value_by_category', 'value', 'Committed value', x.cat, x.cat, i + 1,
+        Number(x.v), x.n, 'idr',
+        { grain: 'po_line', filters: { spendCategory: x.cat, notSto: true, notDeleted: true } }),
+    );
+  }
+
+  // ── Executive Summary: transaction size, value against volume (020) ──
+  // Two series on ONE band axis, ordered by band key so the bands can never be
+  // drawn out of sequence. Percentages are computed here rather than in the
+  // page: the denominator is the banded population (lines with an IDR value),
+  // and computing it client-side from whatever points arrived would silently
+  // change the denominator if a band were ever empty.
+  {
+    const r = await client.query<{ band: string; v: string; n: number }>(
+      `SELECT size_band AS band, sum(net_order_value_idr)::text AS v, count(*)::int AS n
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+          AND size_band IS NOT NULL
+        GROUP BY 1 ORDER BY 1`,
+      [versionId],
+    );
+    const totalV = r.rows.reduce((a, x) => a + Number(x.v), 0);
+    const totalN = r.rows.reduce((a, x) => a + x.n, 0);
+    r.rows.forEach((x, i) => {
+      const label = sizeBandLabel(x.band) ?? x.band;
+      const pred = { grain: 'po_line', filters: { sizeBand: x.band, notSto: true, notDeleted: true } };
+      // count on BOTH series is the line count, because that is what a drill
+      // from either bar returns — the sweep compares the drill's row count, not
+      // the plotted percentage.
+      push('exec_txn_size', 'value_share', '% of committed value', x.band, label, i + 1,
+        totalV > 0 ? (Number(x.v) / totalV) * 100 : 0, x.n, 'percent', pred);
+      push('exec_txn_size', 'line_share', '% of PO lines', x.band, label, i + 1,
+        totalN > 0 ? (x.n / totalN) * 100 : 0, x.n, 'percent', pred);
+    });
+  }
 
   // status mix
   {

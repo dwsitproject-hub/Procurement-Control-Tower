@@ -19,3 +19,4 @@ export * from './gr.js';
 export * from './linkage.js';
 export * from './stats.js';
 export * from './category.js';
+export * from './size_band.js';

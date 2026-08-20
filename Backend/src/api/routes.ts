@@ -392,9 +392,21 @@ export function buildRouter(): Router {
       [v.id],
     );
 
+    // The PO commitment period, which is NOT prDateRange. Requisitions in this
+    // extract reach back to 2023 while the orders are 2026 — so an Executive
+    // Summary headed with the PR span would claim a period the value figures do
+    // not cover. Same population as the page: purchase lines only.
+    const poRange = await queryOne<{ min: string | null; max: string | null }>(
+      `SELECT min(document_date)::text AS min, max(document_date)::text AS max
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
+      [v.id],
+    );
+
     res.json({
       datasetVersionId: v.id,
       prDateRange: prRange && prRange.min ? { from: prRange.min, to: prRange.max } : null,
+      poDateRange: poRange && poRange.min ? { from: poRange.min, to: poRange.max } : null,
       asOfDate: v.asOfDate,
       asOfSource: v.asOfSource,
       publishedAt: v.publishedAt,

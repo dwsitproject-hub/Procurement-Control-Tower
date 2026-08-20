@@ -361,6 +361,12 @@ const FILTERS: Record<string, Compiler> = {
               WHERE _pr.dataset_version_id = ${a}.dataset_version_id
                 AND _pr.pr_no = ${a}.pr_no AND _pr.pr_item = ${a}.pr_item
                 AND ${a}.document_date < _pr.requisition_date)`,
+  // ── Executive Summary (020) ──
+  // Both filter a column stamped on the fact at transform time, so the drill
+  // and the chart aggregate read the same value by construction — which is what
+  // the parity sweep asserts.
+  spendCategory: (v, a, ps) => `${a}.spend_category = ${p(ps, String(v))}`,
+  sizeBand: (v, a, ps) => `${a}.size_band = ${p(ps, String(v))}`,
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
   requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
   // Purchasing group, blank-aware: the charts bucket blanks as 'N/A'/'(none)'.

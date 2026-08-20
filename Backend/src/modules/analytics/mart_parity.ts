@@ -431,6 +431,112 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_line', filters: { notSto: true } },
   },
 
+  // ── Executive Summary (020) ──
+  //
+  // The page makes two claims and these KPIs are those claims, computed rather
+  // than asserted in prose. The reference design stated them as static text
+  // ("top 5 = 70%", "72% of lines < Rp 25 Jt = 4% of value"), which is how a
+  // slide goes stale silently.
+  //
+  // Every one uses the same purchase population as total_po_amount — NOT is_sto
+  // AND NOT is_deleted — so a tile and the value chart beside it can never
+  // disagree about what "committed value" counts.
+  {
+    id: 'active_purch_groups',
+    entityUnit: 'desks',
+    unit: 'count',
+    sql: `SELECT count(DISTINCT purch_group)::int AS value FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND purch_group IS NOT NULL AND btrim(purch_group) <> ''`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    // How few desks hold most of the value. This replaces the reference design's
+    // "HO 92% of value" panel, which cannot be reproduced here: NO Head-Office
+    // purchasing group appears in this entity's orders at all, so an HO/UNIT
+    // split computes to 2%/98% and would tell the reader the opposite of the
+    // truth. Desk concentration carries the same strategic point — a few desks
+    // control the money, many run the paperwork — and is measurable.
+    id: 'desks_for_80pct_value',
+    entityUnit: 'desks',
+    unit: 'count',
+    sql: `WITH d AS (
+            SELECT purch_group, sum(net_order_value_idr) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND purch_group IS NOT NULL AND btrim(purch_group) <> ''
+             GROUP BY 1
+          ), c AS (
+            SELECT sum(v) OVER (ORDER BY v DESC NULLS LAST
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                   / NULLIF((SELECT sum(v) FROM d), 0) AS cum
+              FROM d
+          )
+          SELECT (count(*) FILTER (WHERE cum < 0.8) + 1)::int AS value,
+                 count(*)::int AS sample FROM c`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'vendors_for_80pct_value',
+    entityUnit: 'vendors',
+    unit: 'count',
+    sql: `WITH d AS (
+            SELECT vendor_code, sum(net_order_value_idr) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND vendor_code IS NOT NULL
+             GROUP BY 1
+          ), c AS (
+            SELECT sum(v) OVER (ORDER BY v DESC NULLS LAST
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                   / NULLIF((SELECT sum(v) FROM d), 0) AS cum
+              FROM d
+          )
+          SELECT (count(*) FILTER (WHERE cum < 0.8) + 1)::int AS value,
+                 count(*)::int AS sample FROM c`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'top5_category_share_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `WITH c AS (
+            SELECT spend_category, sum(net_order_value_idr) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+             GROUP BY 1
+          ), r AS (
+            SELECT v, row_number() OVER (ORDER BY v DESC NULLS LAST) AS rn FROM c
+          )
+          SELECT 100.0 * COALESCE(sum(v) FILTER (WHERE rn <= 5), 0)
+                 / NULLIF(sum(v), 0) AS value, count(*)::int AS sample FROM r`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    // The fragmentation pair. Two KPIs rather than one sentence, because the
+    // whole argument is that these two numbers are far apart: a large share of
+    // the lines carries a tiny share of the value. Bands 5, 6 and 7 are
+    // everything below Rp 25 Jt (packages/rules/src/size_band.ts).
+    id: 'lines_under_25jt_pct',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE size_band IN ('5','6','7'))
+                 / NULLIF(count(*), 0) AS value, count(*)::int AS sample
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND size_band IS NOT NULL`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'value_under_25jt_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `SELECT 100.0 * COALESCE(sum(net_order_value_idr)
+                   FILTER (WHERE size_band IN ('5','6','7')), 0)
+                 / NULLIF(sum(net_order_value_idr), 0) AS value, count(*)::int AS sample
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND size_band IS NOT NULL`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+
   // ── G6.3: the v1-only registry KPIs, promoted (decision 3 Aug 2026) ──
   {
     // v1 'Tail Spend % (IDR)': share of IDR spend in the bottom 80% of PO

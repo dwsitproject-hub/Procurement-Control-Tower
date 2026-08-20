@@ -23,6 +23,7 @@ import {
   isSto,
   isTokenPrice,
   materialCategory,
+  sizeBandSql,
   priorityLabel,
   isZeroPriceAnomaly,
   lookupMovement,
@@ -996,6 +997,38 @@ export async function runTransform(
      SELECT DISTINCT material_group, material_category FROM core.fact_po_line
       WHERE dataset_version_id = $1 AND material_group IS NOT NULL
      ON CONFLICT (material_group) DO NOTHING`,
+    [versionId],
+  );
+
+  // ── Executive Summary attributes (020) ──
+  // Stamped onto the fact, not joined at read time, for the reason stated in the
+  // migration: a chart point and its drill predicate must filter the same
+  // column, and the parity sweep checks that they agree. A category that lived
+  // only in a join could not be a drill filter at all.
+  //
+  // Runs AFTER the reference upserts above, because the fallback in the
+  // resolution order reads dim_material_master — which those upserts have just
+  // refreshed from this same bundle.
+  await client.query(
+    `UPDATE core.fact_po_line f
+        SET size_band = ${sizeBandSql('f.net_order_value_idr')},
+            spend_category = COALESCE(
+              -- 1. mapping file, exact material code
+              (SELECT c.category FROM core.dim_spend_category c
+                WHERE c.material_code = f.material_code),
+              -- 2. mapping file, material group
+              (SELECT c.category FROM core.dim_spend_category c
+                WHERE c.material_group = f.material_group),
+              -- 3. the SAP material master (018)
+              (SELECT m.category FROM core.dim_material_master m
+                WHERE m.material_code = f.material_code AND m.category IS NOT NULL),
+              -- 4/5. visible, not folded into "Others" — 12.8% of committed
+              -- value sits on lines with no material code, and burying that
+              -- inside a business category would misstate every share.
+              CASE WHEN f.material_code IS NULL OR f.material_code = ''
+                     THEN '(no material code)'
+                   ELSE '(unmapped)' END)
+      WHERE f.dataset_version_id = $1`,
     [versionId],
   );
 

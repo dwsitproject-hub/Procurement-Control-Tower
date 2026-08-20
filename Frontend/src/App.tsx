@@ -26,6 +26,7 @@ import {
  */
 import { ErrorBoundary } from './components/ErrorBoundary';
 
+const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
 const AdminTab = lazy(() => import('./components/AdminTab').then((m) => ({ default: m.AdminTab })));
 const CustomTab = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomTab })));
 // Pinned custom cards render on ordinary pages, but only for users who have
@@ -47,6 +48,9 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
   {
     section: 'Main',
     items: [
+      // First in the menu: it is the page an executive opens and the only one
+      // that states a conclusion rather than presenting a measurement.
+      { id: 'execsummary', label: 'Executive Summary', icon: '🎯' },
       { id: 'executive', label: 'Overview', icon: '📊' },
       { id: 'openitems', label: 'Open Items', icon: '🔥' },
     ],
@@ -78,6 +82,21 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
 ];
 
 const TAB_KPIS: Record<Tab, string[]> = {
+  /**
+   * Executive Summary. The first four are the headline tiles; the rest are the
+   * two claims the page makes — concentration and fragmentation — computed
+   * rather than written into the prose, so they cannot go stale.
+   *
+   * total_po_amount, po_line_items and unique_suppliers are REUSED, not
+   * redefined: they already carry the purchase population (STO and deleted
+   * excluded) and are already covered by the parity sweep. A second definition
+   * of "committed value" is exactly how two pages come to disagree.
+   */
+  execsummary: [
+    'total_po_amount', 'po_line_items', 'unique_suppliers', 'active_purch_groups',
+    'top5_category_share_pct', 'lines_under_25jt_pct', 'value_under_25jt_pct',
+    'desks_for_80pct_value', 'vendors_for_80pct_value',
+  ],
   // Ordered to mirror v1's page layouts.
   executive: [
     'open_po_commitment', 'grir_value', 'pr_pipeline_value', 'cycle_e2e',
@@ -135,6 +154,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
 };
 
 const TAB_CHARTS: Record<Tab, string[]> = {
+  execsummary: ['exec_value_by_category', 'exec_txn_size'],
   executive: ['status_mix', 'po_value_by_month', 'items_by_priority', 'aging_by_priority'],
   openitems: ['aging_severity_by_stage', 'aging_bands', 'open_by_priority', 'unapproved_by_category', 'unreleased_aging_buckets'],
   pr: [
@@ -578,6 +598,18 @@ export default function App() {
               Publish a dataset first: <code>npm run ingest -w @pct/backend</code>
             </p>
           </div>
+        ) : tab === 'execsummary' ? (
+          <PageChunk tab={tab}>
+            <ExecSummaryTab
+              kpis={kpis}
+              onDrill={onDrill}
+              currency={currency}
+              // poDateRange, NOT prDateRange: requisitions here reach back to
+              // 2023 while the orders are 2026, and this page reports orders.
+              asOfDate={dataset?.poDateRange?.to ?? dataset?.asOfDate ?? null}
+              firstDate={dataset?.poDateRange?.from ?? null}
+            />
+          </PageChunk>
         ) : tab === 'vendors' ? (
           <PageChunk tab={tab}><VendorsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'materials' ? (

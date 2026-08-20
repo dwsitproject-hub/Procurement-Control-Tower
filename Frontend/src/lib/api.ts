@@ -70,6 +70,8 @@ export interface DatasetCurrent {
   state?: string;
   message?: string;
   prDateRange?: { from: string; to: string } | null;
+  /** PO document-date span. Distinct from prDateRange, which reaches further back. */
+  poDateRange?: { from: string; to: string } | null;
   asOfDate: string;
   asOfSource: string;
   publishedAt: string;

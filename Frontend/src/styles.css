@@ -625,3 +625,69 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 /* Vendor tables: the PO email column. Long addresses must not stretch the
    table, so it truncates with the full value in the title attribute. */
 .ent-email { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Executive Summary (020) ──────────────────────────────────────────────
+   Built on the existing tokens so it inherits both themes automatically.
+
+   Deliberately NOT the reference design's red. There, red was both the brand
+   accent for neutral magnitudes and the colour of the action panel — and red
+   conventionally reads as "bad", so a large bar looked like a warning. Emphasis
+   here is --accent, and everything unemphasised is a muted track. */
+
+.xs-tile {
+  display: flex; flex-direction: column; gap: .15rem;
+  padding: .7rem .8rem; text-align: left;
+  background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  cursor: pointer; font: inherit; color: inherit;
+}
+.xs-tile:disabled { cursor: default; }
+.xs-tile:hover:not(:disabled) { border-color: var(--accent); }
+.xs-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.xs-tile-value { font-size: 1.45rem; font-weight: 800; color: var(--heading); line-height: 1.1; }
+.xs-tile-label { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.xs-tile-sub { font-size: .66rem; }
+
+/* Ranked horizontal bars. grid, not flex, so every label column is the same
+   width and the bars share one baseline — the comparison the panel exists for. */
+.xs-bars { display: flex; flex-direction: column; gap: 2px; }
+.xs-bar-row {
+  display: grid; grid-template-columns: minmax(7rem, 12rem) 1fr minmax(9rem, auto);
+  align-items: center; gap: .5rem;
+  padding: .2rem .3rem; border: 0; border-radius: 4px;
+  background: transparent; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.xs-bar-row:disabled { cursor: default; }
+.xs-bar-row:hover:not(:disabled) { background: var(--bg); }
+.xs-bar-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.xs-bar-label { font-size: .7rem; text-align: right; color: var(--muted); }
+.xs-bar-track { background: var(--border); border-radius: 3px; height: .8rem; overflow: hidden; }
+.xs-bar-fill { display: block; height: 100%; background: var(--neutral); border-radius: 3px; }
+.xs-hi .xs-bar-label { color: var(--text); font-weight: 700; }
+.xs-hi .xs-bar-fill { background: var(--accent); }
+.xs-bar-value { font-size: .7rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Size bands: two stacked bars per band, sharing the band's row. */
+.xs-bands { display: flex; flex-direction: column; gap: .3rem; }
+.xs-band-row {
+  display: grid; grid-template-columns: minmax(8rem, 11rem) 1fr;
+  align-items: center; gap: .6rem;
+  padding: .25rem .3rem; border: 0; border-radius: 4px;
+  background: transparent; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.xs-band-row:disabled { cursor: default; }
+.xs-band-row:hover:not(:disabled) { background: var(--bg); }
+.xs-band-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.xs-band-label { font-size: .7rem; font-weight: 700; text-align: right; }
+.xs-band-bars { display: flex; flex-direction: column; gap: 2px; }
+.xs-band-line { position: relative; display: flex; align-items: center; gap: .4rem; height: .78rem; }
+.xs-band-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
+/* Value and volume must be distinguishable without colour: value is solid, and
+   volume is lighter AND labelled, so the pair reads in greyscale too. */
+.xs-band-fill.xs-v { background: var(--accent); }
+.xs-band-fill.xs-n { background: var(--neutral); opacity: .45; }
+.xs-band-num { font-size: .62rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.xs-means { margin: .2rem 0 0; padding-left: 1.1rem; font-size: .74rem; line-height: 1.55; }
+.xs-means li { margin-bottom: .35rem; }

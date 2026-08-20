@@ -69,6 +69,7 @@ export type PageAccess = (typeof PAGE_ACCESS)[number];
 
 /** Every page the matrix can grant, in menu order. */
 export const PAGE_KEYS = [
+  'execsummary',
   'executive', 'openitems', 'pr', 'coupa_src', 'po', 'delivery', 'coupa_inv',
   'approvals', 'materials', 'vendors', 'governance',
   'detail', 'custom', 'admin', 'datacheck',
@@ -76,6 +77,7 @@ export const PAGE_KEYS = [
 export type PageKey = (typeof PAGE_KEYS)[number];
 
 export const PAGE_LABELS: Record<PageKey, string> = {
+  execsummary: 'Executive Summary',
   executive: 'Overview',
   openitems: 'Open Items',
   pr: 'PR Analysis',
@@ -222,6 +224,10 @@ export const KPI_IDS = [
   'top_vendor_share_pct','top5_vendor_share_pct','avg_suppliers_per_material',
   'worst_approver_gap','auto_release_share_pct',
   'urgent_po_before_pr','open_pr_with_wbs','median_pr_approval','pr_approval_lead_time',
+  // Executive Summary (020). Concentration and fragmentation, the two facts the
+  // page is built to state.
+  'active_purch_groups','desks_for_80pct_value','vendors_for_80pct_value',
+  'top5_category_share_pct','lines_under_25jt_pct','value_under_25jt_pct',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -297,6 +303,12 @@ export const KPI_TITLES: Record<KpiId, string> = {
   open_pr_with_wbs: 'Open PR with WBS',
   median_pr_approval: 'Median PR Approval',
   pr_approval_lead_time: 'PR Approval Lead Time (median)',
+  active_purch_groups: 'Active purchasing desks',
+  desks_for_80pct_value: 'Desks holding 80% of value',
+  vendors_for_80pct_value: 'Vendors holding 80% of value',
+  top5_category_share_pct: 'Top 5 categories (% of value)',
+  lines_under_25jt_pct: 'PO lines under Rp 25 Jt',
+  value_under_25jt_pct: 'Value on lines under Rp 25 Jt',
 };
 
 export const KpiValueSchema = z.object({

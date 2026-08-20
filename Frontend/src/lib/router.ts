@@ -19,7 +19,7 @@ import { useEffect, useState } from 'react';
  */
 
 export type Tab =
-  | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
+  | 'execsummary' | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
   | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
 /**
@@ -28,6 +28,7 @@ export type Tab =
  * page is `po`, the Sourcing page is `coupa_src`).
  */
 export const TAB_PATH: Record<Tab, string> = {
+  execsummary: '/executive-summary',
   executive: '/overview',
   openitems: '/open-items',
   pr: '/pr-analysis',

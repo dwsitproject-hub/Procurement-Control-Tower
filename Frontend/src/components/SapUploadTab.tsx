@@ -325,13 +325,29 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
     } finally { setBusy(null); }
   };
 
-  const syncNow = async () => {
-    setBusy('sync'); setMsg('Reading the folders and ingesting…');
+  /**
+   * Read the folders and ingest.
+   *
+   * `force` bypasses the bundle-hash no-op. Without it an identical set of files
+   * is correctly reported as "nothing to do" — which is the right default, and
+   * also a trap: when the TRANSFORM changes (a deployment, a corrected rule) the
+   * files are byte-identical while the output would not be, so the only way to
+   * pick up the new behaviour is to insist. Admin -> Data Exclusions already
+   * forces for exactly this reason; this panel had no way to, so an operator
+   * could not rebuild after a release without going through that other page.
+   */
+  const syncNow = async (force = false) => {
+    setBusy(force ? 'rebuild' : 'sync');
+    setMsg(force
+      ? 'Rebuilding every fact from the same files — this takes a minute…'
+      : 'Reading the folders and ingesting…');
     try {
-      const out = await api.post<Record<string, any>>('/api/v1/ingest/sync', {});
+      const out = await api.post<Record<string, any>>('/api/v1/ingest/sync', force ? { force: true } : {});
       setMsg(
         out.outcome === 'published' ? `Published dataset version ${out.datasetVersionId}.`
-        : out.outcome === 'noop_unchanged' ? 'The folders hold the same files already published — nothing to do.'
+        : out.outcome === 'noop_unchanged'
+          ? 'The folders hold the same files already published — nothing to do. '
+            + 'Use Rebuild if the change you are chasing is in the software rather than the files.'
         : out.outcome === 'incomplete_bundle' ? `Incomplete: missing ${(out.missing ?? []).join(', ')}.`
         : out.outcome === 'source_unavailable' ? `Not readable: ${out.path}`
         : `Outcome: ${out.outcome}`,
@@ -507,7 +523,24 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
             {busy === 'sync' ? 'Syncing…' : 'Sync now'}
           </button>
         )}
+        {canEdit && (
+          <button
+            className="dt-btn"
+            disabled={busy !== null}
+            onClick={() => void syncNow(true)}
+            title="Re-ingest and rebuild every fact even though the files have not changed"
+          >
+            {busy === 'rebuild' ? 'Rebuilding…' : 'Rebuild from the same files'}
+          </button>
+        )}
       </div>
+      <p className="note">
+        <strong>Sync now</strong> does nothing when the folders hold files that are already
+        published — the right default, since redoing identical work only risks a new version
+        with the same numbers. <strong>Rebuild</strong> insists anyway. Reach for it after a
+        release that changed how figures are computed: the files are byte-identical, so
+        nothing else will pick the change up.
+      </p>
 
       {msg && <p className="note"><strong>{msg}</strong></p>}
 

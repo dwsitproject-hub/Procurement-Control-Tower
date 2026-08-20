@@ -18,6 +18,20 @@
   --neutral: #64748B;
   --radius: 9px;
   --shadow: 0 1px 5px rgba(0, 0, 0, 0.07);
+
+  /* Stacking order, named because it was previously guessed per component and
+     they disagreed: the drill modal sat at 50 while the sticky topbar sat at
+     100, so the modal's own title row and its close button were painted over by
+     the header and could not be seen or clicked.
+
+     Anything that floats over the page belongs on this scale. --z-modal is the
+     top of it by definition. */
+  --z-dropdown: 40;
+  --z-sticky: 100;
+  --z-modal: 200;
+  /* The sticky topbar's height. The modal clears it rather than sliding under
+     it, so both headers stay readable. */
+  --topbar-h: 50px;
   color-scheme: light dark;
 }
 
@@ -67,7 +81,7 @@ a { color: var(--accent); }
 .topbar {
   /* v1's .bar: navy, sticky, elevated */
   display: flex; align-items: center; gap: .7rem; padding: 0 1.2rem; height: 50px;
-  background: var(--navy); position: sticky; top: 0; z-index: 100;
+  background: var(--navy); position: sticky; top: 0; z-index: var(--z-sticky);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
 }
 .topbar h1 { font-size: .92rem; margin: 0; font-weight: 700; color: #fff; white-space: nowrap; }
@@ -227,13 +241,31 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(8, 11, 15, .55);
-  display: flex; align-items: flex-start; justify-content: center; padding: 3vh 1rem; z-index: 50;
+  display: flex; align-items: flex-start; justify-content: center;
+  /* Top padding clears the sticky topbar so the modal's header is never
+     underneath it. The backdrop itself still covers the full viewport, so the
+     page behind — topbar included — is dimmed, which is what tells the reader
+     the modal has focus. */
+  padding: calc(var(--topbar-h) + .75rem) 1rem 1rem;
+  z-index: var(--z-modal);
 }
 .modal {
   background: var(--panel); border-radius: var(--radius); border: 1px solid var(--border);
-  width: min(1200px, 100%); max-height: 94vh; display: flex; flex-direction: column;
+  width: min(1200px, 100%);
+  /* Bounded by what is left after the topbar offset, so a long table scrolls
+     inside the modal instead of pushing its footer off-screen. */
+  max-height: calc(100vh - var(--topbar-h) - 1.75rem);
+  display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
 }
-.modal header { display: flex; align-items: center; gap: .75rem; padding: .75rem 1rem; border-bottom: 1px solid var(--border); }
+.modal header {
+  display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+  padding: .75rem 1rem; border-bottom: 1px solid var(--border);
+  /* flex: none stops a long title from squeezing the header while the body
+     grows; the table inside has its own sticky <th> at a lower layer. */
+  flex: none; position: relative; z-index: 1; background: var(--panel);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
 .modal header h3 { margin: 0; font-size: .95rem; }
 .modal header .spacer { flex: 1; }
 .modal .body { overflow: auto; padding: .5rem 1rem 1rem; }
@@ -389,7 +421,7 @@ table.dd-tbl th .dt-sort:hover { color: #dbe7ff; }
 }
 .gf-note { color: var(--muted); font-style: italic; }
 .gf-panel {
-  position: absolute; top: calc(100% + .25rem); left: 0; z-index: 40;
+  position: absolute; top: calc(100% + .25rem); left: 0; z-index: var(--z-dropdown);
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   box-shadow: 0 6px 20px rgba(8, 11, 15, .18); min-width: 240px; max-width: 340px;
 }

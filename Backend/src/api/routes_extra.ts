@@ -207,9 +207,15 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   // "auto sync" never ran. Settings now live in rule_config and the poller
   // re-reads them every tick, so a change takes effect without a restart.
 
-  r.get('/api/v1/admin/ingest/config', role('steward', async (_req, res) => {
+  /**
+   * The full panel payload. Shared by the GET and the PUT deliberately: when the
+   * PUT answered with only the stored config, a client that used the response as
+   * its new state silently lost `storage` — and the panel, which reads
+   * storage.basePath while rendering, threw and blanked the page on Save.
+   */
+  const ingestConfigPayload = async () => {
     const cfg = await loadShareConfig();
-    res.json({
+    return {
       ...cfg,
       // The mount itself is environment-level: the container must be able to
       // see the path, which an admin cannot arrange from a web form.
@@ -221,7 +227,11 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       nowInZone: nowInZone().hhmm,
       lastResult: shareLastResult(),
       recentRuns: await recentSlotRuns(12),
-    });
+    };
+  };
+
+  r.get('/api/v1/admin/ingest/config', role('steward', async (_req, res) => {
+    res.json(await ingestConfigPayload());
   }));
 
   r.put('/api/v1/admin/ingest/config', role('admin', async (req, res, ctx) => {
@@ -237,6 +247,34 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       const path = String(row['path'] ?? '').trim();
       if (path === '') {
         throw new HttpProblem(400, 'invalid-body', `A folder is required for ${meta.label}`);
+      }
+      // Reject a Windows-shaped path here rather than at pickup time. The API
+      // reads a LOCAL filesystem path; it never speaks SMB itself — the host
+      // mounts the NAS and Docker binds it in, so this value must be the path AS
+      // THE CONTAINER SEES IT. A UNC address or a drive letter used to save
+      // cleanly and then fail hours later as an unexplained "not readable",
+      // which is exactly how this reached us.
+      //
+      // The backslash is built with a char code on purpose: a literal one here
+      // is a hazard every time this file is edited by a tool.
+      const BACKSLASH = String.fromCharCode(92);
+      const unc = path.startsWith('//') || path.startsWith(BACKSLASH);
+      // A colon in second position is a drive letter; no POSIX folder starts so.
+      const drive = /^[A-Za-z]:/.test(path);
+      if (unc || drive) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${meta.label}: "${path}" is a ${unc ? 'network (UNC)' : 'Windows'} path. `
+          + 'Enter the folder as this server sees it, not the address you use from File '
+          + `Explorer — the share is already mounted here, so use ${shareEnvPath()} `
+          + '(the resolved folder shown on this page).',
+        );
+      }
+      if (!path.startsWith('/')) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${meta.label}: "${path}" is not an absolute folder — it must start with "/".`,
+        );
       }
       const rawSlots = Array.isArray(row['slots']) ? (row['slots'] as unknown[]) : [];
       const slots: string[] = [];
@@ -273,7 +311,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       actorEmail: ctx.principal.email, outcome: 'success',
       detail: { enabled, feeds }, ip: req.ip,
     });
-    res.json(await loadShareConfig());
+    res.json(await ingestConfigPayload());
   }));
 
   // Preview only — reads directory metadata, never ingests. This is how an

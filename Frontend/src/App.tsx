@@ -24,6 +24,8 @@ import {
  * Overview's own building blocks (cards, charts, tables) stay eager: they are
  * the first paint, and deferring them would only add a round trip.
  */
+import { ErrorBoundary } from './components/ErrorBoundary';
+
 const AdminTab = lazy(() => import('./components/AdminTab').then((m) => ({ default: m.AdminTab })));
 const CustomTab = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomTab })));
 // Pinned custom cards render on ordinary pages, but only for users who have
@@ -222,11 +224,15 @@ const CHART_FILTER_DIM: Record<string, 'monthKey' | 'plant' | 'purchOrg'> = {
  * while the chunk downloads (typically one cached round trip, once per page
  * per deployment).
  */
-function PageChunk({ children }: { children: React.ReactNode }) {
+function PageChunk({ children, tab }: { children: React.ReactNode; tab?: Tab }) {
   return (
-    <Suspense fallback={<div className="panel" style={{ minHeight: 220 }}><div className="spinner" /></div>}>
-      {children}
-    </Suspense>
+    // The boundary is INSIDE main, so a page that throws does not take the header
+    // and sidebar with it and the user can still navigate away.
+    <ErrorBoundary resetKey={tab}>
+      <Suspense fallback={<div className="panel" style={{ minHeight: 220 }}><div className="spinner" /></div>}>
+        {children}
+      </Suspense>
+    </ErrorBoundary>
   );
 }
 const TAB_FINDINGS: Partial<Record<Tab, string[]>> = {
@@ -573,17 +579,17 @@ export default function App() {
             </p>
           </div>
         ) : tab === 'vendors' ? (
-          <PageChunk><VendorsTab onDrill={onDrill} /></PageChunk>
+          <PageChunk tab={tab}><VendorsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'materials' ? (
-          <PageChunk><MaterialsTab onDrill={onDrill} /></PageChunk>
+          <PageChunk tab={tab}><MaterialsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'coupa_src' ? (
-          <PageChunk><CoupaSourcingTab /></PageChunk>
+          <PageChunk tab={tab}><CoupaSourcingTab /></PageChunk>
         ) : tab === 'coupa_inv' ? (
-          <PageChunk><CoupaInvoicesTab /></PageChunk>
+          <PageChunk tab={tab}><CoupaInvoicesTab /></PageChunk>
         ) : tab === 'custom' ? (
-          <PageChunk><CustomTab onDrill={onDrill} /></PageChunk>
+          <PageChunk tab={tab}><CustomTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'admin' ? (
-          <PageChunk>
+          <PageChunk tab={tab}>
             <AdminTab
               isAdmin={me.roles.includes('admin')}
               canIngest={me.capabilities.includes('ingest')}

@@ -275,7 +275,10 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
     setBusy('save'); setMsg(null);
     try {
       const out = await api.put<SyncCfg>('/api/v1/admin/ingest/config', { enabled, feeds });
-      setCfg(out);
+      // Deliberately NOT setCfg(out): load() re-reads the full payload below.
+      // Adopting a response as component state couples the panel to that
+      // response carrying every field the render needs, which is exactly how
+      // Save came to blank the page.
       const times = out.feeds.flatMap((f) => f.slots.filter(Boolean)).length;
       setMsg(out.enabled
         ? `Saved — ${times} pickup time(s) armed, all times ${out.timezone}.`

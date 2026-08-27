@@ -323,7 +323,11 @@ export async function globalFilterOptions(versionId: number): Promise<{
 }> {
   const co = await pool.query<{ value: string; label: string }>(
     `SELECT DISTINCT pol.company_code AS value,
-            COALESCE(dc.legal_name, pol.company_code) AS label
+            -- '(blank)' rather than an empty string: 119 lines carry an empty
+            -- company_code, and as a nameless row the option was invisible in
+            -- the dropdown. The VALUE stays '' so it still filters, and so
+            -- select-all continues to cover the whole population.
+            COALESCE(NULLIF(dc.legal_name, ''), NULLIF(pol.company_code, ''), '(blank)') AS label
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_company dc ON dc.company_code = pol.company_code
       WHERE pol.dataset_version_id = $1 ORDER BY 1`,
@@ -331,14 +335,14 @@ export async function globalFilterOptions(versionId: number): Promise<{
   );
   const pl = await pool.query<{ value: string; label: string }>(
     `SELECT DISTINCT pol.plant AS value,
-            COALESCE(dp.plant_name, pol.plant) AS label
+            COALESCE(NULLIF(dp.plant_name, ''), NULLIF(pol.plant, ''), '(blank)') AS label
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
       WHERE pol.dataset_version_id = $1 ORDER BY 1`,
     [versionId],
   );
   const po = await pool.query<{ value: string; label: string }>(
-    `SELECT DISTINCT purch_org AS value, purch_org AS label
+    `SELECT DISTINCT purch_org AS value, COALESCE(NULLIF(purch_org, ''), '(blank)') AS label
        FROM core.fact_po_line WHERE dataset_version_id = $1 AND purch_org <> '' ORDER BY 1`,
     [versionId],
   );

@@ -590,7 +590,11 @@ export default function App() {
         </nav>
 
       <div className="content">
-      {dataset?.datasetVersionId != null && <GlobalFilterBar value={gf} onChange={setGf} />}
+      {dataset?.datasetVersionId != null && <GlobalFilterBar
+          value={gf}
+          onChange={setGf}
+          datasetVersionId={dataset.datasetVersionId}
+        />}
       <main>
         {dataset?.datasetVersionId == null ? (
           <div className="panel">

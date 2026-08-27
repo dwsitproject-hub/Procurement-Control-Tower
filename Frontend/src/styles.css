@@ -752,3 +752,57 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
    clickable things, so a row must not look interactive itself. */
 .xs-bar-row, .xs-band-row { cursor: default; }
 .xs-bar-row:hover, .xs-band-row:hover { background: transparent; }
+
+/* ── Global filter dropdown (modernised) ───────────────────────────────────
+   The panel gained a search box, a select-all that follows the search, and
+   dismissal by click-outside or Escape. The styling below is deliberately built
+   from the existing tokens rather than new colours, so it inherits both themes
+   and stays consistent with the drill modal and the panels. */
+.gf-btn { display: inline-flex; align-items: center; gap: .3rem; }
+.gf-caret { font-size: .6rem; color: var(--muted); }
+.gf-btn[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.gf-panel {
+  /* Above the sticky topbar's siblings but below a modal — the shared scale in
+     :root, so this can never disagree with the drill overlay again. */
+  z-index: var(--z-dropdown);
+  min-width: 17rem; max-width: 24rem;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
+  overflow: hidden;
+}
+.gf-search { padding: .4rem .45rem; border-bottom: 1px solid var(--border); }
+.gf-search-in {
+  width: 100%; box-sizing: border-box;
+  padding: .3rem .45rem; font: inherit; font-size: .76rem;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--text);
+}
+.gf-search-in:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.gf-panel-head { align-items: center; gap: .4rem; flex-wrap: wrap; }
+.gf-count { font-size: .66rem; color: var(--muted); margin-left: auto; white-space: nowrap; }
+.gf-mini-ghost { border-style: dashed; }
+.gf-empty { font-size: .72rem; color: var(--muted); margin: .3rem .1rem; }
+
+/* Rows are full-width targets, not just the checkbox and its text — a 3mm
+   checkbox is a poor thing to ask someone to hit forty-eight times. */
+.gf-opt {
+  padding: .18rem .3rem; border-radius: 4px; cursor: pointer;
+  white-space: normal; gap: .45rem;
+}
+.gf-opt:hover { background: var(--bg); }
+.gf-opt-on { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.gf-opt-label { flex: 1; min-width: 0; }
+/* The code as a chip: it is a lookup key, so it should not read as prose. */
+.gf-opt-code {
+  font-size: .62rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 .25rem; flex: none;
+}
+.gf-dropped {
+  font-size: .66rem; color: var(--crit);
+  border: 1px dashed var(--crit); border-radius: 5px; padding: .1rem .35rem;
+}

@@ -72,6 +72,33 @@ const EXPECTED = [
  * optional. Derived rather than typed out, so it can never disagree with the
  * table the user is reading directly above the message.
  */
+/**
+ * The same glob matching the share pickup uses, so the upload hint and the
+ * scheduler agree about which file is which.
+ *
+ * Mirrors patternToRegExp / matchesPattern in share_poller.ts, including the
+ * case-insensitive flag. Duplicated rather than shared because it is six lines
+ * and the alternative is exporting server ingest internals to the browser; if it
+ * ever grows, move it to @pct/rules where both sides can import it.
+ */
+function matchesPattern(name: string, pattern: string): boolean {
+  if (pattern.trim() === '') return false;
+  // Built character by character rather than with a chain of .replace() regexes.
+  // The escaping in that form is easy to get subtly wrong and impossible to read;
+  // this is longer and obviously correct. The backslash comes from a char code so
+  // no editing pass can eat an escape level.
+  const BS = String.fromCharCode(92);
+  const SPECIAL = '.+^${}()|[]' + BS;
+  let re = '';
+  for (const ch of pattern) {
+    if (ch === '*') re += '.*';
+    else if (ch === '?') re += '.';
+    else if (SPECIAL.includes(ch)) re += BS + ch;
+    else re += ch;
+  }
+  return new RegExp('^' + re + '$', 'i').test(name);
+}
+
 const REQUIRED_FEED_IDS = EXPECTED
   .filter((e) => !('optional' in e && e.optional))
   .map((e) => e.feed);
@@ -817,6 +844,19 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [dataset, setDataset] = useState<Record<string, any> | null>(null);
+  /**
+   * The per-feed name patterns the share pickup uses, keyed by feed.
+   *
+   * Fetched so this panel's filename hint agrees with the scheduler's own rule
+   * instead of guessing from the display label. That matters here specifically:
+   * SAP renamed the exports to "PR List ..." and "PO List ...", an admin
+   * corrected the patterns to suit, and the hint went on testing for
+   * "PR Report" and showing a dash against files the pickup matches happily.
+   *
+   * Empty on failure, which falls back to the label check below — a hint is not
+   * worth an error message.
+   */
+  const [patterns, setPatterns] = useState<Record<string, string>>({});
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const loadDataset = useCallback(() => {
@@ -825,6 +865,14 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
       .catch(() => setDataset(null));
   }, []);
   useEffect(loadDataset, [loadDataset]);
+
+  useEffect(() => {
+    api.get<{ feeds: { feed: string; pattern: string }[] }>('/api/v1/admin/ingest/config')
+      .then((c) => setPatterns(
+        Object.fromEntries((c.feeds ?? []).map((f) => [f.feed, f.pattern])),
+      ))
+      .catch(() => setPatterns({}));
+  }, []);
 
   const pick = (list: FileList | null) => {
     if (!list) return;
@@ -925,8 +973,13 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
                    * nor PO Release. That is why the list below names every
                    * selected file and says the server has the final word.
                    */
-                  const guess = files.find((f) =>
-                    f.name.trim().toLowerCase().startsWith(e.label.toLowerCase()));
+                  // The configured pickup pattern first — it is the rule that
+                  // actually decides which file fills this slot on a scheduled
+                  // run. The label prefix is only a fallback for when the config
+                  // could not be read or a feed has no pattern.
+                  const pat = patterns[e.feed] ?? '';
+                  const guess = files.find((f) => matchesPattern(f.name.trim(), pat))
+                    ?? files.find((f) => f.name.trim().toLowerCase().startsWith(e.label.toLowerCase()));
                   return (
                     <tr key={e.feed} className={i % 2 ? '' : 're'}>
                       <td><code>{e.feed}</code></td>

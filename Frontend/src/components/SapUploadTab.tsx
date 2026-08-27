@@ -62,6 +62,15 @@ const EXPECTED = [
   { feed: 'zuser', label: 'SAP Users', hint: 'zuser — user id to name', optional: true },
 ];
 
+/**
+ * The feed ids a complete bundle needs — everything in EXPECTED not marked
+ * optional. Derived rather than typed out, so it can never disagree with the
+ * table the user is reading directly above the message.
+ */
+const REQUIRED_FEED_IDS = EXPECTED
+  .filter((e) => !('optional' in e && e.optional))
+  .map((e) => e.feed);
+
 const SEV_PILL: Record<Finding['severity'], string> = {
   BLOCKER: 'spdel', CAVEAT: 'sn', WARNING: 'sa', INFO: 'sl',
 };
@@ -893,10 +902,26 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
               </thead>
               <tbody>
                 {EXPECTED.map((e, i) => {
-                  // Feeds are detected server-side from the file's own headers,
-                  // never from its name — this is a hint, not a requirement.
+                  /**
+                   * A filename hint only — the server decides the feed from the
+                   * file's own column headers.
+                   *
+                   * The match must be a PREFIX of the whole label, not the first
+                   * word of it. Matching the first word meant "PR Release" tested
+                   * for "pr" anywhere in the name, so an export called
+                   * "GR List for PR EU EO ..." satisfied PR Release AND PR Report
+                   * on screen while the server classified it as GR alone. A user
+                   * uploaded five files, saw prel filled in green, and was told
+                   * afterwards that prel was missing. A hint that can say yes
+                   * when the answer is no is worse than no hint.
+                   *
+                   * Being strict means a legitimately-named file can go
+                   * unmatched — "PO List for EU ..." matches neither PO Report
+                   * nor PO Release. That is why the list below names every
+                   * selected file and says the server has the final word.
+                   */
                   const guess = files.find((f) =>
-                    f.name.toLowerCase().includes(e.label.split(' ')[0]!.toLowerCase()));
+                    f.name.trim().toLowerCase().startsWith(e.label.toLowerCase()));
                   return (
                     <tr key={e.feed} className={i % 2 ? '' : 're'}>
                       <td><code>{e.feed}</code></td>
@@ -943,11 +968,40 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
               <span className="count">{files.length} file(s) · {totalMb.toFixed(1)} MB</span>
             )}
           </div>
+          {/*
+            The files as chosen, named.
+            
+            The per-feed table above can only guess from a filename, and a
+            wrongly-confident guess already cost a real upload. This list makes no
+            claim about which feed anything is — it just shows what was picked, so
+            a missing export is visible BEFORE the upload rather than in the
+            rejection afterwards.
+          */}
+          {files.length > 0 && (
+            <p className="note">
+              <span className={files.length < REQUIRED_FEED_IDS.length ? 'bs sa' : 'bs sl'}>
+                {files.length} file(s) chosen
+              </span>{' '}
+              {files.length < REQUIRED_FEED_IDS.length && (
+                <>
+                  <strong>
+                    Fewer than the {REQUIRED_FEED_IDS.length} required exports.
+                  </strong>{' '}
+                </>
+              )}
+              {files.map((f) => f.name).join(' · ')}
+            </p>
+          )}
           <p className="note">
-            All six feeds are required for a complete bundle — an incomplete set is rejected rather
-            than published half-loaded. Leave <em>Publish immediately</em> unticked to validate and
-            stage only, then publish from the dataset history. Ingest can take a minute or two; the
-            page waits for the result.
+            A complete bundle needs all {REQUIRED_FEED_IDS.length} of{' '}
+            <strong>{REQUIRED_FEED_IDS.join(', ')}</strong> — an incomplete set is rejected rather
+            than published half-loaded. Only the four marked <em>optional</em> may be left out;
+            Rate Conversion (<code>fx</code>) is <strong>not</strong> one of them. Which feed a file
+            is comes from its column headers, never its name, so a correctly-named file can still be
+            classified as something else — and a file named nothing like its feed still lands
+            correctly. Leave <em>Publish immediately</em> unticked to validate and stage only, then
+            publish from the dataset history. Ingest can take a minute or two; the page waits for
+            the result.
           </p>
         </>
       )}

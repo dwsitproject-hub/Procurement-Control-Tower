@@ -32,7 +32,7 @@ export interface TemplateContract {
    * inherit them from the row above.
    *
    * Set only where that is the export's actual shape. It suppresses the blank-key
-   * row error (V-C02), which would otherwise fire on every continuation line —
+   * row error (V-P02), which would otherwise fire on every continuation line —
    * on PR Release that was 13,338 of 27,742 rows reported as unreadable data
    * when nothing was wrong with any of them.
    */

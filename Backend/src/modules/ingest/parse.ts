@@ -236,10 +236,16 @@ export function extractRow(feed: Feed, cls: ClassifyResult, raw: readonly unknow
  * Two conditions produce an error, and only two — a narrow definition on
  * purpose, because a report that cries wolf is one nobody opens:
  *
- *   V-C01  the cell HAS a value but it cannot be read as the declared type.
+ * V-P** for Parse. NOT V-C**, which is Config and already carries V-C01 (the
+ * exclusion-config row-removal warning in validate.ts) — a rule id must identify
+ * exactly one rule, and the first cut of this reused V-C01, so a coercion error
+ * and an exclusion report would have been indistinguishable in the findings
+ * table, in ingest.row_error and in the workbook.
+ *
+ *   V-P01  the cell HAS a value but it cannot be read as the declared type.
  *          A blank cell never qualifies: blank is a legitimate value for most
  *          columns and is already handled by the required-field rules.
- *   V-C02  a PRIMARY KEY column is blank. Such a row cannot be identified, so
+ *   V-P02  a PRIMARY KEY column is blank. Such a row cannot be identified, so
  *          nothing downstream can reference, dedupe or drill to it.
  *
  * An OPT column that is merely blank is not an error, and neither is a column
@@ -272,7 +278,7 @@ export function extractRowChecked(
         field: c.field,
         header: c.header,
         rawValue: String(cell),
-        ruleId: 'V-C01',
+        ruleId: 'V-P01',
         reason: `Not a valid ${TYPE_NAME[c.type] ?? c.type}: "${String(cell).slice(0, 60)}"`,
       });
     } else if (c.status === 'PK' && blank && !contract.continuationRows) {
@@ -284,7 +290,7 @@ export function extractRowChecked(
         field: c.field,
         header: c.header,
         rawValue: '',
-        ruleId: 'V-C02',
+        ruleId: 'V-P02',
         reason: `${c.header} is empty, and it is a key column — the row cannot be identified.`,
       });
     }

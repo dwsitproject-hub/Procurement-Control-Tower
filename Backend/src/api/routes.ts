@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
 import { FEEDS, KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
 import {
-  buildErrorWorkbook, errorWorkbookName, loadRowErrors,
+  buildErrorWorkbook, errorWorkbookName, loadFindingRows, loadRowErrors,
 } from '../modules/ingest/error_report.js';
 import { resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
@@ -956,18 +956,28 @@ export function buildRouter(): Router {
       throw new HttpProblem(400, 'invalid-body', 'batch id must be a positive integer');
     }
     const rows = await loadRowErrors(batchId);
-    const wb = buildErrorWorkbook(batchId, rows);
+    // The requester's own scope, so the workbook can never contain rows they
+    // could not open on screen.
+    const findings = await loadFindingRows(batchId, ctx.scope);
+    const wb = buildErrorWorkbook(batchId, rows, findings);
     if (wb === null) {
       throw new HttpProblem(
         404, 'not-found',
-        `Batch ${batchId} recorded no unreadable rows. Either every row parsed, or the `
-        + 'batch predates row-level error capture, or its staging rows have been pruned.',
+        `Batch ${batchId} has nothing to report: no unreadable cells and no rule flagged any `
+        + 'rows it could name. Either the data is clean, or the batch predates row-level '
+        + 'capture, or its staging rows have been pruned.',
       );
     }
     await recordAudit({
       action: 'ingest.errors.download', actorUserId: ctx.principal.userId,
       actorEmail: ctx.principal.email, outcome: 'success',
-      detail: { batchId, rows: rows.length }, ip: req.ip,
+      detail: {
+        batchId,
+        cellErrors: rows.length,
+        findingSheets: findings.filter((f) => f.rows.length > 0).length,
+        findingRows: findings.reduce((a, f) => a + f.rows.length, 0),
+      },
+      ip: req.ip,
     });
     res.setHeader('Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

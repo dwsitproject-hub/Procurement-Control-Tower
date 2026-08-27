@@ -27,6 +27,16 @@ export interface ContractColumn {
 export interface TemplateContract {
   feed: Feed;
   note?: string;
+  /**
+   * The feed uses CONTINUATION ROWS: a row may leave its key columns blank and
+   * inherit them from the row above.
+   *
+   * Set only where that is the export's actual shape. It suppresses the blank-key
+   * row error (V-C02), which would otherwise fire on every continuation line —
+   * on PR Release that was 13,338 of 27,742 rows reported as unreadable data
+   * when nothing was wrong with any of them.
+   */
+  continuationRows?: boolean;
   /** Header signature: all of `all`, at least one of `any`, none of `none`. */
   signature: { all: string[]; any?: string[]; none?: string[] };
   columns: ContractColumn[];
@@ -98,6 +108,7 @@ const PR: TemplateContract = {
 
 const PREL: TemplateContract = {
   feed: 'prel',
+  continuationRows: true,
   note: 'SAP PR release-strategy list. 48% of rows are continuation rows with blank identifiers.',
   signature: {
     all: ['prno'],

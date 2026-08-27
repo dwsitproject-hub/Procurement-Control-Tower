@@ -46,6 +46,71 @@ export interface IngestNotifyInput {
   slots?: string;
 }
 
+/**
+ * Per-file rows read, accepted and unreadable — the same table in the success
+ * and the failure email, because the question "how much of my data made it" is
+ * the same question either way.
+ *
+ * Read from ingest.batch_file and ingest.row_error rather than passed in, so the
+ * email cannot disagree with what the batch actually recorded, and so a mail
+ * resent later still tells the truth.
+ *
+ * "Unreadable" counts ROWS, not cells: two bad columns in one row is one row an
+ * operator has to go and fix, and reporting 2 would overstate it. A row is still
+ * accepted with an unreadable optional cell — it is staged and it contributes —
+ * so `accepted` is deliberately not "rows that were perfect".
+ */
+async function perFeedRowLines(batchId: number | undefined): Promise<string[]> {
+  if (!batchId) return [];
+  const rows = await query<{
+    detected_feed: string | null; original_filename: string;
+    row_count: number | null; bad_rows: number;
+  }>(
+    `SELECT f.detected_feed, f.original_filename, f.row_count,
+            COALESCE(e.bad_rows, 0)::int AS bad_rows
+       FROM ingest.batch_file f
+       LEFT JOIN (
+         SELECT feed, count(DISTINCT source_row)::int AS bad_rows
+           FROM ingest.row_error WHERE batch_id = $1 GROUP BY feed
+       ) e ON e.feed = f.detected_feed
+      WHERE f.batch_id = $1
+      ORDER BY f.detected_feed NULLS LAST, f.original_filename`,
+    [batchId],
+  );
+  if (rows.length === 0) return [];
+
+  const lines: string[] = [];
+  lines.push('Rows in each file — read, accepted, and could not be read:');
+  lines.push('');
+  lines.push('  FILE                          FEED    READ      ACCEPTED  UNREADABLE');
+  let totalRead = 0; let totalBad = 0;
+  for (const r of rows) {
+    const read = r.row_count ?? 0;
+    const bad = r.detected_feed === null ? read : r.bad_rows;
+    const acc = read - bad;
+    totalRead += read; totalBad += bad;
+    const name = r.original_filename.length > 28
+      ? `${r.original_filename.slice(0, 25)}...`
+      : r.original_filename.padEnd(28);
+    const feed = (r.detected_feed ?? 'NONE').padEnd(6);
+    lines.push(`  ${name}  ${feed}  ${String(read).padStart(8)}  ${String(acc).padStart(8)}  ${String(bad).padStart(10)}`);
+  }
+  lines.push('');
+  lines.push(`  TOTAL: ${totalRead.toLocaleString('en-GB')} rows read, `
+    + `${(totalRead - totalBad).toLocaleString('en-GB')} accepted, `
+    + `${totalBad.toLocaleString('en-GB')} could not be read.`);
+  if (totalBad > 0) {
+    lines.push('');
+    lines.push('  A file with feed NONE matched no template and was skipped whole — its');
+    lines.push('  rows are counted as unreadable because none of them were used.');
+    lines.push('');
+    lines.push('  The offending rows are downloadable as a workbook, with the value that');
+    lines.push('  could not be read and the reason, from Admin -> SAP Data Upload.');
+  }
+  lines.push('');
+  return lines;
+}
+
 /** SUCCESS: what landed, and how it differs from the previous version. */
 export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ subject: string; body: string }> {
   const v = input.datasetVersionId
@@ -78,6 +143,12 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
     lines.push(`Version:  ${v.id}   (data as of ${v.as_of_date})`);
   }
   lines.push('');
+
+  // What each file contributed. Emitted unconditionally, NOT inside the
+  // has-a-version branch: "how much of my data arrived" is the first question
+  // whatever the outcome, and gating it on the version lookup meant it silently
+  // disappeared whenever that lookup returned nothing.
+  lines.push(...await perFeedRowLines(input.batchId));
 
   if (input.outcome === 'noop_unchanged') {
     lines.push('The share folders held the same files as the last publish, so no new');
@@ -134,6 +205,11 @@ export async function ingestFailureBody(input: IngestNotifyInput): Promise<{ sub
   lines.push(`Trigger:  ${input.trigger}${input.slots ? ` (${input.slots})` : ''}`);
   if (input.batchId) lines.push(`Batch:    ${input.batchId}`);
   lines.push('');
+
+  // The read/accepted/unreadable table first: on a failure the first question is
+  // still how much of the data was usable, and the per-file classification
+  // detail below answers the second one.
+  lines.push(...await perFeedRowLines(input.batchId));
 
   // Per-file outcome: what was read, classified and parsed vs what was not.
   const files = input.batchId

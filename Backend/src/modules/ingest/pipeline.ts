@@ -19,7 +19,7 @@ import {
 import { classifyHeaders } from './classify.js';
 import { loadMappings } from '../admin/steward.js';
 import { REQUIRED_FEEDS } from './contracts.js';
-import { extractRow, readSheetFromBuffer } from './parse.js';
+import { extractRowChecked, readSheetFromBuffer } from './parse.js';
 import {
   assertFileSize, assertMagicBytes, bundleHash, DEFAULT_SAFETY, sha256,
   SourceUnavailableError, type FileSource, type SafetyLimits,
@@ -40,10 +40,40 @@ export interface IngestOptions {
   onProgress?: (stage: string, detail?: string) => void;
 }
 
+/**
+ * What each file contributed, per feed.
+ *
+ * `rowsRead` is what the sheet held; `rowsWithError` is how many of those carry
+ * at least one cell that could not be read (023). `rowsAccepted` is the
+ * difference — and it is a count of rows STAGED, not of rows that reached the
+ * facts: a row with an unreadable optional cell is still staged and still
+ * contributes, so calling it "failed" would overstate the damage. When the batch
+ * as a whole fails, nothing reaches the facts regardless, which the outcome
+ * already says.
+ */
+export interface FeedRowSummary {
+  feed: string;
+  filename: string;
+  rowsRead: number;
+  rowsWithError: number;
+  rowsAccepted: number;
+  /** null when the file's headers matched no template at all. */
+  matched: boolean;
+}
+
 export type IngestOutcome =
-  | { outcome: 'published'; batchId: number; datasetVersionId: number; findings: Finding[] }
-  | { outcome: 'ready'; batchId: number; datasetVersionId: number; findings: Finding[] }
-  | { outcome: 'failed'; batchId: number; reason: string; findings: Finding[] }
+  | {
+    outcome: 'published'; batchId: number; datasetVersionId: number;
+    findings: Finding[]; rowSummary: FeedRowSummary[];
+  }
+  | {
+    outcome: 'ready'; batchId: number; datasetVersionId: number;
+    findings: Finding[]; rowSummary: FeedRowSummary[];
+  }
+  | {
+    outcome: 'failed'; batchId: number; reason: string;
+    findings: Finding[]; rowSummary: FeedRowSummary[];
+  }
   | { outcome: 'noop_unchanged'; batchId: number | null }
   | { outcome: 'incomplete_bundle'; missing: Feed[] }
   | { outcome: 'source_unavailable'; path: string };
@@ -148,6 +178,13 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   };
 
   const findings: Finding[] = [];
+  /**
+   * Declared out here, not inside the try, because the catch below can be
+   * reached before parsing has run at all — a read failure, a safety-gate
+   * rejection. An empty summary is then the truthful answer rather than a
+   * reference error hiding the real cause.
+   */
+  let rowSummary: FeedRowSummary[] = [];
 
   try {
     // prior row counts, for the ±60% drift warning
@@ -160,6 +197,10 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     // ── PARSING ──
     await setState('PARSING');
     const parseStart = Date.now();
+    // Rows (not cells) carrying at least one unreadable value, per feed. Counted
+    // here rather than queried later so the number reported to the operator is
+    // the one this run actually produced.
+    const rowErrorCounts: Record<string, number> = {};
 
     for (const p of prepared) {
       const fileIns = await queryOne<{ id: string }>(
@@ -192,9 +233,28 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       log('parsing', `${p.cls.feed}: ${p.rows.length} rows`);
 
       const feed = p.cls.feed;
-      const staged: unknown[][] = p.rows.map((raw, idx) => [
-        batchId, fileId, feed, idx + 2, JSON.stringify(extractRow(feed, p.cls, raw)),
-      ]);
+      /**
+       * Extract and collect per-cell errors in the same pass.
+       *
+       * source_row is idx + 2 because the header is row 1 — the same number the
+       * operator sees in Excel, which is the only number that makes an error
+       * report actionable.
+       */
+      const staged: unknown[][] = [];
+      const rowErrors: unknown[][] = [];
+      p.rows.forEach((raw, idx) => {
+        const sourceRow = idx + 2;
+        const { row, errors } = extractRowChecked(feed, p.cls, raw);
+        staged.push([batchId, fileId, feed, sourceRow, JSON.stringify(row)]);
+        for (const e of errors) {
+          rowErrors.push([
+            batchId, feed, sourceRow, e.field, e.header,
+            e.rawValue.slice(0, 500), e.ruleId, e.reason,
+          ]);
+        }
+      });
+      rowErrorCounts[feed] = (rowErrorCounts[feed] ?? 0)
+        + new Set(rowErrors.map((r) => r[2])).size;
 
       const client = await pool.connect();
       try {
@@ -206,6 +266,15 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
           staged,
           1000,
         );
+        if (rowErrors.length > 0) {
+          await insertMany(
+            client,
+            'ingest.row_error',
+            ['batch_id', 'feed', 'source_row', 'field', 'header', 'raw_value', 'rule_id', 'reason'],
+            rowErrors,
+            1000,
+          );
+        }
         await client.query('COMMIT');
       } catch (e) {
         await client.query('ROLLBACK');
@@ -215,6 +284,21 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       }
     }
     timings.parsing = (Date.now() - parseStart) / 1000;
+
+    // The per-feed tally, assembled from this run's own numbers rather than
+    // re-queried, so what the operator is told is what actually happened.
+    rowSummary = prepared.map((p) => {
+      const feed = p.cls.feed;
+      const withError = feed === null ? 0 : (rowErrorCounts[feed] ?? 0);
+      return {
+        feed: feed ?? '(unrecognised)',
+        filename: p.displayName,
+        rowsRead: p.rows.length,
+        rowsWithError: withError,
+        rowsAccepted: feed === null ? 0 : p.rows.length - withError,
+        matched: feed !== null,
+      };
+    });
 
     // ── VALIDATING (pre-transform) ──
     await setState('VALIDATING');
@@ -227,7 +311,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       await persistFindings(batchId, findings);
       const reason = blockerReason(findings);
       await setState('FAILED', reason);
-      return { outcome: 'failed', batchId, reason, findings };
+      return { outcome: 'failed', batchId, reason, findings, rowSummary };
     }
 
     // ── TRANSFORMING ──
@@ -281,18 +365,24 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       );
       await setState('PUBLISHED');
       await pruneOldVersions();
-      return { outcome: 'published', batchId, datasetVersionId: result.datasetVersionId, findings };
+      return {
+        outcome: 'published', batchId,
+        datasetVersionId: result.datasetVersionId, findings, rowSummary,
+      };
     }
 
     timings.total = (Date.now() - t0) / 1000;
     await setState('READY');
-    return { outcome: 'ready', batchId, datasetVersionId: result.datasetVersionId, findings };
+    return {
+      outcome: 'ready', batchId,
+      datasetVersionId: result.datasetVersionId, findings, rowSummary,
+    };
   } catch (err) {
     const reason =
       err instanceof BlockerError ? err.message : err instanceof Error ? err.message : String(err);
     await persistFindings(batchId, findings).catch(() => undefined);
     await setState('FAILED', reason).catch(() => undefined);
-    return { outcome: 'failed', batchId, reason, findings };
+    return { outcome: 'failed', batchId, reason, findings, rowSummary };
   }
 }
 

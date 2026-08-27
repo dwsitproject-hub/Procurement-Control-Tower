@@ -20,10 +20,28 @@ type Finding = {
   affectedRows: number | null;
 };
 
+interface FeedRowSummary {
+  feed: string;
+  filename: string;
+  rowsRead: number;
+  rowsWithError: number;
+  rowsAccepted: number;
+  matched: boolean;
+}
+
 type UploadResult =
-  | { outcome: 'published'; batchId: number; datasetVersionId: number; findings: Finding[] }
-  | { outcome: 'ready'; batchId: number; datasetVersionId: number; findings: Finding[] }
-  | { outcome: 'failed'; batchId: number; reason: string; findings: Finding[] }
+  | {
+    outcome: 'published'; batchId: number; datasetVersionId: number;
+    findings: Finding[]; rowSummary?: FeedRowSummary[];
+  }
+  | {
+    outcome: 'ready'; batchId: number; datasetVersionId: number;
+    findings: Finding[]; rowSummary?: FeedRowSummary[];
+  }
+  | {
+    outcome: 'failed'; batchId: number; reason: string;
+    findings: Finding[]; rowSummary?: FeedRowSummary[];
+  }
   | { outcome: 'noop_unchanged'; batchId: number | null }
   | { outcome: 'incomplete_bundle'; missing: string[] }
   | { outcome: 'source_unavailable'; path: string };
@@ -249,6 +267,10 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   const [enabled, setEnabled] = useState(false);
   const [feeds, setFeeds] = useState<FeedCfg[]>([]);
   const [archive, setArchive] = useState<ArchiveCfg>({ enabled: false, succeedDir: '', failedDir: '' });
+  /** Per-file row counts from the last Sync now / Rebuild, mirroring the upload panel. */
+  const [syncSummary, setSyncSummary] = useState<
+    { batchId: number | null; rows: FeedRowSummary[] } | null
+  >(null);
   const [scan, setScan] = useState<{ feeds: FeedScan[]; complete: boolean } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -343,6 +365,11 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
       : 'Reading the folders and ingesting…');
     try {
       const out = await api.post<Record<string, any>>('/api/v1/ingest/sync', force ? { force: true } : {});
+      setSyncSummary(
+        Array.isArray(out.rowSummary) && out.rowSummary.length > 0
+          ? { batchId: typeof out.batchId === 'number' ? out.batchId : null, rows: out.rowSummary }
+          : null,
+      );
       setMsg(
         out.outcome === 'published' ? `Published dataset version ${out.datasetVersionId}.`
         : out.outcome === 'noop_unchanged'
@@ -543,6 +570,54 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
       </p>
 
       {msg && <p className="note"><strong>{msg}</strong></p>}
+
+      {/*
+        The same read/accepted/unreadable table the manual upload shows. A
+        scheduled pickup emails it; pressing Sync now here should not tell the
+        operator less than the email would.
+      */}
+      {syncSummary && (
+        <>
+          <div className="table-wrap">
+            <table className="data dd-tbl">
+              <thead>
+                <tr>
+                  <th>File</th><th>Feed</th>
+                  <th className="num">Rows read</th>
+                  <th className="num">Accepted</th>
+                  <th className="num">Could not be read</th>
+                </tr>
+              </thead>
+              <tbody>
+                {syncSummary.rows.map((r, i) => (
+                  <tr key={r.filename} className={i % 2 ? '' : 're'}>
+                    <td style={{ whiteSpace: 'normal' }}>{r.filename}</td>
+                    <td>{r.matched ? <code>{r.feed}</code> : <span className="bs sa">not recognised</span>}</td>
+                    <td className="num">{formatNumber(r.rowsRead)}</td>
+                    <td className="num">{formatNumber(r.rowsAccepted)}</td>
+                    <td className="num">
+                      {r.rowsWithError === 0
+                        ? DASH
+                        : <span className="bs sa">{formatNumber(r.rowsWithError)}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {syncSummary.rows.some((r) => r.rowsWithError > 0) && syncSummary.batchId !== null && (
+            <p className="note">
+              <span className="bs sa">
+                {formatNumber(syncSummary.rows.reduce((a, r) => a + r.rowsWithError, 0))} row(s)
+                could not be read
+              </span>{' '}
+              <a href={`/api/v1/ingest/batch/${syncSummary.batchId}/errors.xlsx`} download>
+                Download the failing rows (.xlsx)
+              </a>
+            </p>
+          )}
+        </>
+      )}
 
       <div className="table-wrap dt-scroll" style={{ marginTop: '.5rem' }}>
         <table className="data dd-tbl">
@@ -919,6 +994,83 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
             <p className="err">
               <span className="bs spdel">source unavailable</span> {result.path}
             </p>
+          )}
+
+          {/*
+            What arrived, per file: rows read, rows accepted, rows that carried a
+            value we could not read. This is the question an operator asks first
+            after an upload and the panel previously could not answer it at all —
+            a failure said only "batch N: reason", with no indication whether one
+            row was bad or every row was.
+          */}
+          {'rowSummary' in result && (result.rowSummary?.length ?? 0) > 0 && (
+            <>
+              <div className="table-wrap">
+                <table className="data dd-tbl">
+                  <thead>
+                    <tr>
+                      <th>File</th><th>Feed</th>
+                      <th className="num">Rows read</th>
+                      <th className="num">Accepted</th>
+                      <th className="num">Could not be read</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.rowSummary!.map((r, i) => (
+                      <tr key={r.filename} className={i % 2 ? '' : 're'}>
+                        <td style={{ whiteSpace: 'normal' }}>{r.filename}</td>
+                        <td>
+                          {r.matched
+                            ? <code>{r.feed}</code>
+                            : <span className="bs sa">not recognised</span>}
+                        </td>
+                        <td className="num">{formatNumber(r.rowsRead)}</td>
+                        <td className="num">{formatNumber(r.rowsAccepted)}</td>
+                        <td className="num">
+                          {r.rowsWithError === 0
+                            ? DASH
+                            : <span className="bs sa">{formatNumber(r.rowsWithError)}</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {(() => {
+                const bad = result.rowSummary!.reduce((a, r) => a + r.rowsWithError, 0);
+                const read = result.rowSummary!.reduce((a, r) => a + r.rowsRead, 0);
+                if (bad === 0) {
+                  return (
+                    <p className="note">
+                      <span className="bs sd">all rows readable</span>{' '}
+                      {formatNumber(read)} rows read and every value parsed.
+                    </p>
+                  );
+                }
+                return (
+                  <p className="note">
+                    <span className="bs sa">{formatNumber(bad)} row(s) could not be read</span>{' '}
+                    out of {formatNumber(read)}. A row counts here when at least one of its cells
+                    held a value that could not be read as its column&apos;s type — two bad columns
+                    in one row is still one row to fix. Rows with an unreadable{' '}
+                    <em>optional</em> cell are still accepted and still contribute.{' '}
+                    {/*
+                      A plain link, not fetch-and-blob: the browser handles the
+                      download, the session cookie goes with it, and a large
+                      workbook never has to sit in memory here.
+                    */}
+                    <a
+                      href={`/api/v1/ingest/batch/${'batchId' in result ? result.batchId : 0}/errors.xlsx`}
+                      download
+                    >
+                      Download the failing rows (.xlsx)
+                    </a>{' '}
+                    — one sheet per file, with the value, the reason and the rest of that row so the
+                    record can be recognised.
+                  </p>
+                );
+              })()}
+            </>
           )}
 
           {'findings' in result && result.findings.length > 0 && (

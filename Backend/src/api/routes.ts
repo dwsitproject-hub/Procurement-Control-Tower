@@ -14,6 +14,9 @@ import { mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
 import { FEEDS, KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
+import {
+  buildErrorWorkbook, errorWorkbookName, loadRowErrors,
+} from '../modules/ingest/error_report.js';
 import { resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
 import { healthCheck, query, queryOne } from '../db/client.js';
@@ -934,6 +937,42 @@ export function buildRouter(): Router {
       await notify('ingest.failure', m.subject, m.body);
     }
     res.json(out);
+  }));
+
+  /**
+   * The failing rows of a batch, as a workbook.
+   *
+   * A separate endpoint rather than bytes inlined in the ingest response: the
+   * report can be tens of thousands of rows, an operator often wants it minutes
+   * later rather than at the moment of failure, and a download must be
+   * re-requestable without re-running an ingest.
+   *
+   * Scoped to steward like the ingest itself. The workbook contains source data,
+   * so it must not be more widely readable than the ingest that produced it.
+   */
+  r.get('/api/v1/ingest/batch/:id/errors.xlsx', role('steward', async (req, res, ctx) => {
+    const batchId = Number(req.params.id);
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      throw new HttpProblem(400, 'invalid-body', 'batch id must be a positive integer');
+    }
+    const rows = await loadRowErrors(batchId);
+    const wb = buildErrorWorkbook(batchId, rows);
+    if (wb === null) {
+      throw new HttpProblem(
+        404, 'not-found',
+        `Batch ${batchId} recorded no unreadable rows. Either every row parsed, or the `
+        + 'batch predates row-level error capture, or its staging rows have been pruned.',
+      );
+    }
+    await recordAudit({
+      action: 'ingest.errors.download', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { batchId, rows: rows.length }, ip: req.ip,
+    });
+    res.setHeader('Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${errorWorkbookName(batchId)}"`);
+    res.send(wb);
   }));
 
   // Multer parses the multipart body first; role() then authorises before any

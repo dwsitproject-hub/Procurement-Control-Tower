@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
+import { LayoutControls, applyLayout, type TabLayout } from './LayoutEdit';
 
 /**
  * Executive Summary — the one page that states a conclusion rather than
@@ -52,6 +53,14 @@ interface Props {
   currency: 'USD' | 'IDR';
   asOfDate: string | null;
   firstDate?: string | null;
+  /**
+   * The page's saved layout, so its SECTIONS can be reordered and hidden like
+   * the card slots on every other page. This page renders panels rather than
+   * slots, so it was the one page the layout editor could not touch.
+   */
+  layout: TabLayout;
+  update: (mut: (cur: TabLayout) => TabLayout) => void;
+  editing: boolean;
 }
 
 /** Rupiah on the Jt / Bio / T ladder — ONE ladder, used everywhere on this page. */
@@ -255,6 +264,7 @@ function BandPairs({ data, onFocus }: {
 
 export function ExecSummaryTab({
   kpis, onDrill, currency, asOfDate, firstDate, filterQuery, overviewKpis, overviewCharts,
+  layout, update, editing,
 }: Props) {
   /**
    * The focus panel's slice, or null when it is closed.
@@ -351,195 +361,247 @@ export function ExecSummaryTab({
   const hoLines = val('ho_share_lines_pct');
   const n = (v: number | null): string => (v === null ? '—' : formatNumber(v));
 
+  /**
+   * The page's sections, each with an id the layout can order and hide.
+   *
+   * A PANEL is the editable unit here, not a KPI card: this page has no card
+   * slots, and what a reader wants moved or dropped is a whole section. The ids
+   * are namespaced `panel:` so they cannot collide with a KPI or chart id in the
+   * layout's shared `hidden` list.
+   */
+  const PANELS: { id: string; node: React.ReactNode }[] = [
+    {
+      id: 'panel:headline',
+      node: (
+              <div className="panel">
+                <h2>🎯 Executive summary</h2>
+                {/*
+                  Scope stated up front and read from the data rather than typed. The
+                  reference design was headed "2025 / annual spend" over a part-year
+                  extract of a single entity; a reader who trusts that headline draws
+                  conclusions about a population that was never measured.
+                */}
+                <p className="note">
+                  <span className="bs sl">scope</span>{' '}
+                  Committed value on purchase orders
+                  {firstDate && asOfDate ? <> from <strong>{firstDate}</strong> to <strong>{asOfDate}</strong></> : null}
+                  . Stock-transport and deleted lines are excluded throughout, so every figure on
+                  this page counts the same population. Values are <strong>ordered</strong> — this
+                  is commitment, not invoiced or received cash.
+                </p>
+                {err && <p className="note"><span className="bs spdel">error</span> {err}</p>}
+
+                <div className="kpi-grid">
+                  {tiles.map((t) => (
+                    <button
+                      key={t.label}
+                      type="button"
+                      className="xs-tile"
+                      onClick={() => openFocus(
+                        t.kpi?.title ?? t.label,
+                        `${t.value} — ${t.label}`,
+                        // No extra slice: a headline tile IS the current scope, so the
+                        // panel shows the Overview for exactly what the page is showing.
+                        '',
+                      )}
+                      title="Click for the Overview of this figure's scope"
+                    >
+                      <span className="xs-tile-value">{t.value}</span>
+                      <span className="xs-tile-label">{t.label}</span>
+                      <span className="xs-tile-sub muted">{t.sub}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+      ),
+    },
+    {
+      id: 'panel:category',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">
+                  Where the value is <span className="muted">— committed value by spend category</span>
+                </h3>
+                {byCategory
+                  ? <RankedBars data={byCategory} onFocus={openFocus} emphasiseTop={5} currency={currency} />
+                  : <div className="spinner" />}
+                <p className="note" style={{ marginTop: '.5rem' }}>
+                  {/*
+                    The top-five claim is suppressed when there are five or fewer
+                    categories. It stays TRUE in that case — five of five is 100% — but
+                    "the top five are 100.0%" of two rows reads as a broken page, which
+                    is how a real mapping failure was first spotted rather than the
+                    claim itself being wrong.
+                  */}
+                  {(byCategory?.buckets.length ?? 0) > 5 && (
+                    <>
+                      The <strong>top five</strong> categories are shaded; together they are{' '}
+                      <strong>{pct(top5)}</strong> of committed value.{' '}
+                    </>
+                  )}
+                  Categories resolve from the business mapping first, then SAP&apos;s material
+                  master. <code>(no material code)</code> is shown as itself rather than folded
+                  into a category — it is service and text lines, and burying it would misstate
+                  every share above it.
+                </p>
+                {/*
+                  A mapping failure is loud rather than silent. When most of the value
+                  cannot be attributed to a business category, the page says so instead
+                  of presenting '(unmapped)' as though it were a category the business
+                  would recognise.
+                */}
+                {unmappedShare !== null && unmappedShare > 20 && (
+                  <p className="note">
+                    <span className="bs sa">mapping incomplete</span>{' '}
+                    <strong>{pct(unmappedShare)}</strong> of committed value has a material code
+                    that is not in the spend-category mapping or SAP&apos;s material master, so it
+                    is shown as <code>(unmapped)</code> rather than attributed to a category. The
+                    shares above are therefore not yet a reliable category picture.
+                  </p>
+                )}
+              </div>
+      ),
+    },
+    {
+      id: 'panel:bands',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">
+                  Transaction size <span className="muted">— share of value against share of lines</span>
+                </h3>
+                {byBand ? <BandPairs data={byBand} onFocus={openFocus} /> : <div className="spinner" />}
+                <p className="note" style={{ marginTop: '.5rem' }}>
+                  Bands are ordered by size, never by measure. Lines with no rupiah value are
+                  excluded rather than counted as zero, which would inflate the smallest band —
+                  the band the whole fragmentation argument rests on.
+                </p>
+                <p className="note">
+                  <span className="bs sl">rupiah basis</span> This panel does not follow the
+                  currency toggle, and cannot: the bands <em>are</em> rupiah brackets, and the two
+                  measures are shares rather than amounts, so there is no figure here to restate in
+                  dollars. Switching to USD changes the tiles and the category panel above.
+                </p>
+              </div>
+      ),
+    },
+    {
+      id: 'panel:concentration',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">
+                  How concentrated <span className="muted">— how few hold most of the value</span>
+                </h3>
+                <div className="table-wrap">
+                  <table className="data dd-tbl">
+                    <tbody>
+                      <tr className="re">
+                        <td>Purchasing desks</td>
+                        <td>
+                          <strong>{n(desks80)}</strong> of {n(desksAll)} desks hold 80% of committed value
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Vendors</td>
+                        <td>
+                          <strong>{n(vend80)}</strong> of {n(vendAll)} vendors hold 80% of committed value
+                        </td>
+                      </tr>
+                      <tr className="re">
+                        <td>Head Office share</td>
+                        <td>
+                          <strong>{pct(hoValue)}</strong> of committed value and{' '}
+                          <strong>{pct(hoLines)}</strong> of PO lines are raised by an HQ purchasing
+                          organisation
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="note" style={{ marginTop: '.5rem' }}>
+                  Head Office is read from the purchasing <strong>organisation</strong>, not the
+                  purchasing group. The group is the buyer&apos;s desk; the HQ-versus-site
+                  distinction lives on the organisation, and measuring it on the group gives 2%
+                  against 98% — the opposite of the truth. Two organisations are judgement calls
+                  and between them 0.4% of value: <code>Jakarta-PPIC</code> (planning) and{' '}
+                  <code>LEGAL LICENSE DWS</code> count as non-HQ.
+                </p>
+              </div>
+      ),
+    },
+    {
+      id: 'panel:meaning',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">What this means</h3>
+                <ul className="xs-means">
+                  <li>
+                    <strong>Value is concentrated.</strong> The top five categories are {pct(top5)} of
+                    committed value, and {n(desks80)} desks hold 80% of it.
+                  </li>
+                  <li>
+                    <strong>Work is fragmented.</strong> {pct(linesTail)} of PO lines are under
+                    Rp 25 Jt and carry {pct(valueTail)} of the value — most of the effort buys
+                    almost none of the spend.
+                  </li>
+                  <li>
+                    <strong>Control and execution sit apart.</strong> HQ raises {pct(hoValue)} of the
+                    value on {pct(hoLines)} of the lines — so the money is decided centrally while
+                    the volume of paperwork is spread much wider.
+                  </li>
+                  <li>
+                    <strong>The two do not overlap.</strong> Price belongs on the few large
+                    commodities; the many small lines are a process problem, not a negotiation
+                    one, and no sourcing effort spent on them moves the total.
+                  </li>
+                </ul>
+              </div>
+      ),
+    },
+  ];
+
+  const order = applyLayout(PANELS.map((x) => x.id), layout, 'panel');
+
+        {/*
+          The conclusion, assembled from the KPIs above rather than written out. In
+          the reference design this was static prose ("top 5 = 70%", "72% of lines
+          < Rp 25 Jt = 4% of value") — correct on the day it was drawn and wrong
+          from the next refresh onwards.
+        */}
   return (
     <>
-      <div className="panel">
-        <h2>🎯 Executive summary</h2>
-        {/*
-          Scope stated up front and read from the data rather than typed. The
-          reference design was headed "2025 / annual spend" over a part-year
-          extract of a single entity; a reader who trusts that headline draws
-          conclusions about a population that was never measured.
-        */}
-        <p className="note">
-          <span className="bs sl">scope</span>{' '}
-          Committed value on purchase orders
-          {firstDate && asOfDate ? <> from <strong>{firstDate}</strong> to <strong>{asOfDate}</strong></> : null}
-          . Stock-transport and deleted lines are excluded throughout, so every figure on
-          this page counts the same population. Values are <strong>ordered</strong> — this
-          is commitment, not invoiced or received cash.
-        </p>
-        {err && <p className="note"><span className="bs spdel">error</span> {err}</p>}
+      {order.map((id: string) => {
+        const panel = PANELS.find((x) => x.id === id);
+        if (!panel) return null;
+        return (
+          <div key={id} className={editing ? 'ly-slot' : undefined}>
+            {editing && (
+              <LayoutControls
+                id={id}
+                kind="panel"
+                layout={layout}
+                update={update}
+                currentIds={order}
+              />
+            )}
+            {panel.node}
+          </div>
+        );
+      })}
 
-        <div className="kpi-grid">
-          {tiles.map((t) => (
-            <button
-              key={t.label}
-              type="button"
-              className="xs-tile"
-              onClick={() => openFocus(
-                t.kpi?.title ?? t.label,
-                `${t.value} — ${t.label}`,
-                // No extra slice: a headline tile IS the current scope, so the
-                // panel shows the Overview for exactly what the page is showing.
-                '',
-              )}
-              title="Click for the Overview of this figure's scope"
-            >
-              <span className="xs-tile-value">{t.value}</span>
-              <span className="xs-tile-label">{t.label}</span>
-              <span className="xs-tile-sub muted">{t.sub}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3 className="pr-tbl-h">
-          Where the value is <span className="muted">— committed value by spend category</span>
-        </h3>
-        {byCategory
-          ? <RankedBars data={byCategory} onFocus={openFocus} emphasiseTop={5} currency={currency} />
-          : <div className="spinner" />}
-        <p className="note" style={{ marginTop: '.5rem' }}>
-          {/*
-            The top-five claim is suppressed when there are five or fewer
-            categories. It stays TRUE in that case — five of five is 100% — but
-            "the top five are 100.0%" of two rows reads as a broken page, which
-            is how a real mapping failure was first spotted rather than the
-            claim itself being wrong.
-          */}
-          {(byCategory?.buckets.length ?? 0) > 5 && (
-            <>
-              The <strong>top five</strong> categories are shaded; together they are{' '}
-              <strong>{pct(top5)}</strong> of committed value.{' '}
-            </>
-          )}
-          Categories resolve from the business mapping first, then SAP&apos;s material
-          master. <code>(no material code)</code> is shown as itself rather than folded
-          into a category — it is service and text lines, and burying it would misstate
-          every share above it.
-        </p>
-        {/*
-          A mapping failure is loud rather than silent. When most of the value
-          cannot be attributed to a business category, the page says so instead
-          of presenting '(unmapped)' as though it were a category the business
-          would recognise.
-        */}
-        {unmappedShare !== null && unmappedShare > 20 && (
-          <p className="note">
-            <span className="bs sa">mapping incomplete</span>{' '}
-            <strong>{pct(unmappedShare)}</strong> of committed value has a material code
-            that is not in the spend-category mapping or SAP&apos;s material master, so it
-            is shown as <code>(unmapped)</code> rather than attributed to a category. The
-            shares above are therefore not yet a reliable category picture.
-          </p>
+        {focus && (
+          <ExecFocusModal
+            title={focus.title}
+            subtitle={focus.subtitle}
+            // The clicked slice on top of the page's own filter, so the panel can
+            // never show a wider population than the page it was opened from.
+            filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}
+            kpiIds={overviewKpis}
+            chartIds={overviewCharts}
+            currency={currency}
+            onDrill={onDrill}
+            onClose={() => setFocus(null)}
+          />
         )}
-      </div>
-
-      <div className="panel">
-        <h3 className="pr-tbl-h">
-          Transaction size <span className="muted">— share of value against share of lines</span>
-        </h3>
-        {byBand ? <BandPairs data={byBand} onFocus={openFocus} /> : <div className="spinner" />}
-        <p className="note" style={{ marginTop: '.5rem' }}>
-          Bands are ordered by size, never by measure. Lines with no rupiah value are
-          excluded rather than counted as zero, which would inflate the smallest band —
-          the band the whole fragmentation argument rests on.
-        </p>
-        <p className="note">
-          <span className="bs sl">rupiah basis</span> This panel does not follow the
-          currency toggle, and cannot: the bands <em>are</em> rupiah brackets, and the two
-          measures are shares rather than amounts, so there is no figure here to restate in
-          dollars. Switching to USD changes the tiles and the category panel above.
-        </p>
-      </div>
-
-      <div className="panel">
-        <h3 className="pr-tbl-h">
-          How concentrated <span className="muted">— how few hold most of the value</span>
-        </h3>
-        <div className="table-wrap">
-          <table className="data dd-tbl">
-            <tbody>
-              <tr className="re">
-                <td>Purchasing desks</td>
-                <td>
-                  <strong>{n(desks80)}</strong> of {n(desksAll)} desks hold 80% of committed value
-                </td>
-              </tr>
-              <tr>
-                <td>Vendors</td>
-                <td>
-                  <strong>{n(vend80)}</strong> of {n(vendAll)} vendors hold 80% of committed value
-                </td>
-              </tr>
-              <tr className="re">
-                <td>Head Office share</td>
-                <td>
-                  <strong>{pct(hoValue)}</strong> of committed value and{' '}
-                  <strong>{pct(hoLines)}</strong> of PO lines are raised by an HQ purchasing
-                  organisation
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p className="note" style={{ marginTop: '.5rem' }}>
-          Head Office is read from the purchasing <strong>organisation</strong>, not the
-          purchasing group. The group is the buyer&apos;s desk; the HQ-versus-site
-          distinction lives on the organisation, and measuring it on the group gives 2%
-          against 98% — the opposite of the truth. Two organisations are judgement calls
-          and between them 0.4% of value: <code>Jakarta-PPIC</code> (planning) and{' '}
-          <code>LEGAL LICENSE DWS</code> count as non-HQ.
-        </p>
-      </div>
-
-      {/*
-        The conclusion, assembled from the KPIs above rather than written out. In
-        the reference design this was static prose ("top 5 = 70%", "72% of lines
-        < Rp 25 Jt = 4% of value") — correct on the day it was drawn and wrong
-        from the next refresh onwards.
-      */}
-      {focus && (
-        <ExecFocusModal
-          title={focus.title}
-          subtitle={focus.subtitle}
-          // The clicked slice on top of the page's own filter, so the panel can
-          // never show a wider population than the page it was opened from.
-          filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}
-          kpiIds={overviewKpis}
-          chartIds={overviewCharts}
-          currency={currency}
-          onDrill={onDrill}
-          onClose={() => setFocus(null)}
-        />
-      )}
-
-      <div className="panel">
-        <h3 className="pr-tbl-h">What this means</h3>
-        <ul className="xs-means">
-          <li>
-            <strong>Value is concentrated.</strong> The top five categories are {pct(top5)} of
-            committed value, and {n(desks80)} desks hold 80% of it.
-          </li>
-          <li>
-            <strong>Work is fragmented.</strong> {pct(linesTail)} of PO lines are under
-            Rp 25 Jt and carry {pct(valueTail)} of the value — most of the effort buys
-            almost none of the spend.
-          </li>
-          <li>
-            <strong>Control and execution sit apart.</strong> HQ raises {pct(hoValue)} of the
-            value on {pct(hoLines)} of the lines — so the money is decided centrally while
-            the volume of paperwork is spread much wider.
-          </li>
-          <li>
-            <strong>The two do not overlap.</strong> Price belongs on the few large
-            commodities; the many small lines are a process problem, not a negotiation
-            one, and no sourcing effort spent on them moves the total.
-          </li>
-        </ul>
-      </div>
     </>
   );
 }

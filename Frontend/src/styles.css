@@ -806,3 +806,12 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
   font-size: .66rem; color: var(--crit);
   border: 1px dashed var(--crit); border-radius: 5px; padding: .1rem .35rem;
 }
+
+/* ── Saved layout views ───────────────────────────────────────────────────── */
+.ly-views {
+  display: flex; align-items: center; gap: .4rem; flex-wrap: wrap;
+  margin-bottom: .4rem; font-size: .74rem;
+}
+.ly-views-pick { display: inline-flex; align-items: center; gap: .3rem; }
+.ly-views-name { display: inline-flex; align-items: center; gap: .3rem; }
+.ly-views-msg { font-style: italic; font-size: .68rem; }

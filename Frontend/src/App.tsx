@@ -9,6 +9,7 @@ import { DetailTable } from './components/DetailTable';
 import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
+import { SavedViews } from './components/SavedViews';
 import { PrTables } from './components/PrTables';
 import { PoTables } from './components/PoTables';
 import {
@@ -40,7 +41,7 @@ const CoupaSourcingTab = lazy(() => import('./components/CoupaPages').then((m) =
 const CoupaInvoicesTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaInvoicesTab })));
 import { OverviewCard } from './components/OverviewCards';
 import {
-  LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
+  LayoutControls, LayoutEditBar, applyLayout, useTabLayout, type TabLayout,
 } from './components/LayoutEdit';
 
 // v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
@@ -283,6 +284,15 @@ export default function App() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [editing, setEditing] = useState(false);
   const { layout, update: updateLayout } = useTabLayout(tab);
+  /**
+   * Replace the working layout outright — what applying a saved view does.
+   * Expressed through the same update() so it persists by the same path a hand
+   * edit does; a view that applied only in memory would vanish on reload.
+   */
+  const replaceLayout = useCallback(
+    (next: TabLayout) => updateLayout(() => next),
+    [updateLayout],
+  );
   const [savedCustom, setSavedCustom] = useState<{ kpis: any[]; charts: any[] }>({ kpis: [], charts: [] });
   const [chartCatalog, setChartCatalog] = useState<{ chartId: string; title?: string }[]>([]);
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -604,7 +614,30 @@ export default function App() {
             </p>
           </div>
         ) : tab === 'execsummary' ? (
-          <PageChunk tab={tab}>
+          <>
+            {/*
+              The same view picker and edit bar the other pages get. Its adders
+              are hidden: this page's sections are a fixed set, so the "+ Add…"
+              pickers would be empty dropdowns inviting a click that does
+              nothing. Hide, move, restore and reset all still apply.
+            */}
+            <SavedViews
+              tab={tab}
+              layout={layout}
+              applyToWorking={replaceLayout}
+              editing={editing}
+            />
+            <LayoutEditBar
+              editing={editing}
+              setEditing={setEditing}
+              layout={layout}
+              update={updateLayout}
+              kpiOptions={[]}
+              chartOptions={[]}
+              customOptions={{ kpis: [], charts: [] }}
+              showAdders={false}
+            />
+            <PageChunk tab={tab}>
             <ExecSummaryTab
               kpis={kpis}
               onDrill={onDrill}
@@ -616,8 +649,12 @@ export default function App() {
               filterQuery={gfQuery}
               overviewKpis={TAB_KPIS.executive}
               overviewCharts={TAB_CHARTS.executive}
+              layout={layout}
+              update={updateLayout}
+              editing={editing}
             />
-          </PageChunk>
+            </PageChunk>
+          </>
         ) : tab === 'vendors' ? (
           <PageChunk tab={tab}><VendorsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'materials' ? (
@@ -647,6 +684,12 @@ export default function App() {
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (
           <>
+            <SavedViews
+              tab={tab}
+              layout={layout}
+              applyToWorking={replaceLayout}
+              editing={editing}
+            />
             <LayoutEditBar
               editing={editing}
               setEditing={setEditing}

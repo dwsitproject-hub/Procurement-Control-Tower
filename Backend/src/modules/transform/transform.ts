@@ -97,6 +97,10 @@ export interface TransformMetrics {
   l2BeforeL1: number;
   unregisteredMovementTypes: string[];
   fxCurrencies: number;
+  /** Did THIS bundle carry a rate table, or were rates carried forward? */
+  fxSuppliedByBundle: boolean;
+  /** Rate pairs the version ended up with, from either source. */
+  fxRatePairs: number;
   fxYearResolved: number | null;
   unratedCurrencies: string[];
   excludedPoLines: number;
@@ -1120,6 +1124,8 @@ export async function runTransform(
     l2BeforeL1: filled.l2BeforeL1,
     unregisteredMovementTypes: [...unregistered],
     fxCurrencies: new Set(fx.rates.map((r) => r.currency)).size,
+    fxSuppliedByBundle: fxRows.length > 0,
+    fxRatePairs: fx.rates.length,
     fxYearResolved: fx.yearResolved,
     unratedCurrencies: [...unrated],
     excludedPoLines,

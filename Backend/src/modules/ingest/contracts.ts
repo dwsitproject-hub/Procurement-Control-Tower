@@ -456,9 +456,16 @@ export const CONTRACT_BY_FEED: Record<Feed, TemplateContract> = {
 /**
  * Feeds that must all be present for a bundle to be considered complete.
  *
- * DELIBERATELY still the six transactional exports. The reference feeds
+ * FIVE, not six: `fx` was removed 27 Aug 2026 (user decision). The monthly rate
+ * table changes rarely, and requiring an unchanged copy in every bundle was
+ * friction with no safety benefit — buildFx already takes a version's rates from
+ * ops.fx_rate_source, the store fed by both the SAP file and the Coupa API, so a
+ * bundle without the file inherits the rates already known. V-R08 reports that
+ * it happened, and blocks when no rates exist at all.
+ *
+ * The reference feeds
  * (pgrp, porg, matm, zuser) are recognised and ingested when present but never
  * gate a publish: master data changes quarterly while PR/PO land daily, so
  * requiring them would stop the pickup for a file nobody re-exported.
  */
-export const REQUIRED_FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr', 'fx'];
+export const REQUIRED_FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr'];

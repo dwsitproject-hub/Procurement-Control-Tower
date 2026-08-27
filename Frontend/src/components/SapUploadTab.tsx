@@ -53,7 +53,12 @@ const EXPECTED = [
   { feed: 'gr', label: 'GR List', hint: 'MB51 goods-receipt export' },
   { feed: 'prel', label: 'PR Release', hint: 'requisition release/approval steps' },
   { feed: 'por', label: 'PO Release', hint: 'purchase-order release steps' },
-  { feed: 'fx', label: 'Rate Conversion', hint: 'monthly FX rate table' },
+  {
+    feed: 'fx',
+    label: 'Rate Conversion',
+    hint: 'monthly FX rate table — omit it and the last known rates are used',
+    optional: true,
+  },
   // Reference data — optional. Listed so an operator can see and schedule them,
   // but a bundle without them publishes normally.
   { feed: 'pgrp', label: 'Purchasing Groups', hint: 'P Grp — buyer desk master', optional: true },
@@ -894,7 +899,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
         </p>
       ) : (
         <>
-          <h3 className="pr-tbl-h">1. Choose the six SAP exports</h3>
+          <h3 className="pr-tbl-h">1. Choose the SAP exports</h3>
           <div className="table-wrap" style={{ marginBottom: '.6rem' }}>
             <table className="data dd-tbl">
               <thead>

@@ -1035,21 +1035,50 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
             a missing export is visible BEFORE the upload rather than in the
             rejection afterwards.
           */}
-          {files.length > 0 && (
-            <p className="note">
-              <span className={files.length < REQUIRED_FEED_IDS.length ? 'bs sa' : 'bs sl'}>
-                {files.length} file(s) chosen
-              </span>{' '}
-              {files.length < REQUIRED_FEED_IDS.length && (
-                <>
-                  <strong>
-                    Fewer than the {REQUIRED_FEED_IDS.length} required exports.
-                  </strong>{' '}
-                </>
-              )}
-              {files.map((f) => f.name).join(' · ')}
-            </p>
-          )}
+          {files.length > 0 && (() => {
+            /**
+             * Which chosen files the pickup patterns recognise, and which they do
+             * not.
+             *
+             * A dash in the table above means only "no configured pattern matches
+             * this name" — never "this file will be ignored". The feed is decided
+             * from the file's own column headers, so an unrecognised NAME still
+             * lands in the right slot. Without saying that plainly, a dash beside
+             * a file you just picked reads as a problem: it was reported as one.
+             */
+            const unmatched = files.filter(
+              (f) => !EXPECTED.some((e) => matchesPattern(f.name.trim(), patterns[e.feed] ?? '')),
+            );
+            return (
+              <>
+                <p className="note">
+                  <span className={files.length < REQUIRED_FEED_IDS.length ? 'bs sa' : 'bs sl'}>
+                    {files.length} file(s) chosen
+                  </span>{' '}
+                  {files.length < REQUIRED_FEED_IDS.length && (
+                    <>
+                      <strong>
+                        Fewer than the {REQUIRED_FEED_IDS.length} required exports.
+                      </strong>{' '}
+                    </>
+                  )}
+                  {files.map((f) => f.name).join(' · ')}
+                </p>
+                {unmatched.length > 0 && (
+                  <p className="note">
+                    <span className="bs sl">name not recognised</span>{' '}
+                    {unmatched.length} of these match no pickup name pattern, so the table above
+                    shows a dash for them:{' '}
+                    <strong>{unmatched.map((f) => f.name).join(' · ')}</strong>.{' '}
+                    <em>They will still be uploaded and classified normally</em> — the feed comes
+                    from a file&apos;s column headers, not its name. The dash only means the
+                    scheduled pickup would not select this file under its current pattern, which is
+                    worth fixing in the table above if it is the file you expect every day.
+                  </p>
+                )}
+              </>
+            );
+          })()}
           <p className="note">
             A complete bundle needs all {REQUIRED_FEED_IDS.length} of{' '}
             <strong>{REQUIRED_FEED_IDS.join(', ')}</strong> — an incomplete set is rejected rather

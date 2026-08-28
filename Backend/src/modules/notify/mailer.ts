@@ -41,6 +41,8 @@ export interface NotifyConfig {
     from: string;
     /** Whether a password is configured — never the password itself. */
     hasPassword: boolean;
+    /** Whether the server's TLS certificate is verified. */
+    rejectUnauthorized: boolean;
   };
 }
 
@@ -76,6 +78,7 @@ export async function loadNotifyConfig(): Promise<NotifyConfig> {
       user: env.SMTP_USER ?? null,
       from: env.SMTP_FROM,
       hasPassword: Boolean(env.SMTP_PASSWORD),
+      rejectUnauthorized: env.SMTP_REJECT_UNAUTHORIZED,
     },
   };
 }
@@ -94,6 +97,10 @@ function transporter(): Transporter {
     auth: env.SMTP_USER && env.SMTP_PASSWORD
       ? { user: env.SMTP_USER, pass: env.SMTP_PASSWORD }
       : undefined,
+    // Certificate verification is nodemailer's default; stating it here is what
+    // makes SMTP_REJECT_UNAUTHORIZED mean something. An operator who sets it
+    // expects a knob, and a knob wired to nothing is worse than no knob.
+    tls: { rejectUnauthorized: env.SMTP_REJECT_UNAUTHORIZED },
     connectionTimeout: 15_000,
     greetingTimeout: 15_000,
     socketTimeout: 20_000,

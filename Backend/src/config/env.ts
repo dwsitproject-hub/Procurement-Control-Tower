@@ -113,9 +113,29 @@ export const EnvSchema = z
 
     SMTP_HOST: z.string().default('mailhog'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),
-    SMTP_SECURE: z.enum(['none', 'starttls', 'tls']).default('none'),
+    // NOT a boolean. nodemailer's own option is `secure: true|false`, so
+    // `SMTP_SECURE=false` is the natural thing for an operator to write — and it
+    // is rejected on purpose rather than coerced: 'false' cannot say whether the
+    // session should still be upgraded with STARTTLS, and guessing 'none' would
+    // put the mail password on the wire in clear text. The message names the
+    // value to use instead, because this failure stops the whole API booting.
+    SMTP_SECURE: z
+      .enum(['none', 'starttls', 'tls'], {
+        errorMap: () => ({
+          message:
+            "must be 'tls' (implicit TLS, port 465), 'starttls' (upgrade a plain "
+            + "connection, port 587) or 'none' (no encryption, local test server only) "
+            + '- not true/false: the app has to know WHICH kind of TLS to negotiate',
+        }),
+      })
+      .default('none'),
     SMTP_USER: z.string().optional(),
     SMTP_PASSWORD: z.string().optional(),
+    // Verify the mail server's certificate. On by default, and worth leaving on:
+    // setting it false accepts ANY certificate, which makes the session
+    // interceptable by anything on the path. Only a server with a self-signed
+    // certificate needs it off.
+    SMTP_REJECT_UNAUTHORIZED: bool.default(true),
     SMTP_FROM: z.string().default('Procurement Control Tower <pct-notify@energi-up.com>'),
     NOTIFY_RATE_LIMIT_PER_HOUR: z.coerce.number().int().positive().default(20),
     NOTIFY_ENABLED: bool.default(true),

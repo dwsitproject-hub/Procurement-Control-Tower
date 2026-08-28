@@ -22,6 +22,7 @@ interface NotifyCfg {
   smtp: {
     host: string; port: number; secure: string;
     user: string | null; from: string; hasPassword: boolean;
+    rejectUnauthorized: boolean;
   };
   recent: {
     id: number; sentAt: string; event: string; subject: string;
@@ -75,6 +76,15 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
       setMsg(e instanceof Error ? e.message : 'save failed');
     } finally { setBusy(null); }
   };
+
+  // The address inside SMTP_FROM, which is usually "Display Name <addr>".
+  // Bare addresses are allowed too, so an absent '<' means the whole string is
+  // the address.
+  const open = cfg.smtp.from.indexOf('<');
+  const close = cfg.smtp.from.indexOf('>');
+  const fromAddress = open >= 0 && close > open
+    ? cfg.smtp.from.slice(open + 1, close).trim()
+    : cfg.smtp.from.trim() || null;
 
   const sendTest = async () => {
     setBusy('test'); setMsg('Sending…');
@@ -172,6 +182,8 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
       {msg && <p className="note"><strong>{msg}</strong></p>}
 
       <h3 className="pr-tbl-h">Mail server <span className="muted">— environment configuration</span></h3>
+      {/* SMTP_FROM is usually "Display Name <addr>"; the comparison needs the
+          address alone. No regex: the angle brackets are the whole grammar. */}
       <div className="table-wrap">
         <table className="data dd-tbl">
           <tbody>
@@ -197,14 +209,37 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
                   : <span className="bs sa">not set — authenticated sending will fail</span>}
               </td>
             </tr>
-            <tr><td>From</td><td><code>{cfg.smtp.from}</code></td></tr>
+            <tr>
+              <td>From</td>
+              <td>
+                <code>{cfg.smtp.from}</code>{' '}
+                {/* A From address the authenticated account is not allowed to
+                    send as is rejected by the server with "550 ... send as this
+                    sender", which reads like a password problem and is not one.
+                    Cheaper to point at here than to diagnose from a bounce. */}
+                {fromAddress !== null && cfg.smtp.user !== null
+                  && fromAddress.toLowerCase() !== cfg.smtp.user.toLowerCase() && (
+                  <span className="muted">
+                    — differs from the username; the server may refuse to send as this address
+                  </span>
+                )}
+              </td>
+            </tr>
+            <tr className="re">
+              <td>Certificate</td>
+              <td>
+                {cfg.smtp.rejectUnauthorized
+                  ? <span className="bs sd">verified</span>
+                  : <span className="bs sa">not verified — any certificate is accepted</span>}
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
       <p className="note">
         These come from the backend environment (<code>SMTP_HOST</code>, <code>SMTP_PORT</code>,{' '}
         <code>SMTP_SECURE</code>, <code>SMTP_USER</code>, <code>SMTP_PASSWORD</code>,{' '}
-        <code>SMTP_FROM</code>) and are shown here read-only: a mail password must never live
+        <code>SMTP_FROM</code>, <code>SMTP_REJECT_UNAUTHORIZED</code>) and are shown here read-only: a mail password must never live
         in a table the API can read. Change them in the server env file and restart the API.
       </p>
 

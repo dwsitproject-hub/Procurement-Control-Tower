@@ -105,8 +105,14 @@ services:
     environment:
       DATABASE_URL: postgres://pct:pct_local_dev@postgres:5432/pct
       REDIS_URL: redis://redis:6379
+      # Pinned so the local stack always talks to MailHog. SMTP_SECURE belongs
+      # here for the same reason as host and port: a developer whose
+      # secrets.local.env carries the real server's `tls` would otherwise
+      # negotiate implicit TLS against a plaintext MailHog and get
+      # "wrong version number", which reads as a bug in the mailer.
       SMTP_HOST: mailhog
       SMTP_PORT: "1025"
+      SMTP_SECURE: none
       SHARE_PATH: /mnt/sap_exports
       UPLOAD_SPOOL_PATH: /var/lib/pct/spool
     volumes:

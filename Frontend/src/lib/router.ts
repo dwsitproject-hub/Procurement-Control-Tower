@@ -46,7 +46,15 @@ export const TAB_PATH: Record<Tab, string> = {
   datacheck: '/data-quality',
 };
 
-export const DEFAULT_TAB: Tab = 'executive';
+/**
+ * Where a session lands: the Executive Summary, not the Overview.
+ *
+ * It is also first in the menu and first in PAGE_KEYS, so the three agree. The
+ * redirect in App is permission-aware — a user without access to this page is
+ * sent to the first page they DO have — so making it the default cannot lock
+ * anyone out of the app.
+ */
+export const DEFAULT_TAB: Tab = 'execsummary';
 
 const PATH_TAB = new Map<string, Tab>(
   (Object.entries(TAB_PATH) as [Tab, string][]).map(([tab, path]) => [path, tab]),

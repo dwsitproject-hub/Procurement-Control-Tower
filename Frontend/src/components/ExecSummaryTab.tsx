@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
-import { LayoutControls, applyLayout, type TabLayout } from './LayoutEdit';
+import { LayoutControls, applyLayout, panelSpan, type TabLayout } from './LayoutEdit';
 
 /**
  * Executive Summary — the one page that states a conclusion rather than
@@ -569,24 +569,37 @@ export function ExecSummaryTab({
         */}
   return (
     <>
-      {order.map((id: string) => {
-        const panel = PANELS.find((x) => x.id === id);
-        if (!panel) return null;
-        return (
-          <div key={id} className={editing ? 'ly-slot' : undefined}>
-            {editing && (
-              <LayoutControls
-                id={id}
-                kind="panel"
-                layout={layout}
-                update={update}
-                currentIds={order}
-              />
-            )}
-            {panel.node}
-          </div>
-        );
-      })}
+      {/*
+        A 12-column row, so a panel's width is a share of it rather than a pixel
+        count. Panels default to the full 12 and therefore stack exactly as they
+        did before widths existed; setting two to Half puts them side by side.
+        The span is a CSS variable rather than a class per width, so the set of
+        widths lives in one place — PANEL_SIZES.
+      */}
+      <div className="xs-grid">
+        {order.map((id: string) => {
+          const panel = PANELS.find((x) => x.id === id);
+          if (!panel) return null;
+          return (
+            <div
+              key={id}
+              className={`xs-cell${editing ? ' ly-slot' : ''}`}
+              style={{ '--span': panelSpan(layout, id) } as React.CSSProperties}
+            >
+              {editing && (
+                <LayoutControls
+                  id={id}
+                  kind="panel"
+                  layout={layout}
+                  update={update}
+                  currentIds={order}
+                />
+              )}
+              {panel.node}
+            </div>
+          );
+        })}
+      </div>
 
         {focus && (
           <ExecFocusModal

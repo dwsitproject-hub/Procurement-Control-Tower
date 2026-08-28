@@ -815,3 +815,25 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .ly-views-pick { display: inline-flex; align-items: center; gap: .3rem; }
 .ly-views-name { display: inline-flex; align-items: center; gap: .3rem; }
 .ly-views-msg { font-style: italic; font-size: .68rem; }
+
+/* ── Executive Summary panel grid ─────────────────────────────────────────
+   Panels sit on a 12-column row so a width can be a share of it. --span comes
+   from the saved layout and defaults to 12, so a layout with no widths set
+   stacks exactly as it did before this existed. */
+.xs-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: 1rem;
+  align-items: start;
+}
+.xs-cell { grid-column: span var(--span, 12); min-width: 0; }
+/* min-width:0 on the cell AND the panel: without it a wide table inside refuses
+   to shrink and pushes the whole row wider than the page. */
+.xs-cell > .panel { min-width: 0; }
+
+/* Below this a third of the width is unreadable for a chart with axis labels, so
+   every panel takes the full row regardless of what was saved. The saved value
+   is untouched — widen the window and it returns. */
+@media (max-width: 1100px) {
+  .xs-cell { grid-column: span 12; }
+}

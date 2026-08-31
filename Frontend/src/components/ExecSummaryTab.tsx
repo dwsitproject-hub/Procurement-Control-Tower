@@ -197,6 +197,173 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
 }
 
 /**
+ * Stable colour per spend category.
+ *
+ * Keyed by NAME, not by index: the categories present vary from month to month,
+ * so an index-based palette would recolour CHEMICAL between rows and make the
+ * stack unreadable down the page. Named entries follow the reference design;
+ * anything else — a category the mapping file adds later, or the two honest
+ * placeholders — takes a deterministic slot derived from its own name, so it is
+ * stable without having to be listed here.
+ */
+const SPEND_CATEGORY_COLORS: Record<string, string> = {
+  METHANOL: '#4f46e5',
+  SERVICES: '#1d4ed8',
+  PACKAGING: '#1e3a5f',
+  CHEMICAL: '#ea7317',
+  COAL: '#10b981',
+  HEVE: '#06b6d4',
+  'FUEL & ENERGY': '#8b5cf6',
+  FUEL: '#ec4899',
+  'MRO GENERAL': '#c026d3',
+  'MRO SPECIFIC': '#6b7280',
+  'OFFICE IT': '#f87171',
+  CAPEX: '#38bdf8',
+  '(unmapped)': '#94a3b8',
+  '(no material code)': '#cbd5e1',
+};
+
+const FALLBACK_CATEGORY_COLORS = [
+  '#0f766e', '#b45309', '#7e22ce', '#be123c', '#15803d',
+  '#a16207', '#1e40af', '#9d174d', '#4d7c0f', '#831843',
+];
+
+function categoryColor(name: string): string {
+  const named = SPEND_CATEGORY_COLORS[name];
+  if (named !== undefined) return named;
+  let h = 0;
+  for (let i = 0; i < name.length; i += 1) h = (h * 31 + name.charCodeAt(i)) % 100000;
+  return FALLBACK_CATEGORY_COLORS[h % FALLBACK_CATEGORY_COLORS.length]!;
+}
+
+/**
+ * Monthly Spend Category — one stacked bar per month, stacked by category.
+ *
+ * DELIVERED value only, by request: the question is what was actually taken
+ * delivery of in each month, and mixing in open commitment would inflate a month
+ * with value that has not landed. The panel above stays the open-and-closed view
+ * of the same population.
+ *
+ * The chart returns ONE series whose buckets carry both dimensions as
+ * `YYYY-MM|CATEGORY`, because a ChartSpec's series are static SQL while the
+ * categories are data. This pivots it. The split is at offset 7 rather than on
+ * the separator — the month is fixed width, so a category containing a pipe
+ * still cuts in the right place.
+ *
+ * Bars share ONE scale, against the largest month, rather than each filling its
+ * own row: a per-row scale makes every month look the same size and destroys the
+ * month-to-month comparison the panel exists for.
+ */
+function MonthlyCategoryBars({ data, onFocus, currency }: {
+  data: ChartResponse;
+  onFocus: (title: string, subtitle: string, slice: string) => void;
+  currency: 'USD' | 'IDR';
+}) {
+  const suffix = currency === 'IDR' ? '_idr' : '';
+  const series = data.series.find((x) => x.key === `closed${suffix}`)
+    ?? data.series.find((x) => x.key === 'closed_idr')
+    ?? data.series[0];
+  if (!series) return <p className="muted">No data.</p>;
+  const isIdr = series.key.endsWith('_idr');
+  const money = (v: number | null): string => (isIdr ? rupiah(v) : formatMoney(v, 'USD'));
+
+  const labelFor = new Map(data.buckets.map((b) => [b.key, b.label] as const));
+
+  interface Cell { category: string; value: number; rowCount: number }
+  const byMonth = new Map<string, { label: string; cells: Cell[]; total: number }>();
+
+  for (const pt of series.points) {
+    const v = pt.value ?? 0;
+    if (v <= 0) continue;
+    const monthKey = pt.bucketKey.slice(0, 7);
+    const category = pt.bucketKey.slice(8);
+    const monthLabel = (labelFor.get(pt.bucketKey) ?? monthKey).split('|')[0] ?? monthKey;
+    let m = byMonth.get(monthKey);
+    if (!m) { m = { label: monthLabel, cells: [], total: 0 }; byMonth.set(monthKey, m); }
+    m.cells.push({ category, value: v, rowCount: pt.rowCount });
+    m.total += v;
+  }
+
+  const months = [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (months.length === 0) return <p className="muted">No delivered value in this scope.</p>;
+
+  const max = months.reduce((a, [, m]) => Math.max(a, m.total), 0);
+
+  // The legend covers every category present anywhere in the range, ordered by
+  // total so the biggest contributors read first.
+  const legendTotals = new Map<string, number>();
+  for (const [, m] of months) {
+    for (const c of m.cells) {
+      legendTotals.set(c.category, (legendTotals.get(c.category) ?? 0) + c.value);
+    }
+  }
+  const legend = [...legendTotals.entries()].sort((a, b) => b[1] - a[1]);
+
+  /** Q1..Q4 from the month number, printed once per quarter as in the design. */
+  const quarterOf = (mk: string): string => `Q${Math.floor((Number(mk.slice(5, 7)) - 1) / 3) + 1}`;
+
+  return (
+    <div className="xs-mc">
+      <div className="xs-legend xs-mc-legend">
+        {legend.map(([cat]) => (
+          <span key={cat}>
+            <i className="xs-key" style={{ background: categoryColor(cat) }} /> {cat}
+          </span>
+        ))}
+      </div>
+
+      {months.map(([mk, m], idx) => {
+        const prevQ = idx > 0 ? quarterOf(months[idx - 1]![0]) : null;
+        const q = quarterOf(mk);
+        // Biggest first inside the bar, so a row is readable and the order does
+        // not jump around between months.
+        const cells = [...m.cells].sort((a, b) => b.value - a.value);
+        return (
+          <div key={mk} className="xs-mc-row">
+            <span className="xs-mc-q">{q !== prevQ ? q : ''}</span>
+            <span className="xs-mc-month">{m.label}</span>
+            <span className="xs-mc-track">
+              {cells.map((c) => {
+                const w = max > 0 ? (c.value / max) * 100 : 0;
+                return (
+                  <button
+                    key={c.category}
+                    type="button"
+                    className="xs-mc-seg"
+                    style={{ width: `${w}%`, background: categoryColor(c.category) }}
+                    title={`${m.label} — ${c.category}: ${money(c.value)}, ${formatNumber(c.rowCount)} delivered PO lines. Click for the Overview of this slice.`}
+                    onClick={() => onFocus(
+                      `${c.category} — delivered in ${m.label}`,
+                      `${money(c.value)} · ${formatNumber(c.rowCount)} PO lines`,
+                      `spendCategory=${encodeURIComponent(c.category)}`
+                      + `&monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
+                    )}
+                  >
+                    {/* Printed only where it fits: a figure wider than its own box
+                        is unreadable, and the tooltip carries it regardless. */}
+                    {w >= 6 ? (
+                      <span className="xs-mc-num">
+                        {formatNumber(Math.round(c.value / (isIdr ? 1e9 : 1e6)))}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </span>
+            <span className="xs-mc-total">{money(m.total)}</span>
+          </div>
+        );
+      })}
+      <p className="note" style={{ marginTop: '.5rem' }}>
+        Delivered value only, so each month counts what was received rather than what was
+        ordered. Every bar shares one scale — the widest month is the largest — and in-bar
+        figures are {isIdr ? 'billions of rupiah' : 'millions of USD'}.
+      </p>
+    </div>
+  );
+}
+
+/**
  * The size-band panel: share of value against share of lines, each split into
  * Open and Closed.
  *
@@ -314,6 +481,7 @@ export function ExecSummaryTab({
   );
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
+  const [byMonth, setByMonth] = useState<ChartResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -321,11 +489,15 @@ export function ExecSummaryTab({
     const q = filterQuery ? `?${filterQuery}` : '';
     setByCategory(null);
     setByBand(null);
+    setByMonth(null);
     Promise.all([
       api.get<ChartResponse>(`/api/v1/chart/exec_value_by_category${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_txn_size${q}`),
+      api.get<ChartResponse>(`/api/v1/chart/exec_monthly_category${q}`),
     ])
-      .then(([c, b]) => { if (!dead) { setByCategory(c); setByBand(b); } })
+      .then(([c, b, m]) => {
+        if (!dead) { setByCategory(c); setByBand(b); setByMonth(m); }
+      })
       .catch((e: Error) => { if (!dead) setErr(e.message); });
     return () => { dead = true; };
   }, [filterQuery]);
@@ -522,6 +694,20 @@ export function ExecSummaryTab({
                     shares above are therefore not yet a reliable category picture.
                   </p>
                 )}
+              </div>
+      ),
+    },
+    {
+      id: 'panel:monthly',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">
+                  Monthly Spend Category{' '}
+                  <span className="muted">— delivered value by month, stacked by category</span>
+                </h3>
+                {byMonth
+                  ? <MonthlyCategoryBars data={byMonth} onFocus={openFocus} currency={currency} />
+                  : <div className="spinner" />}
               </div>
       ),
     },

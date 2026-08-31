@@ -706,6 +706,44 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .xs-sp-closed { color: var(--accent); font-weight: 600; }
 .xs-sp-open { color: var(--warn); font-weight: 600; }
 
+/* Monthly Spend Category: one stacked bar per month, stacked by category.
+   Grid rather than flex so the quarter, month and total columns line up down
+   the panel however long a month label or a total is. */
+.xs-mc { display: flex; flex-direction: column; gap: .25rem; }
+.xs-mc-legend { flex-wrap: wrap; row-gap: .2rem; }
+.xs-mc-row {
+  display: grid;
+  grid-template-columns: 1.6rem 3.2rem 1fr minmax(5.5rem, auto);
+  align-items: center;
+  gap: .4rem;
+}
+.xs-mc-q { font-size: .65rem; font-weight: 700; color: var(--muted); text-align: right; }
+.xs-mc-month { font-size: .7rem; color: var(--text); }
+/* min-width:0 so a long stack cannot push the total column off the panel. */
+.xs-mc-track { display: flex; height: 1.15rem; min-width: 0; align-items: stretch; }
+.xs-mc-seg {
+  border: 0; padding: 0; cursor: pointer; min-width: 2px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: .58rem; font-weight: 700; line-height: 1;
+  overflow: hidden;
+}
+.xs-mc-seg:first-child { border-radius: 3px 0 0 3px; }
+.xs-mc-seg:last-child { border-radius: 0 3px 3px 0; }
+.xs-mc-seg:hover { filter: brightness(1.12); }
+.xs-mc-seg:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.xs-mc-num { pointer-events: none; }
+.xs-mc-total {
+  font-size: .7rem; font-variant-numeric: tabular-nums;
+  white-space: nowrap; font-weight: 600;
+}
+
+@media (max-width: 700px) {
+  /* The quarter gutter is the first thing to go: it is a grouping hint, and the
+     month label already carries the period. */
+  .xs-mc-row { grid-template-columns: 0 2.8rem 1fr minmax(4.5rem, auto); }
+  .xs-mc-q { display: none; }
+}
+
 /* Size bands: two stacked bars per band, sharing the band's row. */
 .xs-bands { display: flex; flex-direction: column; gap: .3rem; }
 .xs-band-row {

@@ -1120,6 +1120,75 @@ export const PARITY_CHARTS: ChartSpec[] = [
                                       'notSto', true, 'notDeleted', true)) AS drill
             FROM b GROUP BY 1,2 ORDER BY 1`,
   },
+  /**
+   * Monthly Spend Category — DELIVERED value only, stacked by category.
+   *
+   * Closed only, by request: the panel answers "what did we actually take
+   * delivery of each month", which an open commitment would inflate with value
+   * that has not landed. `exec_value_by_category` remains the open-and-closed
+   * view of the same population.
+   *
+   * ── Why one series and a composite bucket ────────────────────────────────
+   *
+   * The natural shape is a series per category and a bucket per month, but a
+   * ChartSpec's series are STATIC SQL rows and the categories are data — a
+   * mapping file the business supplies can add one at any time, and a chart
+   * whose stacks were hardcoded would silently drop it. So the bucket carries
+   * both dimensions as `YYYY-MM|CATEGORY` and the panel pivots.
+   *
+   * The month is fixed-width, so the frontend splits at offset 7 rather than on
+   * the separator: a category containing a pipe would otherwise cut in the
+   * wrong place.
+   *
+   * Each point keeps its own drill on all three dimensions, so the parity sweep
+   * checks every month/category cell individually.
+   */
+  {
+    chartId: 'exec_monthly_category', seriesKey: 'closed', seriesLabel: 'Delivered (USD)', unit: 'usd',
+    sql: `SELECT to_char(document_date,'YYYY-MM') || '|' || spend_category AS bucket_key,
+                 to_char(document_date,'Mon YYYY') || '|' || spend_category AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'spendCategory', spend_category,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND spend_category IS NOT NULL AND document_date IS NOT NULL
+             AND status = 'Delivered'
+           -- Grouped on the UNDERLYING expressions, not on output positions:
+           -- the drill needs the bare month, and GROUP BY 1,2 groups only the
+           -- concatenated bucket, which Postgres rejects.
+           GROUP BY to_char(document_date,'YYYY-MM'),
+                    to_char(document_date,'Mon YYYY'),
+                    spend_category
+           ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_monthly_category', seriesKey: 'closed_idr', seriesLabel: 'Delivered (IDR)', unit: 'idr',
+    sql: `SELECT to_char(document_date,'YYYY-MM') || '|' || spend_category AS bucket_key,
+                 to_char(document_date,'Mon YYYY') || '|' || spend_category AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'spendCategory', spend_category,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND spend_category IS NOT NULL AND document_date IS NOT NULL
+             AND status = 'Delivered'
+           -- Grouped on the UNDERLYING expressions, not on output positions:
+           -- the drill needs the bare month, and GROUP BY 1,2 groups only the
+           -- concatenated bucket, which Postgres rejects.
+           GROUP BY to_char(document_date,'YYYY-MM'),
+                    to_char(document_date,'Mon YYYY'),
+                    spend_category
+           ORDER BY 1`,
+  },
   {
     chartId: 'exec_value_by_category', seriesKey: 'closed_idr', seriesLabel: 'Closed (IDR)', unit: 'idr',
     sql: `WITH b AS (

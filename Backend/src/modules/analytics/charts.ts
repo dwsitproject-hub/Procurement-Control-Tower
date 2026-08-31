@@ -33,6 +33,18 @@ export const CHART_META: ChartMeta[] = [
     ],
   },
   {
+    chartId: 'exec_monthly_category',
+    title: 'Monthly spend category',
+    tab: 'execsummary',
+    grain: 'po_line',
+    unit: 'usd',
+    notes: [
+      'Delivered lines only — what was taken delivery of, not what is committed',
+      'One bucket per month AND category, keyed "YYYY-MM|CATEGORY"; the panel pivots',
+      'STO and deleted lines excluded, as everywhere on this page',
+    ],
+  },
+  {
     chartId: 'exec_txn_size',
     title: 'Transaction size: value against volume',
     tab: 'execsummary',

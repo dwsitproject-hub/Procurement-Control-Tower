@@ -140,8 +140,8 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
   return (
     <div className="xs-bars">
       <div className="xs-legend">
-        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
         <span><i className="xs-key xs-closed" /> Closed <span className="muted">(delivered)</span></span>
+        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
       </div>
       {rows.map((r, i) => {
         const share = grand > 0 ? (r.total / grand) * 100 : 0;
@@ -171,11 +171,23 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
           <div key={r.key} className={`xs-bar-row${i < emphasiseTop ? ' xs-hi' : ''}`}>
             <span className="xs-bar-label">{r.label}</span>
             <span className="xs-bar-track">
-              {seg(r.o, 'xs-open', 'Open')}
+              {/* Closed first: delivered value has actually landed, so the bar
+                  reads from the axis outward and the open tail is what is still
+                  to come. The legend above is in the same order — a legend that
+                  disagrees with the stack teaches the reader to misread it. */}
               {seg(r.c, 'xs-closed', 'Closed')}
+              {seg(r.o, 'xs-open', 'Open')}
             </span>
             <span className="xs-bar-value">
               {money(r.total)} <span className="muted">({share.toFixed(1)}%)</span>
+              {/* The split behind the total, in the stack's order. The bar showed
+                  the proportions and the row showed only the sum, so neither
+                  gave the closed figure as a number you could quote. */}
+              <span className="xs-bar-split">
+                <span className="xs-sp-closed">{money(r.c?.value ?? 0)}</span> closed
+                {' · '}
+                <span className="xs-sp-open">{money(r.o?.value ?? 0)}</span> open
+              </span>
             </span>
           </div>
         );
@@ -274,11 +286,32 @@ export function ExecSummaryTab({
    * Those are different things, which is why the global filter had to learn
    * these dimensions rather than the panel borrowing the drill's token.
    */
-  const [focus, setFocus] = useState<{ title: string; subtitle: string; slice: string } | null>(null);
+  const [focus, setFocus] = useState<{
+    title: string; subtitle: string; slice: string;
+    /** What to show inside. Absent means the Overview's own lists. */
+    kpiIds?: string[]; chartIds?: string[];
+  } | null>(null);
 
   const openFocus = useCallback((title: string, subtitle: string, slice: string) => {
     setFocus({ title, subtitle, slice });
   }, []);
+
+  /**
+   * A headline tile opens the figures that EXPLAIN that tile.
+   *
+   * The four tiles all describe one population — they are different measures of
+   * it, not different slices — so passing a slice could not distinguish them and
+   * every tile opened an identical copy of the Overview. What differs is which
+   * question the reader is now asking: clicking committed value means "where is
+   * the money", clicking vendors means "how concentrated is the supply base".
+   * So the tile chooses the CONTENT rather than the filter.
+   */
+  const openTileFocus = useCallback(
+    (title: string, subtitle: string, kpiIds: string[], chartIds: string[]) => {
+      setFocus({ title, subtitle, slice: '', kpiIds, chartIds });
+    },
+    [],
+  );
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -307,6 +340,34 @@ export function ExecSummaryTab({
   // showed a dash in IDR view.
   const totalIdr = (totalKpi?.detail?.['value_idr'] as number | null | undefined) ?? null;
   const totalUsd = totalKpi?.value ?? null;
+
+  /**
+   * What each tile opens. Kept beside the tiles so the pairing is visible, and
+   * chosen from the catalogue the Overview already exposes so nothing here is a
+   * new measure that could disagree with the rest of the app.
+   */
+  const TILE_FOCUS: Record<string, { kpis: string[]; charts: string[] }> = {
+    'committed value': {
+      kpis: ['total_po_amount', 'open_po_commitment', 'avg_po_value_idr',
+        'top5_category_share_pct', 'foreign_ccy_po_share', 'valuation_coverage_pct'],
+      charts: ['po_value_by_category', 'po_value_by_purch_org', 'po_bracket_value'],
+    },
+    'PO lines': {
+      kpis: ['po_line_items', 'total_po_count', 'po_not_delivered', 'delivered_gr',
+        'hold_po_lines', 'lines_under_25jt_pct'],
+      charts: ['po_count_by_category', 'po_items_by_pgrp', 'po_bracket_count'],
+    },
+    'active vendors': {
+      kpis: ['unique_suppliers', 'top_vendor_share_pct', 'top5_vendor_share_pct',
+        'vendors_for_80pct_value', 'sole_source_materials', 'tail_spend_pct'],
+      charts: ['top_materials_spend', 'po_value_by_category'],
+    },
+    'purchasing desks': {
+      kpis: ['active_purch_groups', 'desks_for_80pct_value', 'ho_share_value_pct',
+        'ho_share_lines_pct'],
+      charts: ['po_value_by_pgrp', 'po_items_by_pgrp', 'po_value_by_purch_org'],
+    },
+  };
 
   const tiles: { label: string; value: string; sub: string; kpi?: Kpi }[] = [
     {
@@ -374,7 +435,7 @@ export function ExecSummaryTab({
       id: 'panel:headline',
       node: (
               <div className="panel">
-                <h2>🎯 Executive summary</h2>
+                <h2>🎯 Executive Summary - Procurement Manage</h2>
                 {/*
                   Scope stated up front and read from the data rather than typed. The
                   reference design was headed "2025 / annual spend" over a part-year
@@ -397,14 +458,16 @@ export function ExecSummaryTab({
                       key={t.label}
                       type="button"
                       className="xs-tile"
-                      onClick={() => openFocus(
+                      onClick={() => openTileFocus(
                         t.kpi?.title ?? t.label,
                         `${t.value} — ${t.label}`,
-                        // No extra slice: a headline tile IS the current scope, so the
-                        // panel shows the Overview for exactly what the page is showing.
-                        '',
+                        // No slice: a headline tile IS the current scope. What
+                        // makes one tile differ from another is the set of
+                        // figures below, not a narrower population.
+                        TILE_FOCUS[t.label]?.kpis ?? overviewKpis,
+                        TILE_FOCUS[t.label]?.charts ?? overviewCharts,
                       )}
-                      title="Click for the Overview of this figure's scope"
+                      title={`Click for the figures behind ${t.label}`}
                     >
                       <span className="xs-tile-value">{t.value}</span>
                       <span className="xs-tile-label">{t.label}</span>
@@ -608,8 +671,8 @@ export function ExecSummaryTab({
             // The clicked slice on top of the page's own filter, so the panel can
             // never show a wider population than the page it was opened from.
             filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}
-            kpiIds={overviewKpis}
-            chartIds={overviewCharts}
+            kpiIds={focus.kpiIds ?? overviewKpis}
+            chartIds={focus.chartIds ?? overviewCharts}
             currency={currency}
             onDrill={onDrill}
             onClose={() => setFocus(null)}

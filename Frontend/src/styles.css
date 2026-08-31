@@ -699,6 +699,12 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .xs-hi .xs-bar-label { color: var(--text); font-weight: 700; }
 .xs-hi .xs-bar-fill { background: var(--accent); }
 .xs-bar-value { font-size: .7rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The Closed/Open split under the row total. Its own line so the total stays the
+   figure the eye lands on, and colour-keyed to the segments rather than repeating
+   the words in the legend. */
+.xs-bar-split { display: block; font-size: .62rem; color: var(--muted); }
+.xs-sp-closed { color: var(--accent); font-weight: 600; }
+.xs-sp-open { color: var(--warn); font-weight: 600; }
 
 /* Size bands: two stacked bars per band, sharing the band's row. */
 .xs-bands { display: flex; flex-direction: column; gap: .3rem; }

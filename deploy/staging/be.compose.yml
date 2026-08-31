@@ -69,6 +69,25 @@ services:
       # HOST cifs mount must also be rw, its dir_mode/file_mode must carry a
       # write bit, and the share user must have write permission on the NAS.
       - ${STORAGE_HOST_MOUNT:-/mnt/synology-apps}:/mnt/synology-apps:${STORAGE_MOUNT_MODE:-ro}
+      # After-run filing needs WRITE, and needs it only inside this app's own
+      # project folder - moving a file deletes the original, so read-only cannot
+      # do it. Reopening the whole APPs share to get that would hand this
+      # container write and delete over every other project's folder as well, so
+      # the write is granted here as a SECOND, narrower mount that lands on top
+      # of the read-only one:
+      #
+      #   host:  mount //<nas>/APPs/<deployment>/<slug> rw at its own mountpoint
+      #   here:  STORAGE_PROJECT_HOST_MOUNT=<that mountpoint>
+      #          STORAGE_PROJECT_MOUNT_MODE=rw
+      #
+      # Docker orders binds by depth, so the deeper destination wins for that
+      # subtree and everything else on the share stays read-only. Left unset
+      # this re-binds the same folder read-only, which changes nothing - the
+      # feature is off until someone opens all three gates deliberately.
+      # The container path must match STORAGE_DEPLOYMENT/STORAGE_PROJECT_SLUG in
+      # staging.env; those live in the env_file, which Compose cannot read for
+      # interpolation, so it is stated rather than derived.
+      - ${STORAGE_PROJECT_HOST_MOUNT:-/mnt/synology-apps/dev/PCT}:${STORAGE_PROJECT_CONTAINER_PATH:-/mnt/synology-apps/dev/PCT}:${STORAGE_PROJECT_MOUNT_MODE:-ro}
       # Fallback source, used while STORAGE_* is unset in staging.env.
       - ./assets:/mnt/sap_exports:ro
       - spool:/var/lib/pct/spool

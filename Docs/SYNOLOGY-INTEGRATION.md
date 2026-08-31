@@ -244,25 +244,53 @@ which is why the panel names the problem instead of leaving it to be discovered.
 1. **On the NAS (infra team).** The share user (`app-prj`) needs write
    permission on `APPs/dev/PCT`. Nothing below matters until this is granted.
 
-2. **The host mount.** Both the `ro` flag AND the mode bits have to change —
-   `dir_mode=0550,file_mode=0440` carries no write bit, so `rw` alone is not
-   enough:
+2. **A second host mount, of the project folder only.** Leave the APPs share
+   mounted read-only. Filing needs write on ONE folder, and widening the whole
+   share to get it would hand this container write and delete over every other
+   project stored on the NAS.
+
+   Mount the subtree separately — CIFS can mount a path below the share:
 
    ```
-   //<nas>/APPs /mnt/synology-apps cifs rw,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0750,file_mode=0640,vers=3.0,iocharset=utf8,_netdev 0 0
+   //<nas>/APPs/dev/PCT /mnt/synology-pct cifs rw,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,forceuid,forcegid,dir_mode=0770,file_mode=0660,vers=3.0,iocharset=utf8,serverino,mapposix,soft,_netdev 0 0
    ```
 
-   Remount and confirm with `touch /mnt/synology-apps/dev/PCT/.wtest && rm` it.
+   Both the `rw` flag AND the mode bits matter: the read-only mount's
+   `dir_mode=0550,file_mode=0440` carries no write bit for anyone, so `rw` on
+   its own would still fail. `uid`/`gid` 1001 is the container's user
+   (`USER 1001` in `Backend/Dockerfile`); with `forceuid,forcegid` every file
+   presents as owned by it.
 
-3. **The container bind.** `be.compose.yml` binds the mount as
-   `${STORAGE_MOUNT_MODE:-ro}`, so the safe behaviour is what you get by not
-   thinking about it. Set `STORAGE_MOUNT_MODE=rw` in `/opt/pct/.env` next to
-   `be.compose.yml` and **recreate** the container — a bind mode is fixed at
-   container creation, so `restart` will not pick it up:
+   Confirm before going further:
 
    ```
-   cd /opt/pct && docker compose -f be.compose.yml up -d --force-recreate api
+   mount | grep synology && touch /mnt/synology-pct/.wtest && rm /mnt/synology-pct/.wtest && echo writable
    ```
+
+3. **The container bind.** `be.compose.yml` lays the writable subtree over the
+   read-only share, deeper destination first, so only that folder becomes
+   writable inside the container. In `/opt/pct/.env`:
+
+   ```
+   STORAGE_PROJECT_HOST_MOUNT=/mnt/synology-pct
+   STORAGE_PROJECT_MOUNT_MODE=rw
+   ```
+
+   Leave `STORAGE_MOUNT_MODE` alone — the share itself stays `ro`. Set
+   `STORAGE_PROJECT_CONTAINER_PATH` too if `STORAGE_DEPLOYMENT`/
+   `STORAGE_PROJECT_SLUG` are not `dev`/`PCT`; Compose cannot read the
+   `env_file` for interpolation, so that path is stated, not derived.
+
+   Then **recreate** the container — a bind mode is fixed at creation, so
+   `restart` will not pick it up:
+
+   ```
+   cd /opt/pct && docker compose -f compose.yml up -d --force-recreate api
+   ```
+
+   Nothing here is conditional in Compose, so unset these and the extra bind
+   re-binds the same folder read-only: an exact no-op, and the feature stays off
+   until all three gates are opened deliberately.
 
 Only then switch the feature on in the panel. The **Resolved folder** block
 reports whether the folder is writable, and the panel refuses to let the

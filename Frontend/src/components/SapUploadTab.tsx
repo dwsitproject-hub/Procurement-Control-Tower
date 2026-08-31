@@ -44,7 +44,8 @@ type UploadResult =
   }
   | { outcome: 'noop_unchanged'; batchId: number | null }
   | { outcome: 'incomplete_bundle'; missing: string[] }
-  | { outcome: 'source_unavailable'; path: string };
+  | { outcome: 'source_unavailable'; path: string }
+  | { outcome: 'awaiting_exports'; filedBatchId: number; filedAt: string; hoursAgo: number };
 
 /** What a complete bundle looks like, in the order SAP exports them. */
 const EXPECTED = [
@@ -417,6 +418,9 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         : out.outcome === 'noop_unchanged'
           ? 'The folders hold the same files already published — nothing to do. '
             + 'Use Rebuild if the change you are chasing is in the software rather than the files.'
+        : out.outcome === 'awaiting_exports'
+          ? `The pickup folder is empty because batch ${out.filedBatchId} filed its files away `
+            + `${out.hoursAgo}h ago. Waiting for the next exports — nothing to do.`
         : out.outcome === 'incomplete_bundle' ? `Incomplete: missing ${(out.missing ?? []).join(', ')}.`
         : out.outcome === 'source_unavailable' ? `Not readable: ${out.path}`
         : `Outcome: ${out.outcome}`,
@@ -1145,6 +1149,15 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
               <span className="bs sl">unchanged</span>{' '}
               These files are byte-identical to the published set — nothing to do. (Use the Admin
               recompute if you need to rebuild figures from the same data.)
+            </p>
+          )}
+          {result.outcome === 'awaiting_exports' && (
+            <p className="note">
+              {/* Deliberately not styled as an error: this is the steady state
+                  between exports once after-run filing is on. */}
+              <span className="bs sl">waiting</span> The pickup folder is empty because
+              batch <strong>{result.filedBatchId}</strong> filed its files away{' '}
+              {result.hoursAgo}h ago, and the next exports have not landed yet. Nothing to do.
             </p>
           )}
           {result.outcome === 'incomplete_bundle' && (

@@ -158,7 +158,16 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
   // disappeared whenever that lookup returned nothing.
   lines.push(...await perFeedRowLines(input.batchId));
 
-  if (input.outcome === 'noop_unchanged') {
+  if (input.outcome === 'awaiting_exports') {
+    lines.push('The pickup folder is empty because a previous run FILED ITS FILES AWAY');
+    lines.push('after publishing them, and the next exports have not landed yet. Nothing');
+    lines.push('is wrong and nothing needed doing.');
+    lines.push('');
+    lines.push('This used to be reported as a failed run with every file missing, which');
+    lines.push('is what the after-run filing feature does on purpose. If the exports stop');
+    lines.push('arriving for longer than the grace period, it becomes a failure notice');
+    lines.push('again, so a real outage is still reported.');
+  } else if (input.outcome === 'noop_unchanged') {
     lines.push('The share folders held the same files as the last publish, so no new');
     lines.push('dataset version was created. This is the normal result between exports.');
   } else if (v) {
@@ -197,9 +206,11 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
     lines.push('errors — the publish succeeded. Only BLOCKER stops a batch.');
   }
 
-  const subject = input.outcome === 'noop_unchanged'
-    ? `[PCT] SAP sync: no changes (${stamp()})`
-    : `[PCT] SAP sync OK: version ${v?.id ?? '?'} published (${stamp()})`;
+  const subject = input.outcome === 'awaiting_exports'
+    ? `[PCT] SAP sync: waiting for the next exports (${stamp()})`
+    : input.outcome === 'noop_unchanged'
+      ? `[PCT] SAP sync: no changes (${stamp()})`
+      : `[PCT] SAP sync OK: version ${v?.id ?? '?'} published (${stamp()})`;
 
   return { subject, body: lines.join('\n') };
 }

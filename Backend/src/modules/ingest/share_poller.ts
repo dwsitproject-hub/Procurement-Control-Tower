@@ -30,7 +30,7 @@ import { loadEnv } from '../../config/env.js';
 import { resolveStorage } from '../../config/storage.js';
 import { runIngest } from './pipeline.js';
 import {
-  archiveBundle, archiveSummary, fileRowErrors,
+  archiveBundle, archiveSummary, fileRowErrors, recordFiling,
   type ArchiveConfig, type ArchiveReport,
 } from './archive.js';
 import { notify } from '../notify/mailer.js';
@@ -409,6 +409,9 @@ export async function archiveAfterRun(
   const archive: ArchiveReport = rowErrors ? { ...moved, rowErrors } : moved;
 
   lastArchive = archive;
+  // Remembered for the NEXT run: an empty pickup folder that this run emptied is
+  // not the same problem as exports that never arrived.
+  await recordFiling(batchId, archive);
   if (archive.rowErrors && !archive.rowErrors.written) {
     console.warn(`archive: unreadable-row report could not be written - ${archive.rowErrors.error}`);
   }
@@ -444,7 +447,9 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
       : 'datasetVersionId' in out ? `v${out.datasetVersionId}`
       : 'path' in out ? out.path
       : 'reason' in out ? out.reason
-      : undefined;
+      : 'filedBatchId' in out
+        ? `filed by batch ${out.filedBatchId}, ${out.hoursAgo}h ago`
+        : undefined;
     const arch = archiveSummary(archive);
     return {
       outcome: out.outcome,

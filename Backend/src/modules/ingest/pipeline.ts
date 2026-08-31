@@ -76,7 +76,57 @@ export type IngestOutcome =
   }
   | { outcome: 'noop_unchanged'; batchId: number | null }
   | { outcome: 'incomplete_bundle'; missing: Feed[] }
-  | { outcome: 'source_unavailable'; path: string };
+  | { outcome: 'source_unavailable'; path: string }
+  /**
+   * The pickup folder is empty because a previous run filed its contents away,
+   * and the next exports have not landed yet. The normal state between exports
+   * once after-run filing is on — NOT a fault, which is the whole point of
+   * separating it from `incomplete_bundle`.
+   */
+  | { outcome: 'awaiting_exports'; filedBatchId: number; filedAt: string; hoursAgo: number };
+
+/**
+ * How long an empty pickup folder stays "waiting" before it becomes "overdue".
+ *
+ * Four days, because the exports are daily and the gap that matters is a long
+ * weekend: Friday's run files Friday's exports away, and the next set may not
+ * land until Monday or Tuesday. Past that, an empty folder is worth an email
+ * again — the point of this outcome is to stop crying wolf between exports, not
+ * to go quiet when the exports really have stopped.
+ *
+ * Overridable in rule_config so a site with a weekly cadence can widen it
+ * without a deployment.
+ */
+const DEFAULT_AWAITING_GRACE_HOURS = 96;
+
+async function awaitingGraceHours(): Promise<number> {
+  const raw = (await loadRuleSnapshot())['ingest.awaiting_grace_hours'];
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_AWAITING_GRACE_HOURS;
+}
+
+/** The most recent run that moved its own source files out of the pickup folder. */
+async function lastFiling(): Promise<
+  { filedBatchId: number; filedAt: string; hoursAgo: number } | null
+> {
+  try {
+    const r = await queryOne<{ batch_id: string; filed_at: string; hours: string }>(
+      `SELECT batch_id, filed_at::text AS filed_at,
+              (EXTRACT(EPOCH FROM (now() - filed_at)) / 3600)::text AS hours
+         FROM ops.ingest_filing ORDER BY filed_at DESC LIMIT 1`,
+    );
+    if (!r) return null;
+    return {
+      filedBatchId: Number(r.batch_id),
+      filedAt: r.filed_at,
+      hoursAgo: Math.round(Number(r.hours)),
+    };
+  } catch {
+    // ops.ingest_filing absent (pre-024): fall back to the old behaviour rather
+    // than claiming a filing that cannot be proven.
+    return null;
+  }
+}
 
 export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const log = opts.onProgress ?? (() => undefined);
@@ -95,6 +145,17 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   }
 
   if (discovered.length === 0) {
+    // An empty folder has two very different causes and they look identical on
+    // disk: either a previous run filed the exports away and the next ones have
+    // not arrived, or the exports stopped coming. ops.ingest_filing is the
+    // record of the first, written only when a run actually moved files.
+    const filed = await lastFiling();
+    if (filed !== null && filed.hoursAgo <= (await awaitingGraceHours())) {
+      return { outcome: 'awaiting_exports', ...filed };
+    }
+    // No filing on record, or one old enough that the next export is genuinely
+    // overdue. Either way this is worth an alert, so it keeps the outcome it
+    // always had.
     return { outcome: 'incomplete_bundle', missing: [...REQUIRED_FEEDS] };
   }
 

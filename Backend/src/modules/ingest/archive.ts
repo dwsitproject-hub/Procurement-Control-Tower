@@ -83,7 +83,7 @@ export interface ArchiveReport {
 /** What the pipeline returned, narrowed to what this decision needs. */
 export type ArchiveOutcome =
   | 'published' | 'ready' | 'failed' | 'noop_unchanged'
-  | 'incomplete_bundle' | 'source_unavailable' | 'locked' | string;
+  | 'incomplete_bundle' | 'source_unavailable' | 'awaiting_exports' | 'locked' | string;
 
 /**
  * Which files the batch recognised, from the database rather than from the
@@ -261,6 +261,35 @@ export async function fileRowErrors(opts: {
       written: false, path, ...counts,
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/**
+ * Remember that this run filed its own source files away.
+ *
+ * The next run needs it: after filing, the pickup folder is empty, and an empty
+ * folder is indistinguishable on the filesystem from exports that never
+ * arrived. Recorded only when something actually moved — a run that filed
+ * nothing is not evidence that the folder is empty by design, and recording it
+ * would silence a genuine missing-exports warning.
+ *
+ * Never throws, for the same reason nothing else here does: the dataset is
+ * already published and correct, and losing this row only costs one
+ * misclassified email.
+ */
+export async function recordFiling(batchId: number | null, r: ArchiveReport): Promise<void> {
+  if (batchId === null || r.moved === 0) return;
+  try {
+    await query(
+      `INSERT INTO ops.ingest_filing (batch_id, files_moved, rows_reported)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (batch_id) DO UPDATE
+         SET filed_at = now(), files_moved = EXCLUDED.files_moved,
+             rows_reported = EXCLUDED.rows_reported`,
+      [batchId, r.moved, r.rowErrors?.written ? r.rowErrors.rows : 0],
+    );
+  } catch {
+    // ops schema absent (pre-024). A missing note must not break a good run.
   }
 }
 

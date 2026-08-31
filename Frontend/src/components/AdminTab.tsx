@@ -216,6 +216,14 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
           ? `Applied — dataset version ${out.datasetVersionId} published. Every page now uses the new scope; reload to see it.`
           : out.outcome === 'source_unavailable'
             ? 'Saved, but the source files could not be read, so nothing was rebuilt — the previous scope is still in force.'
+          : out.outcome === 'awaiting_exports'
+            // A recompute reads the pickup folder, and after-run filing empties
+            // it once a run has published. So between exports there is nothing
+            // to rebuild FROM, and saying "reported awaiting_exports" would
+            // leave an admin hunting for a fault that is not there.
+            ? 'Saved, but the pickup folder is empty — a previous run filed its exports away, '
+              + 'so there is nothing to rebuild from. The new scope takes effect at the next '
+              + 'publish, or sooner if you put the exports back in the pickup folder.'
             : `Saved, but the rebuild reported "${out.outcome}" — the previous scope is still in force.`,
       );
     } catch (e) {

@@ -50,6 +50,7 @@ async function seedNotificationEvents(): Promise<void> {
       ('ingest.template_drift',       'Template drift detected','error',   true,  'A required column was unresolvable or unexpected columns appeared'),
       ('ingest.incomplete_bundle',    'Incomplete file bundle', 'warning', true,  'A poll found a partial file set'),
       ('ingest.stalled',              'Ingestion stalled',      'error',   true,  'Bundle incomplete for N consecutive cycles'),
+      ('ingest.awaiting_exports',     'Waiting for exports',    'info',    true,  'Pickup folder emptied by after-run filing; next exports not landed'),
       ('ingest.source_unavailable',   'Source unavailable',     'error',   true,  'Share folder unreachable'),
       ('data.stale',                  'Data is stale',          'warning', false, 'as-of date older than the stale threshold'),
       ('data.rolled_back',            'Dataset rolled back',    'warning', true,  'An administrator rolled back a version')

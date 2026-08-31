@@ -47,6 +47,14 @@ async function main(): Promise<number> {
       process.stderr.write(`Missing feeds: ${result.missing.join(', ')}\nNothing was published.\n`);
       return 1;
 
+    case 'awaiting_exports':
+      process.stdout.write(
+        `Pickup folder is empty because batch ${result.filedBatchId} filed its files away `
+        + `${result.hoursAgo}h ago. Waiting for the next exports; nothing to do.
+`,
+      );
+      return 0;
+
     case 'noop_unchanged':
       process.stdout.write(
         `Bundle unchanged (identical file hashes already published as batch ${result.batchId}).\n`,

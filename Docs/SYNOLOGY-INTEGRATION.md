@@ -303,7 +303,7 @@ succeeded and failed folders be the same value.
 | `published` | files the pipeline recognised → `succeed`; files it read but could not identify → `failed`; any rows that could not be read → `failed`, as a workbook |
 | `failed` | every file in the bundle → `failed` |
 | `incomplete_bundle` | **nothing moves** |
-| `noop_unchanged`, `source_unavailable` | nothing moves |
+| `noop_unchanged`, `source_unavailable`, `awaiting_exports` | nothing moves |
 
 The folders are per FILE, which is why the row workbook exists: a 65,250-row GR
 export with 11 unreadable rows is a recognised file and belongs in `succeed`, so
@@ -311,6 +311,29 @@ without it those 11 rows had nowhere to land on the share. Only the unreadable
 rows go into it — validation findings flag rows that were ACCEPTED, and
 selecting them needs a requester's data scope that an unattended run does not
 have. The full report, findings included, stays in Admin -> SAP Data Upload.
+
+### The empty folder afterwards
+
+Filing succeeds, so the pickup folder is then EMPTY, and an empty folder used to
+be `incomplete_bundle` with every required feed missing — a FAILURE email every
+morning between exports, describing the tidy-up the run had just performed.
+
+`awaiting_exports` separates the two causes, which are identical on disk:
+
+* a previous run filed the exports away and the next have not landed →
+  informational, "waiting for the next exports"
+* nothing was ever filed, or the last filing is older than
+  `ingest.awaiting_grace_hours` (default 96) → `incomplete_bundle` as before, so
+  a real outage is still reported
+
+`ops.ingest_filing` (migration 024) is the evidence, written only by a run that
+actually moved files. Four days is chosen for the default because the exports
+are daily and the gap that matters is a long weekend.
+
+**One consequence to plan for.** Admin -> Data Exclusions -> "Save exclusions &
+recompute" re-runs the ingest from the pickup folder, so between exports there
+is nothing to rebuild from and the new scope takes effect at the next publish.
+The panel says so rather than reporting an outcome code.
 
 Leaving an incomplete bundle alone is the important one. The scheduler picks up
 per feed, so the folder legitimately holds a partial set while the rest of the

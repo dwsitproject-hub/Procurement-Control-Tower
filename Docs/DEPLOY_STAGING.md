@@ -585,20 +585,33 @@ If the Hub is down, the login page automatically hides the SSO button
 
 ## 7. Updating staging (each release)
 
+**Three servers, and each command belongs to exactly one of them.** Both hosts
+keep their own `/opt/pct/compose.yml`, copied from a DIFFERENT source file, so
+each knows only its own services: `api` and `redis` on the BE server, `web` on
+the FE server. Running `up -d api web` on either one answers
+`no such service` for whichever half lives elsewhere.
+
 ```bash
 # workstation: push the release
 git push origin sit2
 
-# BE server (PuTTY session)
-cd /opt/pct/src && git pull
+# BE server (172.28.92.57) — services: api, redis
+cd /opt/pct/src && git pull --ff-only
 docker build -f Backend/Dockerfile -t pct-api:staging .
-docker compose -f /opt/pct/compose.yml up -d api   # migrations apply at boot
+docker compose -f /opt/pct/compose.yml up -d --force-recreate api   # migrations apply at boot
+docker logs pct-api 2>&1 | grep -i migration | tail -3
 
-# FE server (PuTTY session)
-cd /opt/pct/src && git pull
+# FE server (172.28.92.56) — services: web
+cd /opt/pct/src && git pull --ff-only
 docker build -f Frontend/Dockerfile -t pct-web:staging .
-docker compose -f /opt/pct/compose.yml up -d web
+docker compose -f /opt/pct/compose.yml up -d --force-recreate web
 ```
+
+`--force-recreate` is not optional after a rebuild. Compose compares the image
+REFERENCE, not its contents, and `pct-api:staging` still points at the same tag,
+so a plain `up -d` reports the container is up to date and leaves the OLD code
+running — a rebuild that appears to deploy and does not. The same applies to a
+changed bind mode, which is fixed at container creation.
 
 If a release changed the compose files, env template, or nginx conf, re-copy
 them from `src/deploy/...` (compare first — your filled `staging.env` /

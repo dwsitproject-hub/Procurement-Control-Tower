@@ -482,6 +482,7 @@ export function ExecSummaryTab({
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
   const [byMonth, setByMonth] = useState<ChartResponse | null>(null);
+  const [byCommitted, setByCommitted] = useState<ChartResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -490,13 +491,15 @@ export function ExecSummaryTab({
     setByCategory(null);
     setByBand(null);
     setByMonth(null);
+    setByCommitted(null);
     Promise.all([
       api.get<ChartResponse>(`/api/v1/chart/exec_value_by_category${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_txn_size${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_monthly_category${q}`),
+      api.get<ChartResponse>(`/api/v1/chart/exec_committed_by_month${q}`),
     ])
-      .then(([c, b, m]) => {
-        if (!dead) { setByCategory(c); setByBand(b); setByMonth(m); }
+      .then(([c, b, m, cm]) => {
+        if (!dead) { setByCategory(c); setByBand(b); setByMonth(m); setByCommitted(cm); }
       })
       .catch((e: Error) => { if (!dead) setErr(e.message); });
     return () => { dead = true; };
@@ -512,6 +515,58 @@ export function ExecSummaryTab({
   // showed a dash in IDR view.
   const totalIdr = (totalKpi?.detail?.['value_idr'] as number | null | undefined) ?? null;
   const totalUsd = totalKpi?.value ?? null;
+
+  /**
+   * YTD and current-month figures for the headline tiles.
+   *
+   * Derived from exec_committed_by_month rather than from four more KPIs,
+   * because a KPI spec's drill is a static literal and cannot express "the
+   * months of the as-of year". Summing the month points here keeps one
+   * definition of the population and one place where the date arithmetic lives.
+   *
+   * The period comes from the DATASET's as-of date, never the wall clock: this
+   * is an extract with its own end date, and reading the browser's calendar
+   * would make the same published version report different numbers on different
+   * days — and show nothing at all on the 1st of a month the data has not
+   * reached.
+   */
+  const periodOf = (): { year: string; month: string } | null => {
+    if (!asOfDate) return null;
+    return { year: asOfDate.slice(0, 4), month: asOfDate.slice(0, 7) };
+  };
+
+  const sumMonths = (seriesKey: string, keep: (monthKey: string) => boolean): number | null => {
+    const series = byCommitted?.series.find((x) => x.key === seriesKey);
+    if (!series) return null;
+    let any = false;
+    let total = 0;
+    for (const pt of series.points) {
+      if (!keep(pt.bucketKey)) continue;
+      any = true;
+      total += pt.value ?? 0;
+    }
+    // null rather than 0 when the period has no rows at all: "no data for this
+    // month" and "zero committed this month" are different statements, and
+    // printing 0 for the first would be a quiet lie.
+    return any ? total : null;
+  };
+
+  const period = periodOf();
+  /** Currency-aware series key, matching the *_idr twin convention. */
+  const valueKey = currency === 'IDR' ? 'value_idr' : 'value';
+  const money = (v: number | null): string =>
+    v === null ? '—' : currency === 'IDR' ? rupiah(v) : formatMoney(v, 'USD');
+
+  const valueYtd = period ? sumMonths(valueKey, (mk) => mk.slice(0, 4) === period.year) : null;
+  const valueMtd = period ? sumMonths(valueKey, (mk) => mk === period.month) : null;
+  const linesYtd = period ? sumMonths('lines', (mk) => mk.slice(0, 4) === period.year) : null;
+  const linesMtd = period ? sumMonths('lines', (mk) => mk === period.month) : null;
+
+  /** "YTD 2026" / "Jul 2026", so the tile names the period it is claiming. */
+  const monthName = period
+    ? new Date(`${period.month}-01T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' })
+      + ' ' + period.year
+    : '';
 
   /**
    * What each tile opens. Kept beside the tiles so the pairing is visible, and
@@ -541,19 +596,31 @@ export function ExecSummaryTab({
     },
   };
 
-  const tiles: { label: string; value: string; sub: string; kpi?: Kpi }[] = [
+  const tiles: {
+    label: string; value: string; sub: string; kpi?: Kpi;
+    /** Optional period breakdown, shown under the tile's own figure. */
+    periods?: { name: string; text: string }[];
+  }[] = [
     {
       label: 'committed value',
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
         : formatMoney(totalUsd, 'USD'),
       sub: 'net order value — STO and deleted excluded',
+      periods: [
+        { name: `YTD ${period?.year ?? ''}`, text: money(valueYtd) },
+        { name: monthName, text: money(valueMtd) },
+      ],
       ...(totalKpi ? { kpi: totalKpi } : {}),
     },
     {
       label: 'PO lines',
       value: formatNumber(val('po_line_items') ?? 0),
       sub: 'purchase lines in the period',
+      periods: [
+        { name: `YTD ${period?.year ?? ''}`, text: linesYtd === null ? '—' : formatNumber(linesYtd) },
+        { name: monthName, text: linesMtd === null ? '—' : formatNumber(linesMtd) },
+      ],
       ...(k('po_line_items') ? { kpi: k('po_line_items')! } : {}),
     },
     {
@@ -644,6 +711,20 @@ export function ExecSummaryTab({
                       <span className="xs-tile-value">{t.value}</span>
                       <span className="xs-tile-label">{t.label}</span>
                       <span className="xs-tile-sub muted">{t.sub}</span>
+                      {/* The period split. Shown under the headline figure rather
+                          than replacing it: the tile's own number is the whole
+                          extract, and YTD is a subset of it — printing only the
+                          subset would quietly change what the card means. */}
+                      {t.periods && (
+                        <span className="xs-tile-periods">
+                          {t.periods.map((p) => (
+                            <span key={p.name} className="xs-tp">
+                              <span className="xs-tp-name">{p.name}</span>
+                              <span className="xs-tp-val">{p.text}</span>
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>

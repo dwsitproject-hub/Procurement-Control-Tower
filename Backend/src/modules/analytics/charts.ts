@@ -33,6 +33,18 @@ export const CHART_META: ChartMeta[] = [
     ],
   },
   {
+    chartId: 'exec_committed_by_month',
+    title: 'Committed value and PO lines by month',
+    tab: 'execsummary',
+    unit: 'usd',
+    grain: 'po_line',
+    notes: [
+      'Feeds the headline tiles YTD and current-month figures',
+      'Current month means the dataset as-of month, never the wall clock',
+      'Same population as total_po_amount: STO and deleted lines excluded',
+    ],
+  },
+  {
     chartId: 'exec_monthly_category',
     title: 'Monthly spend category',
     tab: 'execsummary',

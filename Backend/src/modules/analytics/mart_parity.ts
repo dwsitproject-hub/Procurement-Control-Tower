@@ -1121,6 +1121,67 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM b GROUP BY 1,2 ORDER BY 1`,
   },
   /**
+   * Committed value and PO lines per month — the source of the headline tiles'
+   * YTD and current-month figures.
+   *
+   * Why a chart and not four more KPIs: a KPI spec's `drill` is a static object
+   * literal, so it cannot express "the months of the as-of year" or "the as-of
+   * month" — those depend on the dataset's own dates. A chart builds its drill in
+   * SQL, so every month point carries a monthKey predicate the parity sweep can
+   * check, and the tiles add up the months they need. One definition, no
+   * hand-maintained date arithmetic in two places.
+   *
+   * CURRENT MONTH MEANS THE AS-OF MONTH, not the wall clock. The dataset is an
+   * extract with its own end date; reading the server's calendar would make the
+   * tile go blank on the 1st of a month in which no data exists yet, and would
+   * make the same published version report different numbers on different days.
+   *
+   * Same population as total_po_amount and po_line_items — NOT is_sto, NOT
+   * is_deleted — so the tiles' parts and their total come from one definition.
+   */
+  {
+    chartId: 'exec_committed_by_month', seriesKey: 'value', seriesLabel: 'Committed (USD)', unit: 'usd',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_committed_by_month', seriesKey: 'value_idr', seriesLabel: 'Committed (IDR)', unit: 'idr',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_committed_by_month', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 count(*)::int AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  /**
    * Monthly Spend Category — DELIVERED value only, stacked by category.
    *
    * Closed only, by request: the panel answers "what did we actually take

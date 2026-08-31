@@ -116,9 +116,18 @@ services:
       SHARE_PATH: /mnt/sap_exports
       UPLOAD_SPOOL_PATH: /var/lib/pct/spool
     volumes:
-      # The local stand-in for the Synology share, mounted READ-ONLY exactly as
-      # the NAS mount is on a server — so an application defect can never
-      # modify or delete a source file.
+      # The local stand-in for the Synology share. Mounted READ-WRITE, and the
+      # line below says why — but the top of this comment used to claim it was
+      # read-only "so an application defect can never modify or delete a source
+      # file", which is the opposite of what the mount does. Enabling after-run
+      # filing against it MOVES the exports out of ./Assets, and the stale
+      # comment is exactly how someone ends up doing that by accident while
+      # believing the folder was protected. It cost this repo its local test
+      # exports once already; they had to be recovered from the spool volume.
+      #
+      # So: if you switch archiving on locally, point the succeeded/failed
+      # folders somewhere disposable (/var/lib/pct/spool/... is writable and is
+      # not the source folder) rather than under /mnt/sap_exports.
       #
       # A laptop has no NAS mount, so no STORAGE_* variables are set here and
       # the app falls back to SHARE_PATH (Docs/SYNOLOGY-INTEGRATION.md is

@@ -42,6 +42,8 @@ export interface IngestNotifyInput {
   datasetVersionId?: number;
   batchId?: number;
   detail?: string;
+  /** archiveSummary() — what the after-run filing moved, if it is switched on. */
+  archive?: string;
   /** Which pickup slots fired, e.g. "pr@06:00 po@06:00". */
   slots?: string;
 }
@@ -105,7 +107,9 @@ async function perFeedRowLines(batchId: number | undefined): Promise<string[]> {
     lines.push('  rows are counted as unreadable because none of them were used.');
     lines.push('');
     lines.push('  The offending rows are downloadable as a workbook, with the value that');
-    lines.push('  could not be read and the reason, from Admin -> SAP Data Upload.');
+    lines.push('  could not be read and the reason, from Admin -> SAP Data Upload. With');
+    lines.push('  after-run filing switched on, the same workbook is also written into the');
+    lines.push('  failed folder on the share, in the dated subfolder for that run.');
   }
   lines.push('');
   return lines;
@@ -142,6 +146,10 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
   if (v) {
     lines.push(`Version:  ${v.id}   (data as of ${v.as_of_date})`);
   }
+  // Where the exports went afterwards. Worth a line of its own: this used to
+  // travel inside `detail`, which the success body never printed, so a run that
+  // filed its files said nothing about having done so.
+  if (input.archive) lines.push(`Filed:    ${input.archive}`);
   lines.push('');
 
   // What each file contributed. Emitted unconditionally, NOT inside the
@@ -204,6 +212,7 @@ export async function ingestFailureBody(input: IngestNotifyInput): Promise<{ sub
   lines.push(`When:     ${stamp()}`);
   lines.push(`Trigger:  ${input.trigger}${input.slots ? ` (${input.slots})` : ''}`);
   if (input.batchId) lines.push(`Batch:    ${input.batchId}`);
+  if (input.archive) lines.push(`Filed:    ${input.archive}`);
   lines.push('');
 
   // The read/accepted/unreadable table first: on a failure the first question is

@@ -29,7 +29,10 @@ import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
 import { resolveStorage } from '../../config/storage.js';
 import { runIngest } from './pipeline.js';
-import { archiveBundle, archiveSummary, type ArchiveConfig, type ArchiveReport } from './archive.js';
+import {
+  archiveBundle, archiveSummary, fileRowErrors,
+  type ArchiveConfig, type ArchiveReport,
+} from './archive.js';
 import { notify } from '../notify/mailer.js';
 import { ingestFailureBody, ingestSuccessBody } from '../notify/messages.js';
 import {
@@ -391,13 +394,24 @@ export async function archiveAfterRun(
   batchId: number | null,
   cfg: ShareConfig,
 ): Promise<ArchiveReport> {
-  const archive = await archiveBundle({
+  const at = new Date();
+  const moved = await archiveBundle({
     files: source.lastListed.map((f) => ({ handle: f.handle, displayName: f.displayName })),
     outcome,
     batchId,
     cfg: cfg.archive,
+    at,
   });
+  // The rows that could not be read are filed too, into the same dated folder
+  // under `failed`. Same clock as the files, so both land together rather than
+  // in two folders either side of midnight.
+  const rowErrors = await fileRowErrors({ batchId, outcome, cfg: cfg.archive, at });
+  const archive: ArchiveReport = rowErrors ? { ...moved, rowErrors } : moved;
+
   lastArchive = archive;
+  if (archive.rowErrors && !archive.rowErrors.written) {
+    console.warn(`archive: unreadable-row report could not be written - ${archive.rowErrors.error}`);
+  }
   if (archive.failed > 0) {
     // Worth its own log line: the run itself succeeded, so nothing else in the
     // output would mention that the share could not be written.
@@ -496,6 +510,7 @@ export function startSharePoller(log: (msg: string) => void): void {
             trigger: 'scheduled' as const,
             outcome: r.outcome,
             detail: r.detail,
+            archive: r.archive ? archiveSummary(r.archive) : undefined,
             batchId: r.batchId,
             datasetVersionId: r.datasetVersionId,
             slots: label,

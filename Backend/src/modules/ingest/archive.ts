@@ -40,9 +40,10 @@
  *    is not guaranteed to end up empty.
  */
 
-import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
+import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { query } from '../../db/client.js';
+import { buildErrorWorkbook, errorWorkbookName, loadRowErrors } from './error_report.js';
 
 export interface ArchiveConfig {
   enabled: boolean;
@@ -58,6 +59,16 @@ export interface ArchivedFile {
   error?: string;
 }
 
+/** The workbook of unreadable rows, filed next to the failed files. */
+export interface RowErrorReport {
+  written: boolean;
+  path: string;
+  /** Distinct source rows, and individual cells, that could not be read. */
+  rows: number;
+  cells: number;
+  error?: string;
+}
+
 export interface ArchiveReport {
   attempted: number;
   moved: number;
@@ -65,6 +76,8 @@ export interface ArchiveReport {
   files: ArchivedFile[];
   /** Set when the whole step was skipped, with why. */
   skipped?: string;
+  /** Absent when the run had no unreadable rows to report. */
+  rowErrors?: RowErrorReport;
 }
 
 /** What the pipeline returned, narrowed to what this decision needs. */
@@ -189,13 +202,83 @@ export async function archiveBundle(opts: {
   };
 }
 
+/**
+ * File the rows that could not be read, as a workbook, into `failed`.
+ *
+ * The folders are per FILE: a recognised export goes to `succeed` whole, even
+ * when some of its rows were unreadable. That left the 11 bad rows of a 65,250
+ * row GR export with nowhere to land on the share, which is not what was asked
+ * for — the request was that failed DATA end up in the failed folder, and 11
+ * rows inside a successful file are exactly that.
+ *
+ * So the rows are filed as the same workbook the Admin panel offers, in the
+ * same dated run folder the files use, and the file itself still goes to
+ * `succeed` where it belongs.
+ *
+ * ONLY THE UNREADABLE ROWS GO IN. The panel's download can also carry a sheet
+ * per validation finding, and those are deliberately left out here: a finding
+ * flags rows that WERE accepted, so they are not failed data, and selecting
+ * them needs a requester's data scope. An unattended run has no requester, and
+ * an empty scope fails closed by design, so there is no honest scope to select
+ * them under. The full report stays one click away in Admin -> SAP Data Upload,
+ * where a real user's scope applies.
+ */
+export async function fileRowErrors(opts: {
+  batchId: number | null;
+  outcome: ArchiveOutcome;
+  cfg: ArchiveConfig;
+  at?: Date;
+}): Promise<RowErrorReport | undefined> {
+  const { batchId, outcome, cfg } = opts;
+  const at = opts.at ?? new Date();
+
+  // The same gates the files pass through, so the two cannot disagree about
+  // whether a run was finished with.
+  if (!cfg.enabled || batchId === null) return undefined;
+  if (outcome !== 'published' && outcome !== 'ready' && outcome !== 'failed') return undefined;
+
+  const rows = await loadRowErrors(batchId);
+  if (rows.length === 0) return undefined;
+
+  const book = buildErrorWorkbook(batchId, rows, []);
+  if (book === null) return undefined;
+
+  const dir = join(cfg.failedDir, runFolder(batchId, at));
+  const path = join(dir, errorWorkbookName(batchId));
+  const counts = {
+    rows: new Set(rows.map((r) => `${r.feed}#${r.source_row}`)).size,
+    cells: rows.length,
+  };
+
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(path, book);
+    return { written: true, path, ...counts };
+  } catch (err) {
+    // Same rule as moving a file: recorded, never thrown. The dataset is
+    // already published and correct.
+    return {
+      written: false, path, ...counts,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /** One line for the run log and the panel. */
 export function archiveSummary(r: ArchiveReport): string | undefined {
-  if (r.skipped) return undefined;
-  if (r.attempted === 0) return undefined;
-  const bits = [`archived ${r.moved}/${r.attempted}`];
-  const toFailed = r.files.filter((f) => f.moved && f.to === 'failed').length;
-  if (toFailed > 0) bits.push(`${toFailed} to failed`);
-  if (r.failed > 0) bits.push(`${r.failed} could not be moved`);
-  return bits.join(', ');
+  const bits: string[] = [];
+  if (!r.skipped && r.attempted > 0) {
+    bits.push(`archived ${r.moved}/${r.attempted}`);
+    const toFailed = r.files.filter((f) => f.moved && f.to === 'failed').length;
+    if (toFailed > 0) bits.push(`${toFailed} to failed`);
+    if (r.failed > 0) bits.push(`${r.failed} could not be moved`);
+  }
+  // Mentioned even when no FILE moved: on a clean run this workbook is the only
+  // thing in `failed`, so silence here would read as "nothing was filed".
+  if (r.rowErrors) {
+    bits.push(r.rowErrors.written
+      ? `${r.rowErrors.rows} unreadable row(s) reported to failed`
+      : `unreadable-row report could not be written (${r.rowErrors.error ?? 'unknown error'})`);
+  }
+  return bits.length > 0 ? bits.join(', ') : undefined;
 }

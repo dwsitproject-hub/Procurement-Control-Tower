@@ -143,6 +143,7 @@ interface ArchiveReport {
   failed: number;
   skipped?: string;
   files: { displayName: string; to: 'succeed' | 'failed'; moved: boolean; error?: string }[];
+  rowErrors?: { written: boolean; path: string; rows: number; cells: number; error?: string };
 }
 
 interface SyncCfg {
@@ -478,7 +479,10 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         the run failed. Each run gets its own dated subfolder (<code>2026-08-20_batch61</code>)
         because these filenames repeat — a flat folder would overwrite yesterday&apos;s export with
         today&apos;s. A file the pipeline could not recognise goes to <strong>failed</strong> even
-        when the run itself succeeded. An <em>incomplete</em> bundle is left alone, so the rest of
+        when the run itself succeeded. The folders are per FILE, so a recognised export goes to{' '}
+        <strong>succeeded</strong> whole even when some of its rows were unreadable — those rows
+        are written into <strong>failed</strong> as a workbook instead, naming each value that
+        could not be read and why. An <em>incomplete</em> bundle is left alone, so the rest of
         the day&apos;s exports can still arrive.
       </p>
       {archive.enabled && cfg.storage.writable === false && (
@@ -553,6 +557,25 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
                 .
               </>
             )}
+          {cfg.lastArchive.rowErrors && (
+            <>
+              {' '}
+              {cfg.lastArchive.rowErrors.written
+                ? (
+                  <>
+                    The <strong>{cfg.lastArchive.rowErrors.rows}</strong> row(s) that could not
+                    be read were written to the failed folder as{' '}
+                    <code>{cfg.lastArchive.rowErrors.path}</code>.
+                  </>
+                )
+                : (
+                  <span className="bs spdel">
+                    The unreadable-row report could not be written:{' '}
+                    {cfg.lastArchive.rowErrors.error ?? 'unknown error'}
+                  </span>
+                )}
+            </>
+          )}
         </p>
       )}
 

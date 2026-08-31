@@ -37,6 +37,7 @@ import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
 import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
 import { PerFeedShareSource, archiveAfterRun, loadShareConfig } from '../modules/ingest/share_poller.js';
+import { archiveSummary } from '../modules/ingest/archive.js';
 import { notify } from '../modules/notify/mailer.js';
 import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
@@ -933,6 +934,7 @@ export function buildRouter(): Router {
           : 'path' in out ? out.path
           : 'reason' in out ? out.reason : undefined,
         batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
+        archive: archiveSummary(archive),
       });
       await notify('ingest.failure', m.subject, m.body);
     }

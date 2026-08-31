@@ -300,10 +300,17 @@ succeeded and failed folders be the same value.
 
 | Run outcome | What happens |
 |---|---|
-| `published` | files the pipeline recognised → `succeed`; files it read but could not identify → `failed` |
+| `published` | files the pipeline recognised → `succeed`; files it read but could not identify → `failed`; any rows that could not be read → `failed`, as a workbook |
 | `failed` | every file in the bundle → `failed` |
 | `incomplete_bundle` | **nothing moves** |
 | `noop_unchanged`, `source_unavailable` | nothing moves |
+
+The folders are per FILE, which is why the row workbook exists: a 65,250-row GR
+export with 11 unreadable rows is a recognised file and belongs in `succeed`, so
+without it those 11 rows had nowhere to land on the share. Only the unreadable
+rows go into it — validation findings flag rows that were ACCEPTED, and
+selecting them needs a requester's data scope that an unattended run does not
+have. The full report, findings included, stays in Admin -> SAP Data Upload.
 
 Leaving an incomplete bundle alone is the important one. The scheduler picks up
 per feed, so the folder legitimately holds a partial set while the rest of the

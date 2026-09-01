@@ -28,6 +28,7 @@
  */
 
 import { query, queryOne } from '../../db/client.js';
+import { spendCategorySql, spendCategorySourceSql } from '@pct/rules';
 
 export interface MasterColumn {
   key: string;
@@ -143,8 +144,9 @@ export const MASTER_PAGES: MasterPageSpec[] = [
     tables: [{
       name: 'Material master',
       relation: 'core.dim_material_master',
-      note: 'From the Mat group export. Third in the spend-category resolution order, '
-        + 'after an exact material rule and a material-group rule.',
+      note: 'From the Mat group export. FOURTH in the category resolution order, after '
+        + 'an exact material rule, a code-prefix rule and a material-group rule — so it '
+        + 'covers what the business mapping does not name.',
       columns: [
         C('materialCode', 'Material'),
         C('description', 'Description'),
@@ -154,34 +156,6 @@ export const MASTER_PAGES: MasterPageSpec[] = [
       from: 'core.dim_material_master',
       orderBy: 'material_code',
       searchCols: ['material_code', 'description', 'category'],
-    }],
-  },
-  {
-    id: 'spend-category',
-    label: 'Spend Category',
-    icon: '🗂️',
-    blurb: 'The business taxonomy the Executive Summary is cut by. Deliberately keyless: '
-      + 'a row matches on material code OR material group, so neither is unique.',
-    tables: [{
-      name: 'Spend category mapping',
-      relation: 'core.dim_spend_category',
-      note: 'Resolution order, most specific first: exact material code, then code '
-        + 'PREFIX (912.001 catches every Bleaching Earth code), then material group, '
-        + 'then the SAP material master, then "(no material code)" or "(unmapped)".',
-      columns: [
-        C('materialCode', 'Material'),
-        C('materialPrefix', 'Code prefix'),
-        C('materialGroup', 'Material group'),
-        C('category', 'Category'),
-        C('sortOrder', 'Sort', true),
-        C('source', 'Source'),
-      ],
-      select: `material_code AS "materialCode", material_prefix AS "materialPrefix",
-               material_group AS "materialGroup",
-               category, sort_order AS "sortOrder", source`,
-      from: 'core.dim_spend_category',
-      orderBy: 'sort_order NULLS LAST, category, material_group NULLS FIRST, material_code NULLS FIRST',
-      searchCols: ['material_code', 'material_prefix', 'material_group', 'category', 'source'],
     }],
   },
   {
@@ -256,25 +230,36 @@ export const MASTER_PAGES: MasterPageSpec[] = [
     id: 'materials',
     label: 'Materials',
     icon: '🧱',
-    blurb: 'Item reference data: the materials seen in the exports, and the groups they '
-      + 'roll up to.',
+    blurb: 'Item reference data, and the spend category each material resolves to. '
+      + 'The category rules used to be their own page; attached to the material they '
+      + 'answer the question people actually ask — why is this one Chemical?',
     tables: [
       {
         name: 'Materials',
         relation: 'core.dim_material',
         note: 'Accumulated from the exports rather than loaded from a master, so a '
-          + 'material appears once it has been requisitioned or ordered.',
+          + 'material appears once it has been requisitioned or ordered. Category is '
+          + 'resolved by the same rule that stamps the orders, and "Category from" says '
+          + 'which step produced it — search it for "code prefix" to see the carve-outs.',
         columns: [
           C('materialCode', 'Material'), C('description', 'Description'),
           C('materialGroup', 'Group'), C('baseUom', 'UOM'),
+          C('category', 'Category'), C('categoryVia', 'Category from'),
           C('firstSeen', 'First seen'), C('lastSeen', 'Last seen'),
         ],
-        select: `material_code AS "materialCode", description,
-                 material_group AS "materialGroup", base_uom AS "baseUom",
-                 first_seen::text AS "firstSeen", last_seen::text AS "lastSeen"`,
-        from: 'core.dim_material',
-        orderBy: 'material_code',
-        searchCols: ['material_code', 'description', 'material_group', 'base_uom'],
+        // Resolved LIVE from the mapping rather than read off the facts: this
+        // master lists every material ever seen, including ones the current
+        // dataset never ordered and which therefore have no fact row to read a
+        // category from. Generated from packages/rules, so it is the same rule
+        // the transform stamps the facts with.
+        select: `m.material_code AS "materialCode", m.description,
+                 m.material_group AS "materialGroup", m.base_uom AS "baseUom",
+                 ${spendCategorySql('m.material_code', 'm.material_group')} AS category,
+                 ${spendCategorySourceSql('m.material_code', 'm.material_group')} AS "categoryVia",
+                 m.first_seen::text AS "firstSeen", m.last_seen::text AS "lastSeen"`,
+        from: 'core.dim_material m',
+        orderBy: 'm.material_code',
+        searchCols: ['m.material_code', 'm.description', 'm.material_group', 'm.base_uom'],
       },
       {
         name: 'Material groups',

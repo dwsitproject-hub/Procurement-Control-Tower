@@ -24,6 +24,7 @@ import {
   isTokenPrice,
   materialCategory,
   sizeBandSql,
+  spendCategorySql,
   priorityLabel,
   isZeroPriceAnomaly,
   lookupMovement,
@@ -1084,33 +1085,10 @@ export async function runTransform(
   await client.query(
     `UPDATE core.fact_po_line f
         SET size_band = ${sizeBandSql('f.net_order_value_idr')},
-            spend_category = COALESCE(
-              -- 1. mapping file, exact material code
-              (SELECT c.category FROM core.dim_spend_category c
-                WHERE c.material_code = f.material_code),
-              -- 2. mapping file, material-code PREFIX (026)
-              --
-              -- The business file carves commodities out of a category by code
-              -- prefix, not by group: every 912.001.* is Bleaching Earth and
-              -- every 912.007.* Sodium Methylate, both of which sit BESIDE
-              -- Chemical rather than inside it. Matched longest-first, so a
-              -- narrower prefix always beats a wider one.
-              (SELECT c.category FROM core.dim_spend_category c
-                WHERE c.material_prefix IS NOT NULL
-                  AND f.material_code LIKE c.material_prefix || '.%'
-                ORDER BY length(c.material_prefix) DESC LIMIT 1),
-              -- 3. mapping file, material group
-              (SELECT c.category FROM core.dim_spend_category c
-                WHERE c.material_group = f.material_group),
-              -- 4. the SAP material master (018)
-              (SELECT m.category FROM core.dim_material_master m
-                WHERE m.material_code = f.material_code AND m.category IS NOT NULL),
-              -- 5/6. visible, not folded into "Others" — 12.8% of committed
-              -- value sits on lines with no material code, and burying that
-              -- inside a business category would misstate every share.
-              CASE WHEN f.material_code IS NULL OR f.material_code = ''
-                     THEN '(no material code)'
-                   ELSE '(unmapped)' END)
+            -- Generated from packages/rules so the Materials master resolves
+            -- every material the same way this stamps the facts. Two queries
+            -- over two populations that must not disagree.
+            spend_category = ${spendCategorySql('f.material_code', 'f.material_group')}
       WHERE f.dataset_version_id = $1`,
     [versionId],
   );

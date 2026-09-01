@@ -20,3 +20,4 @@ export * from './linkage.js';
 export * from './stats.js';
 export * from './category.js';
 export * from './size_band.js';
+export * from './spend_category.js';

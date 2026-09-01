@@ -29,6 +29,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 
 const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
 const AdminTab = lazy(() => import('./components/AdminTab').then((m) => ({ default: m.AdminTab })));
+const MasterTab = lazy(() => import('./components/MasterTab').then((m) => ({ default: m.MasterTab })));
 const CustomTab = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomTab })));
 // Pinned custom cards render on ordinary pages, but only for users who have
 // built one — so they are loaded on demand too. Importing them eagerly kept
@@ -75,12 +76,16 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
     section: 'Data',
     items: [
       { id: 'detail', label: 'Detail Table', icon: '🧾' },
+      { id: 'master', label: 'Master', icon: '📚' },
       { id: 'custom', label: 'Custom', icon: '🧮' },
       { id: 'admin', label: 'Admin', icon: '⚙️' },
       { id: 'datacheck', label: 'Data Quality', icon: '✔️' },
     ],
   },
 ];
+
+/** Tabs that own their own second path segment (/admin/exclusions, /master/vendors). */
+const SUBPATH_TABS = new Set<Tab>(['admin', 'master']);
 
 const TAB_KPIS: Record<Tab, string[]> = {
   /**
@@ -150,6 +155,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
   coupa_src: [],
   coupa_inv: [],
   detail: [],
+  master: [],
   custom: [],
   admin: [],
   datacheck: [],
@@ -186,6 +192,7 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   coupa_src: [],
   coupa_inv: [],
   detail: [],
+  master: [],
   custom: [],
   admin: [],
   datacheck: [],
@@ -449,10 +456,15 @@ export default function App() {
 
   // An unknown or malformed path (/not-a-real-page, /overview/stray) renders
   // the default page — so rewrite the address bar to match what is on screen,
-  // or a reload and a bookmark would disagree with it. Admin is excluded: it
-  // owns its own second segment and canonicalises that itself.
+  // or a reload and a bookmark would disagree with it.
+  //
+  // SUBPATH_TABS are excluded because they own their second segment and
+  // canonicalise it themselves. This was a bare `tab === 'admin'` and adding
+  // Master silently broke it: every /master/<id> was rewritten back to /master
+  // the moment it was set, so the sub-nav appeared to do nothing at all. A
+  // named set is the fix, so the next page with sub-pages cannot forget.
   useEffect(() => {
-    if (!me || tab === 'admin') return;
+    if (!me || SUBPATH_TABS.has(tab)) return;
     if (window.location.pathname !== hrefFor(tab)) navigate(tab, null, true);
   }, [me, tab, route.sub]);
 
@@ -672,6 +684,13 @@ export default function App() {
               canIngest={me.capabilities.includes('ingest')}
               section={route.sub}
               onSection={(id) => navigate('admin', id)}
+            />
+          </PageChunk>
+        ) : tab === 'master' ? (
+          <PageChunk tab={tab}>
+            <MasterTab
+              section={route.sub}
+              onSection={(id) => navigate('master', id)}
             />
           </PageChunk>
         ) : tab === 'detail' ? (

@@ -9,7 +9,8 @@ import { useEffect, useState } from 'react';
  * Each page now has a real path.
  *
  * Hand-rolled rather than pulled from a library: the route space is a flat list
- * of pages plus one optional sub-page under Admin, which is a `pathname` lookup
+ * of pages plus one optional sub-page under Admin and Master, which is a
+ * `pathname` lookup
  * and a `popstate` listener. A router dependency would be more code shipped to
  * the browser than the entire feature.
  *
@@ -20,7 +21,8 @@ import { useEffect, useState } from 'react';
 
 export type Tab =
   | 'execsummary' | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
-  | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'custom' | 'admin' | 'datacheck';
+  | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'master' | 'custom' | 'admin'
+  | 'datacheck';
 
 /**
  * Paths are written for a human reading the address bar, so they follow the
@@ -41,6 +43,7 @@ export const TAB_PATH: Record<Tab, string> = {
   vendors: '/vendor-360',
   governance: '/governance',
   detail: '/detail-table',
+  master: '/master',
   custom: '/custom',
   admin: '/admin',
   datacheck: '/data-quality',

@@ -30,6 +30,7 @@ import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
 import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync } from '../modules/coupa/sync.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
 import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
+import { loadMasterPage, masterIndex } from '../modules/analytics/master.js';
 import { testBody } from '../modules/notify/messages.js';
 import {
   FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastArchive,
@@ -72,6 +73,29 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
     return v;
   };
+
+  // ── Master data (31 Aug 2026) ────────────────────────────────────────────
+  //
+  // Reference code lists, one page per master. `viewer` rather than `analyst`
+  // because these are the least sensitive data in the system — a plant list
+  // says which plants exist, not what was bought at them — and every figure
+  // derived from them stays scoped exactly as it was. The Master tab itself is
+  // gated by the page-permission matrix like every other page.
+
+  r.get('/api/v1/master', role('viewer', async (_req, res) => {
+    const v = await version();
+    res.json({ datasetVersionId: v.id, pages: await masterIndex(v.id) });
+  }));
+
+  r.get('/api/v1/master/:id', role('viewer', async (req, res) => {
+    const v = await version();
+    const q = String((req.query as Record<string, unknown>)['q'] ?? '');
+    // The id selects a fixed query from the registry; it never reaches SQL, so
+    // an unknown id is a 404 rather than a malformed statement.
+    const page = await loadMasterPage(String(req.params.id), v.id, q);
+    if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
+    res.json({ datasetVersionId: v.id, ...page });
+  }));
 
   // ── W3: entity views ─────────────────────────────────────────────────────
 

@@ -72,7 +72,7 @@ export const PAGE_KEYS = [
   'execsummary',
   'executive', 'openitems', 'pr', 'coupa_src', 'po', 'delivery', 'coupa_inv',
   'approvals', 'materials', 'vendors', 'governance',
-  'detail', 'custom', 'admin', 'datacheck',
+  'detail', 'master', 'custom', 'admin', 'datacheck',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -90,6 +90,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   vendors: 'Vendor 360',
   governance: 'Governance',
   detail: 'Detail Table',
+  master: 'Master',
   custom: 'Custom',
   admin: 'Admin',
   datacheck: 'Data Quality',

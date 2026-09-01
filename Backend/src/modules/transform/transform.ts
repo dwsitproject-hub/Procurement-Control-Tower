@@ -162,6 +162,26 @@ export async function runTransform(
   const exDocTypes = new Set(((rules['exclusions.doc_types'] as string[] | undefined) ?? []).map(String));
   const exPurchGroups = new Set(((rules['exclusions.purch_groups'] as string[] | undefined) ?? []).map(String));
   const exPurchOrgs = new Set(((rules['exclusions.purch_orgs'] as string[] | undefined) ?? []).map(String));
+  /**
+   * Held POs and intercompany vendors (user request 31 Aug 2026), excluded
+   * app-wide rather than only on the Executive Summary card that prompted it —
+   * the reader chose one definition of committed value over a page that
+   * disagrees with the Overview.
+   *
+   * Both default OFF, so an upgrade changes no number until someone turns them
+   * on and recomputes.
+   *
+   * The vendor test is a CODE PREFIX, not a name match. "INTERCO" as a substring
+   * of the name also matches INTERCON TERMINAL INDONESIA, a genuine third-party
+   * supplier in this data, and silently dropping a real vendor's orders is worse
+   * than not excluding anything.
+   */
+  const exHoldPos = rules['exclusions.hold_pos'] === true || rules['exclusions.hold_pos'] === 'true';
+  const exIntercoPrefixes = ((rules['exclusions.interco_vendor_prefixes'] as string[] | undefined) ?? [])
+    .map((x) => String(x).trim().toUpperCase())
+    .filter((x) => x !== '');
+  const isInterco = (code: string | null): boolean =>
+    code !== null && exIntercoPrefixes.some((pre) => code.toUpperCase().startsWith(pre));
   let excludedPoLines = 0;
   let excludedPrItems = 0;
   const excludedPoKeys = new Set<string>();
@@ -510,6 +530,33 @@ export async function runTransform(
       },
       releasePolicy,
     );
+
+    /**
+     * Held and intercompany lines, dropped here rather than in the header-level
+     * block above for two different reasons.
+     *
+     * HOLD is tested on the DERIVED status, not on the raw `incomplete` flag.
+     * They are not the same set: 264 rows carry the flag but only 241 resolve to
+     * HOLD PO, because deletion takes precedence in rowStatus. Excluding on the
+     * flag would drop 23 lines the reader would call deleted, not held.
+     *
+     * INTERCO needs supplier.code, which is parsed from the export's combined
+     * supplier field further up this loop.
+     *
+     * The document is NOT added to excludedPoNos, so the release feeds keep its
+     * approval steps — the same bias the header-level exclusions take, stated
+     * there: a document with any surviving line keeps its approvals rather than
+     * silently losing them.
+     */
+    const lineExclusion = exHoldPos && st.status === 'HOLD PO' ? 'status=HOLD PO'
+      : isInterco(supplier.code) ? `interco_vendor=${supplier.code}`
+        : null;
+    if (lineExclusion !== null) {
+      excludedPoLines += 1;
+      excludedPoKeys.add(key);
+      excludedDocRows.push(['po', poNo, poItem, lineExclusion]);
+      continue;
+    }
 
     const deliveryDate = s(p.deliveryDate);
     const receiptDate = agg?.receiptDate ?? null;

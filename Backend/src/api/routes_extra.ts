@@ -776,6 +776,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.put('/api/v1/admin/exclusions', role('admin', async (req, res, ctx) => {
     const b = (req.body ?? {}) as {
       docTypes?: unknown; purchGroups?: unknown; purchOrgs?: unknown; coupaPurchGroups?: unknown;
+      holdPos?: unknown; intercoVendorPrefixes?: unknown;
     };
     const list = (x: unknown, cap = 50): string[] =>
       Array.isArray(x) ? x.map(String).map((v2) => v2.trim()).filter((v2) => v2 !== '').slice(0, cap) : [];
@@ -786,6 +787,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       // A larger cap: Coupa carries far more purchasing groups than the SAP
       // facts do, and the first real request named 16 at once.
       coupaPurchGroups: list(b.coupaPurchGroups, 300),
+      holdPos: b.holdPos === true || b.holdPos === 'true',
+      intercoVendorPrefixes: list(b.intercoVendorPrefixes),
     };
 
     const before = await loadExclusions();
@@ -799,8 +802,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // recomputing every fact when only the Coupa list moved (that list is
     // enforced by views and is live the moment it is committed).
     const sapChanged =
-      JSON.stringify([before.docTypes, before.purchGroups, before.purchOrgs])
-      !== JSON.stringify([next.docTypes, next.purchGroups, next.purchOrgs]);
+      JSON.stringify([before.docTypes, before.purchGroups, before.purchOrgs,
+        before.holdPos, before.intercoVendorPrefixes])
+      !== JSON.stringify([next.docTypes, next.purchGroups, next.purchOrgs,
+        next.holdPos, next.intercoVendorPrefixes]);
     res.json({ saved: next, appliesFromNextRecompute: sapChanged, recomputeRequired: sapChanged });
   }));
 

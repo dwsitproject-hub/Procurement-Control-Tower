@@ -21,6 +21,24 @@ export interface Exclusions {
   purchGroups: string[];
   purchOrgs: string[];
   /**
+   * Drop PO lines whose derived status is HOLD PO (user request 31 Aug 2026).
+   *
+   * A flag rather than a list: HOLD PO is one value of a derived status, not a
+   * code an administrator can enumerate. Tested on the DERIVED status, not on
+   * the export's `incomplete` column — deletion takes precedence in rowStatus,
+   * so the two sets differ.
+   */
+  holdPos: boolean;
+  /**
+   * Vendor CODE prefixes treated as intercompany, e.g. ['LN21'].
+   *
+   * Prefixes, not name matching: "INTERCO" as a substring of the vendor name
+   * also hits INTERCON TERMINAL INDONESIA, a genuine third-party supplier, and
+   * dropping a real vendor's orders silently is worse than excluding nothing.
+   * Empty by default, so this excludes nothing until it is filled in.
+   */
+  intercoVendorPrefixes: string[];
+  /**
    * Purchasing groups excluded from the COUPA store only (019).
    *
    * Separate from purchGroups on purpose. The three lists above are applied at
@@ -38,6 +56,7 @@ export interface Exclusions {
 export const EXCLUSION_KEYS = [
   'exclusions.doc_types', 'exclusions.purch_groups', 'exclusions.purch_orgs',
   'exclusions.coupa_purch_groups',
+  'exclusions.hold_pos', 'exclusions.interco_vendor_prefixes',
 ] as const;
 
 export async function loadExclusions(): Promise<Exclusions> {
@@ -52,11 +71,14 @@ export async function loadExclusions(): Promise<Exclusions> {
     const v = rows.find((r) => r.rule_key === k)?.rule_value;
     return Array.isArray(v) ? v.map(String) : [];
   };
+  const rawHold = rows.find((r) => r.rule_key === 'exclusions.hold_pos')?.rule_value;
   return {
     docTypes: get('exclusions.doc_types'),
     purchGroups: get('exclusions.purch_groups'),
     purchOrgs: get('exclusions.purch_orgs'),
     coupaPurchGroups: get('exclusions.coupa_purch_groups'),
+    holdPos: rawHold === true || rawHold === 'true',
+    intercoVendorPrefixes: get('exclusions.interco_vendor_prefixes'),
   };
 }
 
@@ -67,6 +89,11 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
     ['exclusions.purch_groups', e.purchGroups],
     ['exclusions.purch_orgs', e.purchOrgs],
     ['exclusions.coupa_purch_groups', e.coupaPurchGroups],
+    // Uppercased on the way in: the transform compares uppercased codes, and a
+    // prefix typed in lower case would otherwise silently match nothing.
+    ['exclusions.interco_vendor_prefixes',
+      e.intercoVendorPrefixes.map((x) => x.trim().toUpperCase()).filter((x) => x !== '')],
+    ['exclusions.hold_pos', e.holdPos],
   ] as const) {
     await exec(
       `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)

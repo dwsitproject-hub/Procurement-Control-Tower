@@ -34,6 +34,10 @@ interface Exclusions {
   purchOrgs: string[];
   /** Coupa-only (019). Enforced by views, so it needs no recompute. */
   coupaPurchGroups: string[];
+  /** Drop lines whose derived status is HOLD PO. Needs a recompute. */
+  holdPos: boolean;
+  /** Vendor CODE prefixes treated as intercompany. Needs a recompute. */
+  intercoVendorPrefixes: string[];
 }
 
 interface CoupaOpt {
@@ -161,7 +165,17 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   if (msg && !current) return <div className="panel"><h2>Data exclusions</h2><p className="note">{msg}</p></div>;
   if (!current || !options) return <div className="panel"><h2>Data exclusions</h2><div className="spinner" /></div>;
 
-  const toggle = (key: keyof Exclusions, v: string) => {
+  /**
+   * The list-valued exclusion keys.
+   *
+   * Named rather than `keyof Exclusions` because holdPos is a boolean: the
+   * generic facet helpers below index the value as an array, and TypeScript
+   * caught the mismatch the moment the flag was added.
+   */
+  type ListKey = 'docTypes' | 'purchGroups' | 'purchOrgs' | 'coupaPurchGroups'
+    | 'intercoVendorPrefixes';
+
+  const toggle = (key: ListKey, v: string) => {
     setCurrent((c) => {
       if (!c) return c;
       const list = c[key];
@@ -236,7 +250,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     }
   };
 
-  const group = (label: string, key: keyof Exclusions, opts: Opt[]) => (
+  const group = (label: string, key: ListKey, opts: Opt[]) => (
     <details className="dt-facet" open={current[key].length > 0}>
       <summary>
         {label}
@@ -307,6 +321,65 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     </details>
   );
 
+  /**
+   * Held POs and intercompany vendors.
+   *
+   * Not a facet list like the three above: HOLD PO is one value of a derived
+   * status rather than a code an administrator can pick from the data, and the
+   * intercompany rule is a vendor-code PREFIX, which is free text — there is no
+   * finite option list to tick.
+   */
+  const holdAndInterco = () => (
+    <details className="dt-facet" open={current.holdPos || current.intercoVendorPrefixes.length > 0}>
+      <summary>
+        Held POs and intercompany
+        {(current.holdPos || current.intercoVendorPrefixes.length > 0) && (
+          <span className="dt-badge">
+            {(current.holdPos ? 1 : 0) + current.intercoVendorPrefixes.length}
+          </span>
+        )}
+      </summary>
+      <div className="dt-facet-list" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '.5rem' }}>
+        <label className="dt-chip" style={{ alignSelf: 'flex-start' }}>
+          <input
+            type="checkbox"
+            disabled={!isAdmin}
+            checked={current.holdPos}
+            onChange={() => {
+              setCurrent({ ...current, holdPos: !current.holdPos });
+              setDirty(true);
+            }}
+          />
+          Exclude PO lines on <strong>HOLD</strong>{' '}
+          <span className="muted">(derived status “HOLD PO”)</span>
+        </label>
+        <label className="cu-field" style={{ maxWidth: '32rem' }}>
+          Intercompany vendor code prefixes
+          <input
+            className="gf-search-in"
+            disabled={!isAdmin}
+            placeholder="e.g. LN21, LN29 — comma separated"
+            value={current.intercoVendorPrefixes.join(', ')}
+            onChange={(e) => {
+              setCurrent({
+                ...current,
+                intercoVendorPrefixes: e.target.value.split(',')
+                  .map((x) => x.trim().toUpperCase()).filter((x) => x !== ''),
+              });
+              setDirty(true);
+            }}
+          />
+        </label>
+        <p className="note" style={{ margin: 0 }}>
+          A <strong>code prefix</strong>, not a name match. Matching the name on “INTERCO” also
+          hits <code>INTERCON TERMINAL INDONESIA</code>, a genuine third-party supplier, so a
+          name rule would silently drop a real vendor&apos;s orders. Leave this empty and nothing
+          is excluded.
+        </p>
+      </div>
+    </details>
+  );
+
   return (
     <div className="panel">
       <h2>🎛 Data exclusions</h2>
@@ -324,6 +397,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         {group('Document types', 'docTypes', options.docTypes)}
         {group('Purchasing groups', 'purchGroups', options.purchGroups)}
         {group('Purchasing orgs', 'purchOrgs', options.purchOrgs)}
+        {holdAndInterco()}
         {coupaGroup()}
       </div>
       <p className="note" style={{ marginTop: '.5rem' }}>

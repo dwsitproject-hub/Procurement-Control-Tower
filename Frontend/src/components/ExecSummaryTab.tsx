@@ -354,10 +354,81 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
           </div>
         );
       })}
+      {/*
+        The numbers, in full.
+
+        The bars answer "which month was big and roughly of what"; they cannot
+        answer "how much Coal in June", because a category worth 0.3% of a month
+        is a two-pixel segment with nowhere to put a label and nowhere to click
+        either. So every figure is also here, and the cells carry the same
+        click-through the segments do — which is the only way to reach the small
+        slices at all.
+      */}
+      <div className="table-wrap xs-mc-tbl-wrap">
+        <table className="data dd-tbl xs-mc-tbl">
+          <thead>
+            <tr>
+              <th scope="col" className="xs-mc-th-cat">Category</th>
+              {months.map(([mk, m]) => (
+                <th scope="col" key={mk} className="xs-mc-num">{m.label.replace(' 20', ' ')}</th>
+              ))}
+              <th scope="col" className="xs-mc-num xs-mc-tot">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {legend.map(([cat, catTotal]) => (
+              <tr key={cat}>
+                <th scope="row" className="xs-mc-th-cat">
+                  <i className="xs-key" style={{ background: categoryColor(cat) }} aria-hidden="true" />
+                  {cat}
+                </th>
+                {months.map(([mk, m]) => {
+                  const cell = m.cells.find((c) => c.category === cat);
+                  if (!cell) {
+                    return <td key={mk} className="xs-mc-num muted">&mdash;</td>;
+                  }
+                  return (
+                    <td key={mk} className="xs-mc-num">
+                      <button
+                        type="button"
+                        className="xs-mc-cell"
+                        title={`${m.label} — ${cat}: ${money(cell.value)}, ${formatNumber(cell.rowCount)} delivered PO lines`}
+                        onClick={() => onFocus(
+                          `${cat} — delivered in ${m.label}`,
+                          `${money(cell.value)} · ${formatNumber(cell.rowCount)} PO lines`,
+                          `spendCategory=${encodeURIComponent(cat)}`
+                          + `&monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
+                        )}
+                      >
+                        {money(cell.value)}
+                      </button>
+                    </td>
+                  );
+                })}
+                <td className="xs-mc-num xs-mc-tot">{money(catTotal)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <th scope="row" className="xs-mc-th-cat">All categories</th>
+              {months.map(([mk, m]) => (
+                <td key={mk} className="xs-mc-num">{money(m.total)}</td>
+              ))}
+              <td className="xs-mc-num xs-mc-tot">
+                {money(months.reduce((a, [, m]) => a + m.total, 0))}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
       <p className="note" style={{ marginTop: '.5rem' }}>
         Delivered value only, so each month counts what was received rather than what was
         ordered. Every bar shares one scale — the widest month is the largest — and in-bar
-        figures are {isIdr ? 'billions of rupiah' : 'millions of USD'}.
+        figures are {isIdr ? 'billions of rupiah' : 'millions of USD'}, printed only where
+        the segment is wide enough to hold them. The table below carries every figure in
+        full, and its cells open the same slice the segments do.
       </p>
     </div>
   );

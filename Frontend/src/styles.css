@@ -731,6 +731,35 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .ms-sort-on .ms-arrow { opacity: 1; }
 th[style*="right"] .ms-sort { justify-content: flex-end; }
 
+/* Monthly Spend Category: the figures behind the bars.
+   A category worth a fraction of a month is a two-pixel segment with nowhere to
+   print a label and nothing to click, so the table carries every number and the
+   same click-through. */
+.xs-mc-tbl-wrap { margin-top: .9rem; }
+.xs-mc-tbl { font-size: .72rem; }
+.xs-mc-tbl th, .xs-mc-tbl td { padding: .3rem .5rem; white-space: nowrap; }
+/* Sticky category column: with a column per month the table scrolls sideways,
+   and a scrolled row whose label has left the screen is unreadable. */
+.xs-mc-th-cat {
+  position: sticky; left: 0; z-index: 1;
+  background: var(--panel); text-align: left; font-weight: 600;
+  display: table-cell;
+}
+.xs-mc-tbl thead .xs-mc-th-cat { background: var(--panel); }
+.xs-mc-th-cat .xs-key { margin-right: .35rem; vertical-align: baseline; }
+.xs-mc-num { text-align: right; font-variant-numeric: tabular-nums; }
+.xs-mc-tot { font-weight: 700; border-left: 1px solid var(--border); }
+.xs-mc-tbl tfoot td, .xs-mc-tbl tfoot th {
+  border-top: 2px solid var(--border); font-weight: 700;
+}
+/* The cell is the control, so the whole figure is the hit area. */
+.xs-mc-cell {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.xs-mc-cell:hover { color: var(--accent); text-decoration: underline; }
+.xs-mc-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* Monthly Spend Category: one stacked bar per month, stacked by category.
    Grid rather than flex so the quarter, month and total columns line up down
    the panel however long a month label or a total is. */

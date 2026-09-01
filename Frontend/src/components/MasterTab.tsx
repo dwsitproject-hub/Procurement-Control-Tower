@@ -27,6 +27,8 @@ interface MasterTable {
   totalUnfiltered: number;
   truncated: boolean;
   versionScoped: boolean;
+  sortKey: string | null;
+  sortDir: 'asc' | 'desc';
 }
 
 interface MasterPage {
@@ -52,6 +54,16 @@ export function MasterTab({ section, onSection }: {
    *  not fire a query per keystroke against a 20,000-row master. */
   const [term, setTerm] = useState('');
   const [applied, setApplied] = useState('');
+  /**
+   * Sort, as one piece of state for the whole page.
+   *
+   * A page can show three tables (Org Structure does) whose column keys do not
+   * overlap, and the server ignores a key a table does not have — so one sort
+   * applies to whichever table owns that column and the others keep their
+   * natural order. That is what a reader clicking a header in one table
+   * expects: the other tables should not reshuffle.
+   */
+  const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
 
   useEffect(() => {
     api.get<{ pages: IndexEntry[] }>('/api/v1/master')
@@ -70,7 +82,7 @@ export function MasterTab({ section, onSection }: {
 
   // A new master starts with a clear search: carrying a vendor code into the
   // document-type list shows an empty table and looks like missing data.
-  useEffect(() => { setTerm(''); setApplied(''); }, [active]);
+  useEffect(() => { setTerm(''); setApplied(''); setSort(null); }, [active]);
 
   useEffect(() => {
     const t = setTimeout(() => setApplied(term), 250);
@@ -81,13 +93,16 @@ export function MasterTab({ section, onSection }: {
     if (active === null) return;
     let dead = false;
     setBusy(true);
-    const qs = applied.trim() === '' ? '' : `?q=${encodeURIComponent(applied.trim())}`;
+    const p = new URLSearchParams();
+    if (applied.trim() !== '') p.set('q', applied.trim());
+    if (sort) { p.set('sort', sort.key); p.set('dir', sort.dir); }
+    const qs = p.toString() === '' ? '' : `?${p.toString()}`;
     api.get<MasterPage>(`/api/v1/master/${active}${qs}`)
       .then((d) => { if (!dead) { setPage(d); setErr(null); } })
       .catch((e: Error) => { if (!dead) setErr(e.message); })
       .finally(() => { if (!dead) setBusy(false); });
     return () => { dead = true; };
-  }, [active, applied]);
+  }, [active, applied, sort]);
 
   useEffect(() => load(), [load]);
 
@@ -192,9 +207,34 @@ export function MasterTab({ section, onSection }: {
             <div className="table-wrap">
               <table className="data dd-tbl">
                 <thead>
-                  <tr>{t.columns.map((c) => (
-                    <th key={c.key} style={c.numeric ? { textAlign: 'right' } : undefined}>{c.label}</th>
-                  ))}</tr>
+                  <tr>{t.columns.map((c) => {
+                    const on = t.sortKey === c.key;
+                    return (
+                      <th key={c.key} style={c.numeric ? { textAlign: 'right' } : undefined}
+                          aria-sort={on ? (t.sortDir === 'desc' ? 'descending' : 'ascending') : 'none'}>
+                        <button
+                          type="button"
+                          className={`ms-sort${on ? ' ms-sort-on' : ''}`}
+                          // Third click clears rather than cycling forever back to
+                          // ascending: returning to the table's own order is a
+                          // state the reader can otherwise never get back to.
+                          onClick={() => setSort(
+                            !on ? { key: c.key, dir: 'asc' }
+                              : t.sortDir === 'asc' ? { key: c.key, dir: 'desc' }
+                                : null,
+                          )}
+                          title={!on ? `Sort by ${c.label}`
+                            : t.sortDir === 'asc' ? `Sort by ${c.label}, descending`
+                              : 'Back to the default order'}
+                        >
+                          {c.label}
+                          <span className="ms-arrow" aria-hidden="true">
+                            {on ? (t.sortDir === 'desc' ? '▼' : '▲') : '↕'}
+                          </span>
+                        </button>
+                      </th>
+                    );
+                  })}</tr>
                 </thead>
                 <tbody>
                   {t.rows.map((row, i) => (

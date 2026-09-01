@@ -89,10 +89,16 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
 
   r.get('/api/v1/master/:id', role('viewer', async (req, res) => {
     const v = await version();
-    const q = String((req.query as Record<string, unknown>)['q'] ?? '');
+    const query = req.query as Record<string, unknown>;
+    const q = String(query['q'] ?? '');
+    const sortKey = String(query['sort'] ?? '').trim();
+    const sort = sortKey === ''
+      ? undefined
+      : { key: sortKey, dir: String(query['dir'] ?? 'asc') === 'desc' ? 'desc' as const : 'asc' as const };
     // The id selects a fixed query from the registry; it never reaches SQL, so
-    // an unknown id is a 404 rather than a malformed statement.
-    const page = await loadMasterPage(String(req.params.id), v.id, q);
+    // an unknown id is a 404 rather than a malformed statement. The sort key is
+    // checked against the page's own columns for the same reason.
+    const page = await loadMasterPage(String(req.params.id), v.id, q, sort);
     if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
     res.json({ datasetVersionId: v.id, ...page });
   }));

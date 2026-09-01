@@ -165,20 +165,23 @@ export const MASTER_PAGES: MasterPageSpec[] = [
     tables: [{
       name: 'Spend category mapping',
       relation: 'core.dim_spend_category',
-      note: 'Resolution order, most specific first: exact material code, then material '
-        + 'group, then the SAP material master, then "(no material code)" or "(unmapped)".',
+      note: 'Resolution order, most specific first: exact material code, then code '
+        + 'PREFIX (912.001 catches every Bleaching Earth code), then material group, '
+        + 'then the SAP material master, then "(no material code)" or "(unmapped)".',
       columns: [
         C('materialCode', 'Material'),
+        C('materialPrefix', 'Code prefix'),
         C('materialGroup', 'Material group'),
         C('category', 'Category'),
         C('sortOrder', 'Sort', true),
         C('source', 'Source'),
       ],
-      select: `material_code AS "materialCode", material_group AS "materialGroup",
+      select: `material_code AS "materialCode", material_prefix AS "materialPrefix",
+               material_group AS "materialGroup",
                category, sort_order AS "sortOrder", source`,
       from: 'core.dim_spend_category',
       orderBy: 'sort_order NULLS LAST, category, material_group NULLS FIRST, material_code NULLS FIRST',
-      searchCols: ['material_code', 'material_group', 'category', 'source'],
+      searchCols: ['material_code', 'material_prefix', 'material_group', 'category', 'source'],
     }],
   },
   {
@@ -331,17 +334,30 @@ export const MASTER_PAGES: MasterPageSpec[] = [
     tables: [{
       name: 'SAP users',
       relation: 'core.dim_sap_user',
-      note: 'From the ZUSER export. Keyed by client and user id, because the same id can '
-        + 'exist in more than one SAP client.',
+      note: 'From the ZUSER export, keyed by client and user id because the same id can '
+        + 'exist in more than one SAP client. Purchasing Organization and HO/Unit come '
+        + 'from the business file, matched on user id; a buyer acting for several orgs '
+        + 'shows all of them on one row. Blank means the user is not in that file.',
       columns: [
         C('client', 'Client'), C('userId', 'User id'),
         C('firstName', 'First name'), C('lastName', 'Last name'), C('displayName', 'Display name'),
+        C('purchOrgs', 'Purchasing Organization'), C('hoUnit', 'HO/Unit'),
       ],
-      select: `client, user_id AS "userId", first_name AS "firstName",
-               last_name AS "lastName", display_name AS "displayName"`,
-      from: 'core.dim_sap_user',
-      orderBy: 'client, user_id',
-      searchCols: ['client', 'user_id', 'first_name', 'last_name', 'display_name'],
+      // The org list is AGGREGATED, not joined row-by-row: a buyer can act for
+      // several purchasing orgs (one covers four), and fanning the user list out
+      // to one row per org would turn a 2,073-row master into a table where the
+      // same person appears four times. HO/Unit takes min() because it is a
+      // per-user attribute in the source and no user in the file disagrees with
+      // themselves across their orgs.
+      select: `u.client, u.user_id AS "userId", u.first_name AS "firstName",
+               u.last_name AS "lastName", u.display_name AS "displayName",
+               (SELECT string_agg(DISTINCT o.purch_org, ', ' ORDER BY o.purch_org)
+                  FROM core.dim_user_purch_org o WHERE o.user_id = u.user_id) AS "purchOrgs",
+               (SELECT min(o.ho_unit) FROM core.dim_user_purch_org o
+                 WHERE o.user_id = u.user_id) AS "hoUnit"`,
+      from: 'core.dim_sap_user u',
+      orderBy: 'u.client, u.user_id',
+      searchCols: ['u.client', 'u.user_id', 'u.first_name', 'u.last_name', 'u.display_name'],
     }],
   },
 ];
@@ -363,6 +379,9 @@ export interface MasterTableResult {
   totalUnfiltered: number;
   truncated: boolean;
   versionScoped: boolean;
+  /** Echoed so the UI marks the right header, including when a key was rejected. */
+  sortKey: string | null;
+  sortDir: 'asc' | 'desc';
 }
 
 /**
@@ -376,6 +395,7 @@ export async function loadMasterPage(
   id: string,
   versionId: number,
   q: string,
+  sort?: { key: string; dir: 'asc' | 'desc' },
 ): Promise<{ id: string; label: string; blurb: string; tables: MasterTableResult[] } | null> {
   const page = MASTER_BY_ID.get(id);
   if (!page) return null;
@@ -414,8 +434,29 @@ export async function loadMasterPage(
     );
     const total = counted?.n ?? 0;
 
+    /*
+     * Sorting.
+     *
+     * The requested key must be one this table actually returns — checked
+     * against the registry's own column list, so a crafted `sort` can name
+     * nothing the page does not already show. The direction is narrowed to two
+     * literals rather than interpolated.
+     *
+     * Ordering is by the OUTPUT ALIAS, which Postgres allows and which is the
+     * only thing that works for the aggregated columns: "purchOrgs" is a
+     * subquery in the select list and has no underlying column to name.
+     *
+     * NULLS LAST in both directions. A master is full of optional attributes,
+     * and a descending sort that opens with a screen of blanks buries the rows
+     * the reader clicked the header to find.
+     */
+    const sortable = sort !== undefined && t.columns.some((c) => c.key === sort.key);
+    const order = sortable
+      ? `"${sort!.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST`
+      : t.orderBy;
+
     const rows = await query<Record<string, unknown>>(
-      `SELECT ${t.select} FROM ${t.from} ${where} ORDER BY ${t.orderBy} LIMIT ${MAX_ROWS}`,
+      `SELECT ${t.select} FROM ${t.from} ${where} ORDER BY ${order} LIMIT ${MAX_ROWS}`,
       [...params],
     );
 
@@ -429,6 +470,8 @@ export async function loadMasterPage(
       totalUnfiltered: unfiltered?.n ?? 0,
       truncated: total > rows.length,
       versionScoped: t.versionScoped === true,
+      sortKey: sortable ? sort!.key : null,
+      sortDir: sortable && sort!.dir === 'desc' ? 'desc' : 'asc',
     });
   }
 

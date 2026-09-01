@@ -715,6 +715,22 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .xs-tp-name { font-size: .55rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .xs-tp-val { font-size: .72rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
 
+/* Master data: sortable column headers. The whole header is the control, so the
+   hit area matches what the reader sees rather than a small arrow beside it. */
+.ms-sort {
+  display: inline-flex; align-items: center; gap: .3rem;
+  width: 100%; background: none; border: 0; padding: 0;
+  font: inherit; color: inherit; text-align: inherit; cursor: pointer;
+}
+.ms-sort:hover { color: var(--accent); }
+.ms-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ms-sort-on { color: var(--accent); font-weight: 700; }
+/* The idle indicator stays faint so a sorted column is obvious at a glance,
+   but present on every header so the affordance is discoverable. */
+.ms-arrow { font-size: .6em; opacity: .35; }
+.ms-sort-on .ms-arrow { opacity: 1; }
+th[style*="right"] .ms-sort { justify-content: flex-end; }
+
 /* Monthly Spend Category: one stacked bar per month, stacked by category.
    Grid rather than flex so the quarter, month and total columns line up down
    the panel however long a month label or a total is. */

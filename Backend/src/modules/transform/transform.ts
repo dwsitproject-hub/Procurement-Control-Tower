@@ -1088,13 +1088,24 @@ export async function runTransform(
               -- 1. mapping file, exact material code
               (SELECT c.category FROM core.dim_spend_category c
                 WHERE c.material_code = f.material_code),
-              -- 2. mapping file, material group
+              -- 2. mapping file, material-code PREFIX (026)
+              --
+              -- The business file carves commodities out of a category by code
+              -- prefix, not by group: every 912.001.* is Bleaching Earth and
+              -- every 912.007.* Sodium Methylate, both of which sit BESIDE
+              -- Chemical rather than inside it. Matched longest-first, so a
+              -- narrower prefix always beats a wider one.
+              (SELECT c.category FROM core.dim_spend_category c
+                WHERE c.material_prefix IS NOT NULL
+                  AND f.material_code LIKE c.material_prefix || '.%'
+                ORDER BY length(c.material_prefix) DESC LIMIT 1),
+              -- 3. mapping file, material group
               (SELECT c.category FROM core.dim_spend_category c
                 WHERE c.material_group = f.material_group),
-              -- 3. the SAP material master (018)
+              -- 4. the SAP material master (018)
               (SELECT m.category FROM core.dim_material_master m
                 WHERE m.material_code = f.material_code AND m.category IS NOT NULL),
-              -- 4/5. visible, not folded into "Others" — 12.8% of committed
+              -- 5/6. visible, not folded into "Others" — 12.8% of committed
               -- value sits on lines with no material code, and burying that
               -- inside a business category would misstate every share.
               CASE WHEN f.material_code IS NULL OR f.material_code = ''

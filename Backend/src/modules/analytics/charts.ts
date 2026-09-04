@@ -33,6 +33,30 @@ export const CHART_META: ChartMeta[] = [
     ],
   },
   {
+    chartId: 'exec_ho_site',
+    title: 'Managed by HO or Site',
+    tab: 'execsummary',
+    unit: 'usd',
+    grain: 'po_line',
+    notes: [
+      'HO or Site comes from the SAP user who raised the order (created_by)',
+      'A creator not in the business file shows as (unmapped) rather than being dropped',
+      'Bucket is "YYYY-MM|BAND"; the panel pivots it',
+    ],
+  },
+  {
+    chartId: 'exec_pr_outstanding',
+    title: 'Outstanding PR by aging',
+    tab: 'execsummary',
+    unit: 'count',
+    grain: 'pr_item',
+    notes: [
+      'Reconstructed per DAY: raised on or before that day, no PO yet on that day',
+      'Aging is measured on each day, not once at the as-of date',
+      'Window is the current and previous month of the dataset as-of date',
+    ],
+  },
+  {
     chartId: 'exec_committed_by_month',
     title: 'Committed value and PO lines by month',
     tab: 'execsummary',

@@ -24,7 +24,7 @@ import {
   isTokenPrice,
   materialCategory,
   sizeBandSql,
-  spendCategorySql,
+  spendCategoryWithPlantSql,
   priorityLabel,
   isZeroPriceAnomaly,
   lookupMovement,
@@ -1088,7 +1088,7 @@ export async function runTransform(
             -- Generated from packages/rules so the Materials master resolves
             -- every material the same way this stamps the facts. Two queries
             -- over two populations that must not disagree.
-            spend_category = ${spendCategorySql('f.material_code', 'f.material_group')}
+            spend_category = ${spendCategoryWithPlantSql('f.material_code', 'f.material_group', 'f.plant')}
       WHERE f.dataset_version_id = $1`,
     [versionId],
   );

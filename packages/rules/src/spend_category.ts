@@ -104,3 +104,34 @@ export function spendCategorySourceSql(codeCol: string, groupCol: string): strin
             ELSE 'unmapped'
           END`;
 }
+
+/**
+ * The CAPEX split, which is a property of the PLANT rather than the material.
+ *
+ * Requested 1 Sep 2026: capital spend divides into project and operational work,
+ * and the business tells them apart by the plant code — a '9' in the third
+ * position means a project plant (EU92, EU93, PM91), anything else is
+ * operational.
+ *
+ * This is deliberately NOT folded into spendCategorySql. That function answers
+ * "what category is this material", and the Materials master calls it for
+ * materials that belong to no plant at all — a material is not project or
+ * operational, a LINE is. So the split is applied on top, only where a plant
+ * exists, and the master page says so rather than showing a CAPEX answer it
+ * cannot know.
+ *
+ * A line whose plant is missing or shorter than three characters stays
+ * operational: substr() returns '' there, which is not '9', and inventing a
+ * project classification from an absent plant would be worse than the default.
+ */
+export function spendCategoryWithPlantSql(
+  codeCol: string,
+  groupCol: string,
+  plantCol: string,
+): string {
+  const base = spendCategorySql(codeCol, groupCol);
+  return `CASE WHEN (${base}) IN ('CAPEX OPS', 'CAPEX', 'CAPEX PROJ')
+                 THEN CASE WHEN substr(COALESCE(${plantCol}, ''), 3, 1) = '9'
+                             THEN 'CAPEX PROJ' ELSE 'CAPEX OPS' END
+               ELSE (${base}) END`;
+}

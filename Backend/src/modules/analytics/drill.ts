@@ -332,6 +332,65 @@ const FILTERS: Record<string, Compiler> = {
   wbsStatus: (v, a, ps) => `${a}.wbs_status = ${p(ps, String(v))}`,
   urgencyIn: (v, a, ps) => `${a}.urgency = ANY(${p(ps, (v as unknown[]).map(Number))})`,
   agingGt: (v, a, ps) => `${a}.aging_days > ${p(ps, Number(v))}`,
+  /**
+   * Whether the person who RAISED the order sits at Head Office or a site.
+   *
+   * Looked up from the business file by created_by. min() because a buyer can
+   * act for several purchasing orgs; none in the file disagrees with themselves
+   * about HO/Unit, so this picks the single value rather than inventing a
+   * tie-break.
+   *
+   * '(unmapped)' is a real band, not an absence: the panel shows creators who
+   * are not in the file rather than dropping them, so the drill has to be able
+   * to select them too. Without this the month filter alone returned every band
+   * and the parity sweep reported 54 mismatches.
+   */
+  createdByHoUnit: (v, a, ps) => {
+    const band = String(v);
+    const sub = `(SELECT min(hu_.ho_unit) FROM core.dim_user_purch_org hu_
+                   WHERE hu_.user_id = ${a}.created_by)`;
+    return band === '(unmapped)' ? `${sub} IS NULL` : `${sub} = ${p(ps, band)}`;
+  },
+  /**
+   * "Outstanding on a given DAY, in a given aging band on that day."
+   *
+   * The Outstanding-PR panel reconstructs history: it asks, for each day, which
+   * requisitions had been raised but had no purchase order YET. That is not
+   * `aging_days` — which is measured once, at the dataset's as-of date — so a
+   * drill built from aging_days would select a different set from the bar it
+   * came from and the parity sweep would say so.
+   *
+   * Outstanding on D means: raised on or before D, and no PO line for that
+   * requisition dated on or before D. Aging on D is D minus the requisition
+   * date, which is why the band has to travel with the date rather than being a
+   * separate filter.
+   */
+  prOutstandingOn: (v, a, ps) => {
+    const o = (v ?? {}) as { asOf?: unknown; band?: unknown };
+    const asOf = String(o.asOf ?? '');
+    const band = String(o.band ?? '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error(`bad asOf: ${asOf}`);
+    const d = p(ps, asOf);
+    const age = `(${d}::date - ${a}.requisition_date::date)`;
+    const bands: Record<string, string> = {
+      '>31': `${age} >= 31`,
+      '22-30': `${age} BETWEEN 22 AND 30`,
+      '15-21': `${age} BETWEEN 15 AND 21`,
+      '8-14': `${age} BETWEEN 8 AND 14`,
+      '<7': `${age} <= 7`,
+    };
+    const clause = bands[band];
+    if (!clause) throw new Error(`unknown outstanding band: ${band}`);
+    return `${a}.requisition_date IS NOT NULL
+            AND ${a}.requisition_date::date <= ${d}::date
+            AND ${clause}
+            AND NOT EXISTS (
+              SELECT 1 FROM core.fact_po_line o_
+               WHERE o_.dataset_version_id = ${a}.dataset_version_id
+                 AND o_.pr_no = ${a}.pr_no AND o_.pr_item = ${a}.pr_item
+                 AND o_.document_date IS NOT NULL
+                 AND o_.document_date::date <= ${d}::date)`;
+  },
   agingBand: (v, a, ps) => {
     const band = String(v);
     const ranges: Record<string, string> = {

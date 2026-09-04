@@ -1079,7 +1079,7 @@ export function ExecSummaryTab({
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
         : formatMoney(totalUsd, 'USD'),
-      sub: 'net order value — STO and deleted excluded',
+      sub: 'net order value, ex STO',
       periods: [
         { name: `YTD ${period?.year ?? ''}`, text: money(valueYtd) },
         { name: monthName, text: money(valueMtd) },
@@ -1089,7 +1089,7 @@ export function ExecSummaryTab({
     {
       label: 'PO lines',
       value: formatNumber(val('po_line_items') ?? 0),
-      sub: 'purchase lines in the period',
+      sub: 'lines in the period',
       periods: [
         { name: `YTD ${period?.year ?? ''}`, text: linesYtd === null ? '—' : formatNumber(linesYtd) },
         { name: monthName, text: linesMtd === null ? '—' : formatNumber(linesMtd) },
@@ -1099,13 +1099,13 @@ export function ExecSummaryTab({
     {
       label: 'active vendors',
       value: formatNumber(val('unique_suppliers') ?? 0),
-      sub: 'distinct vendors ordered from',
+      sub: 'distinct vendors',
       ...(k('unique_suppliers') ? { kpi: k('unique_suppliers')! } : {}),
     },
     {
       label: 'purchasing desks',
       value: formatNumber(val('active_purch_groups') ?? 0),
-      sub: 'purchasing groups raising orders',
+      sub: 'groups raising orders',
       ...(k('active_purch_groups') ? { kpi: k('active_purch_groups')! } : {}),
     },
     /*
@@ -1120,25 +1120,25 @@ export function ExecSummaryTab({
     {
       label: 'avg PR approval',
       value: days(val('cycle_pr_approval')),
-      sub: 'requisition raised to fully released',
+      sub: 'PR raised → released',
       ...(k('cycle_pr_approval') ? { kpi: k('cycle_pr_approval')! } : {}),
     },
     {
       label: 'avg sourcing LT',
       value: days(val('cycle_sourcing')),
-      sub: 'released requisition to purchase order',
+      sub: 'released PR → PO',
       ...(k('cycle_sourcing') ? { kpi: k('cycle_sourcing')! } : {}),
     },
     {
       label: 'avg PO approval',
       value: days(val('cycle_po_approval')),
-      sub: 'order raised to released',
+      sub: 'PO raised → released',
       ...(k('cycle_po_approval') ? { kpi: k('cycle_po_approval')! } : {}),
     },
     {
       label: 'avg delivery LT',
       value: days(val('cycle_delivery')),
-      sub: 'order released to goods received',
+      sub: 'PO released → GR',
       ...(k('cycle_delivery') ? { kpi: k('cycle_delivery')! } : {}),
     },
   ];
@@ -1197,7 +1197,7 @@ export function ExecSummaryTab({
                 </p>
                 {err && <p className="note"><span className="bs spdel">error</span> {err}</p>}
 
-                <div className="kpi-grid">
+                <div className="kpi-grid xs-tiles">
                   {tiles.map((t) => (
                     <button
                       key={t.label}

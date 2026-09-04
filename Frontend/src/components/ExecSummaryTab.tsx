@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
@@ -125,17 +125,52 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
   const at = (key: string, s: typeof openS) =>
     s?.points.find((pt) => pt.bucketKey === key) ?? null;
 
+  // PO-LINE COUNTS, beside the money. Value alone hides the shape of the work:
+  // METHANOL is the biggest category on this page by a wide margin and a
+  // rounding error by line count, so a desk reading only the money bar would
+  // think the methanol buyer is the busiest person in procurement.
+  const openL = data.series.find((x) => x.key === 'open_lines');
+  const closedL = data.series.find((x) => x.key === 'closed_lines');
+
   const rows = data.buckets
     .map((b) => {
       const o = at(b.key, openS);
       const c = at(b.key, closedS);
-      return { key: b.key, label: b.label, o, c, total: (o?.value ?? 0) + (c?.value ?? 0) };
+      const ol = at(b.key, openL);
+      const cl = at(b.key, closedL);
+      return {
+        key: b.key, label: b.label, o, c, ol, cl,
+        total: (o?.value ?? 0) + (c?.value ?? 0),
+        lines: (ol?.value ?? 0) + (cl?.value ?? 0),
+      };
     })
     .filter((r) => r.total > 0)
     .sort((a, b) => b.total - a.total);
 
   const grand = rows.reduce((a, r) => a + r.total, 0);
   const max = rows.reduce((a, r) => Math.max(a, r.total), 0);
+  const maxLines = rows.reduce((a, r) => Math.max(a, r.lines), 0);
+
+  /**
+   * ONE tooltip for the whole row, on every segment of it.
+   *
+   * Hovering the Closed part used to describe only Closed, so comparing the two
+   * halves of a single bar meant hovering twice and holding the first number in
+   * your head. The question a reader has at a category is "how much of this is
+   * done" — which is a statement about both halves at once.
+   */
+  const rowTip = (r: typeof rows[number]): string => {
+    const l = (n: number | null | undefined) => `${formatNumber(n ?? 0)} lines`;
+    return `${r.label}
+`
+      + `Closed  ${money(r.c?.value ?? 0)}  (${l(r.cl?.value)})
+`
+      + `Open    ${money(r.o?.value ?? 0)}  (${l(r.ol?.value)})
+`
+      + `Total   ${money(r.total)}  (${l(r.lines)})
+`
+      + 'Click a segment for the Overview of that slice.';
+  };
 
   return (
     <div className="xs-bars">
@@ -155,7 +190,7 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
             type="button"
             className={`xs-seg ${cls}`}
             style={{ width: `${w(pt.value ?? 0)}%` }}
-            title={`${what} ${r.label} — ${money(pt.value)}, ${formatNumber(pt.rowCount)} PO lines. Click for the Overview of this slice.`}
+            title={rowTip(r)}
             onClick={(e) => {
               e.stopPropagation();
               onFocus(
@@ -167,16 +202,48 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
           />
         ) : null);
 
+        const segLines = (
+          pt: { value: number | null; rowCount: number; drillToken: string | null } | null,
+          cls: string,
+          what: string,
+        ) => (pt && (pt.value ?? 0) > 0 ? (
+          <button
+            type="button"
+            className={`xs-seg ${cls}`}
+            style={{ width: `${maxLines > 0 ? ((pt.value ?? 0) / maxLines) * 100 : 0}%` }}
+            title={rowTip(r)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onFocus(
+                `${r.label} — ${what}`,
+                `${formatNumber(pt.value ?? 0)} PO lines`,
+                `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
+              );
+            }}
+          />
+        ) : null);
+
         return (
           <div key={r.key} className={`xs-bar-row${i < emphasiseTop ? ' xs-hi' : ''}`}>
             <span className="xs-bar-label">{r.label}</span>
-            <span className="xs-bar-track">
-              {/* Closed first: delivered value has actually landed, so the bar
-                  reads from the axis outward and the open tail is what is still
-                  to come. The legend above is in the same order — a legend that
-                  disagrees with the stack teaches the reader to misread it. */}
-              {seg(r.c, 'xs-closed', 'Closed')}
-              {seg(r.o, 'xs-open', 'Open')}
+            <span className="xs-bar-tracks">
+              <span className="xs-bar-track" title={rowTip(r)}>
+                {/* Closed first: delivered value has actually landed, so the bar
+                    reads from the axis outward and the open tail is what is still
+                    to come. The legend above is in the same order — a legend that
+                    disagrees with the stack teaches the reader to misread it. */}
+                {seg(r.c, 'xs-closed', 'Closed')}
+                {seg(r.o, 'xs-open', 'Open')}
+              </span>
+              {/* PO LINES, on their own scale. Sharing the money scale would
+                  flatten every count to a sliver — the two measures differ by
+                  orders of magnitude, which is the comparison worth seeing. */}
+              {maxLines > 0 && (
+                <span className="xs-bar-track xs-bar-track-lines" title={rowTip(r)}>
+                  {segLines(r.cl, 'xs-closed', 'Closed')}
+                  {segLines(r.ol, 'xs-open', 'Open')}
+                </span>
+              )}
             </span>
             <span className="xs-bar-value">
               {money(r.total)} <span className="muted">({share.toFixed(1)}%)</span>
@@ -187,6 +254,15 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
                 <span className="xs-sp-closed">{money(r.c?.value ?? 0)}</span> closed
                 {' · '}
                 <span className="xs-sp-open">{money(r.o?.value ?? 0)}</span> open
+                {maxLines > 0 && (
+                  <>
+                    <br />
+                    <span className="xs-sp-closed">{formatNumber(r.cl?.value ?? 0)}</span>
+                    {' + '}
+                    <span className="xs-sp-open">{formatNumber(r.ol?.value ?? 0)}</span>
+                    {' = '}{formatNumber(r.lines)} lines
+                  </>
+                )}
               </span>
             </span>
           </div>
@@ -462,13 +538,13 @@ function BandPairs({ data, onFocus }: {
 
   const seg = (
     pt: { value: number | null; rowCount: number; drillToken: string | null } | null,
-    cls: string, label: string, band: string, bandKey: string,
+    cls: string, label: string, band: string, bandKey: string, tip: string,
   ) => (pt && (pt.value ?? 0) > 0 ? (
     <button
       type="button"
       className={`xs-seg ${cls}`}
       style={{ width: `${pt.value ?? 0}%` }}
-      title={`${label} ${band} — ${(pt.value ?? 0).toFixed(1)}%, ${formatNumber(pt.rowCount)} PO lines. Click for the Overview of this slice.`}
+      title={tip}
       onClick={() => onFocus(
         `${band} — ${label}`,
         `${(pt.value ?? 0).toFixed(1)}% · ${formatNumber(pt.rowCount)} PO lines`,
@@ -480,34 +556,319 @@ function BandPairs({ data, onFocus }: {
   return (
     <div className="xs-bands">
       <div className="xs-legend">
-        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
         <span><i className="xs-key xs-closed" /> Closed <span className="muted">(delivered)</span></span>
+        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
       </div>
       {buckets.map((b) => {
         const vTot = (at(ov, b.key)?.value ?? 0) + (at(cv, b.key)?.value ?? 0);
         const lTot = (at(ol, b.key)?.value ?? 0) + (at(cl, b.key)?.value ?? 0);
+        // One tooltip for the whole band, as on the category panel: hovering the
+        // Closed half and being told only about Closed makes comparing the two
+        // halves a two-step exercise with the first number held in your head.
+        const tip = `${b.label}
+`
+          + `Value   ${pct(at(cv, b.key)?.value ?? 0)} closed + ${pct(at(ov, b.key)?.value ?? 0)} open = ${pct(vTot)}
+`
+          + `Lines   ${pct(at(cl, b.key)?.value ?? 0)} closed + ${pct(at(ol, b.key)?.value ?? 0)} open = ${pct(lTot)}
+`
+          + `${formatNumber((at(cl, b.key)?.rowCount ?? 0) + (at(ol, b.key)?.rowCount ?? 0))} PO lines
+`
+          + 'Click a segment for the Overview of that slice.';
         return (
           <div key={b.key} className="xs-band-row">
             <span className="xs-band-label">{b.label}</span>
             <span className="xs-band-bars">
               <span className="xs-band-line">
-                <span className="xs-band-track">
-                  {seg(at(ov, b.key), 'xs-open', 'Open', b.label, b.key)}
-                  {seg(at(cv, b.key), 'xs-closed', 'Closed', b.label, b.key)}
+                <span className="xs-band-track" title={tip}>
+                  {seg(at(cv, b.key), 'xs-closed', 'Closed', b.label, b.key, tip)}
+                  {seg(at(ov, b.key), 'xs-open', 'Open', b.label, b.key, tip)}
                 </span>
-                <span className="xs-band-num">{pct(vTot)} of value</span>
+                <span className="xs-band-num">
+                  {pct(vTot)} of value
+                  <span className="xs-band-split">
+                    <span className="xs-sp-closed">{pct(at(cv, b.key)?.value ?? 0)}</span>
+                    {' + '}
+                    <span className="xs-sp-open">{pct(at(ov, b.key)?.value ?? 0)}</span>
+                  </span>
+                </span>
               </span>
               <span className="xs-band-line">
-                <span className="xs-band-track">
-                  {seg(at(ol, b.key), 'xs-open', 'Open', b.label, b.key)}
-                  {seg(at(cl, b.key), 'xs-closed', 'Closed', b.label, b.key)}
+                <span className="xs-band-track" title={tip}>
+                  {seg(at(cl, b.key), 'xs-closed', 'Closed', b.label, b.key, tip)}
+                  {seg(at(ol, b.key), 'xs-open', 'Open', b.label, b.key, tip)}
                 </span>
-                <span className="xs-band-num">{pct(lTot)} of lines</span>
+                <span className="xs-band-num">
+                  {pct(lTot)} of lines
+                  <span className="xs-band-split">
+                    <span className="xs-sp-closed">{pct(at(cl, b.key)?.value ?? 0)}</span>
+                    {' + '}
+                    <span className="xs-sp-open">{pct(at(ol, b.key)?.value ?? 0)}</span>
+                  </span>
+                </span>
               </span>
             </span>
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** Month colours for the HO/Site stacks — periods, not categories, so a
+ *  sequential ramp rather than the categorical palette. */
+const MONTH_COLORS = [
+  '#1e3a5f', '#1d4ed8', '#2E75B6', '#38bdf8', '#06b6d4',
+  '#0D9488', '#10b981', '#65a30d', '#a3c93a', '#d4b106',
+  '#ea7317', '#dc2626',
+];
+
+/**
+ * Managed by HO or Site.
+ *
+ * Who RAISED the order, from the SAP user in created_by, resolved to Head
+ * Office or Site through the business file. Two bars per band — one for value,
+ * one for line count — each stacked by month, because the question is not just
+ * "how much" but "how much work": HO can hold most of the money while a site
+ * raises most of the paperwork, and one bar cannot show both.
+ *
+ * A creator who is not in the business file appears as (unmapped) rather than
+ * being dropped or quietly counted as Site. On the current dataset that is
+ * 2,384 lines from two users — too much to hide, and hiding it would make the
+ * HO/Site split look more complete than it is.
+ */
+function HoSiteBars({ data, onFocus, currency }: {
+  data: ChartResponse;
+  onFocus: (title: string, subtitle: string, slice: string) => void;
+  currency: 'USD' | 'IDR';
+}) {
+  const valueS = data.series.find((x) => x.key === (currency === 'IDR' ? 'value_idr' : 'value'))
+    ?? data.series.find((x) => x.key === 'value_idr');
+  const linesS = data.series.find((x) => x.key === 'lines');
+  if (!valueS || !linesS) return <p className="muted">No data.</p>;
+  const isIdr = valueS.key.endsWith('_idr');
+  const money = (v: number | null): string => (isIdr ? rupiah(v) : formatMoney(v, 'USD'));
+
+  const labelFor = new Map(data.buckets.map((b) => [b.key, b.label] as const));
+
+  /** month -> band -> {value, lines}. Split at offset 7: the month is fixed width. */
+  const bands = new Map<string, Map<string, { value: number; lines: number; label: string }>>();
+  const monthKeys = new Set<string>();
+  const add = (key: string, field: 'value' | 'lines', n: number) => {
+    const mk = key.slice(0, 7);
+    const band = key.slice(8);
+    monthKeys.add(mk);
+    let m = bands.get(band);
+    if (!m) { m = new Map(); bands.set(band, m); }
+    const monthLabel = (labelFor.get(key) ?? mk).split('|')[0] ?? mk;
+    const cur = m.get(mk) ?? { value: 0, lines: 0, label: monthLabel };
+    cur[field] += n;
+    m.set(mk, cur);
+  };
+  for (const pt of valueS.points) add(pt.bucketKey, 'value', pt.value ?? 0);
+  for (const pt of linesS.points) add(pt.bucketKey, 'lines', pt.value ?? 0);
+
+  const months = [...monthKeys].sort();
+  // HO first, then Site, then whatever could not be resolved — the order the
+  // question is asked in, with the caveat last.
+  const order = (b: string): number => (b === 'HO' ? 0 : b === 'Unit' ? 1 : 2);
+  const rows = [...bands.entries()].sort((a, b) => order(a[0]) - order(b[0]));
+  if (rows.length === 0) return <p className="muted">No data.</p>;
+
+  const totalOf = (m: Map<string, { value: number; lines: number }>, f: 'value' | 'lines') =>
+    [...m.values()].reduce((a, x) => a + x[f], 0);
+  const maxValue = Math.max(...rows.map(([, m]) => totalOf(m, 'value')), 0);
+  const maxLines = Math.max(...rows.map(([, m]) => totalOf(m, 'lines')), 0);
+
+  const bandLabel = (b: string) => (b === 'Unit' ? 'Site' : b);
+
+  const track = (
+    band: string,
+    m: Map<string, { value: number; lines: number; label: string }>,
+    field: 'value' | 'lines',
+    max: number,
+  ) => (
+    <span className="xs-band-track">
+      {months.map((mk, i) => {
+        const cell = m.get(mk);
+        const n = cell?.[field] ?? 0;
+        if (n <= 0) return null;
+        const w = max > 0 ? (n / max) * 100 : 0;
+        const shown = field === 'value' ? money(n) : formatNumber(n);
+        return (
+          <button
+            key={mk}
+            type="button"
+            className="xs-seg xs-mo-seg"
+            style={{ width: `${w}%`, background: MONTH_COLORS[i % MONTH_COLORS.length] }}
+            title={`${bandLabel(band)} — ${cell?.label ?? mk}: ${money(cell?.value ?? 0)}, ${formatNumber(cell?.lines ?? 0)} PO lines`}
+            onClick={() => onFocus(
+              `${bandLabel(band)} — ${cell?.label ?? mk}`,
+              `${money(cell?.value ?? 0)} · ${formatNumber(cell?.lines ?? 0)} PO lines`,
+              `monthKey=${encodeURIComponent(mk)}`,
+            )}
+          >
+            {w >= 9 ? <span className="xs-mc-num">{shown}</span> : null}
+          </button>
+        );
+      })}
+    </span>
+  );
+
+  return (
+    <div className="xs-bands">
+      <div className="xs-legend xs-mc-legend">
+        {months.map((mk, i) => (
+          <span key={mk}>
+            <i className="xs-key" style={{ background: MONTH_COLORS[i % MONTH_COLORS.length] }} />
+            {rows[0]?.[1].get(mk)?.label ?? mk}
+          </span>
+        ))}
+      </div>
+
+      {rows.map(([band, m]) => (
+        <div key={band} className="xs-band-row">
+          <span className="xs-band-label">{bandLabel(band)}</span>
+          <span className="xs-band-bars">
+            <span className="xs-band-line">
+              {track(band, m, 'value', maxValue)}
+              <span className="xs-band-num">{money(totalOf(m, 'value'))}</span>
+            </span>
+            <span className="xs-band-line">
+              {track(band, m, 'lines', maxLines)}
+              <span className="xs-band-num">{formatNumber(totalOf(m, 'lines'))} lines</span>
+            </span>
+          </span>
+        </div>
+      ))}
+
+      <div className="table-wrap xs-mc-tbl-wrap">
+        <table className="data dd-tbl xs-mc-tbl">
+          <thead>
+            <tr>
+              <th className="xs-mc-th-cat">Managed by</th>
+              {months.map((mk) => (
+                <th key={mk} className="xs-mc-num">{rows[0]?.[1].get(mk)?.label?.replace(' 20', ' ') ?? mk}</th>
+              ))}
+              <th className="xs-mc-num xs-mc-tot">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([band, m]) => (
+              <Fragment key={band}>
+                <tr>
+                  <th scope="row" className="xs-mc-th-cat">{bandLabel(band)} <span className="muted">value</span></th>
+                  {months.map((mk) => (
+                    <td key={mk} className="xs-mc-num">
+                      {m.get(mk) ? money(m.get(mk)!.value) : <span className="muted">&mdash;</span>}
+                    </td>
+                  ))}
+                  <td className="xs-mc-num xs-mc-tot">{money(totalOf(m, 'value'))}</td>
+                </tr>
+                <tr>
+                  <th scope="row" className="xs-mc-th-cat">{bandLabel(band)} <span className="muted">lines</span></th>
+                  {months.map((mk) => (
+                    <td key={mk} className="xs-mc-num">
+                      {m.get(mk) ? formatNumber(m.get(mk)!.lines) : <span className="muted">&mdash;</span>}
+                    </td>
+                  ))}
+                  <td className="xs-mc-num xs-mc-tot">{formatNumber(totalOf(m, 'lines'))}</td>
+                </tr>
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Outstanding PR by aging, one column per day.
+ *
+ * Unlike every other aging figure here, this is reconstructed rather than
+ * measured: for each day it counts requisitions raised on or before that day
+ * that had no purchase order YET, aged as at that day. So a bar can grow as
+ * well as shrink, and the shape of the backlog over two months is the point.
+ *
+ * Bands are drawn oldest-first from the axis, which is the reference design's
+ * order and the useful one: the ">31 days" block is what a reader is looking
+ * for, and putting it at the base keeps it on a common baseline across days
+ * instead of floating on top of whatever came below it.
+ */
+const PR_BANDS = [
+  { key: '>31', label: '> 31', color: '#dc2626' },
+  { key: '22-30', label: '22 - 30', color: '#ea7317' },
+  { key: '15-21', label: '15 - 21', color: '#d4b106' },
+  { key: '8-14', label: '8 - 14', color: '#a3c93a' },
+  { key: '<7', label: '< 7', color: '#4CAF50' },
+] as const;
+
+function PrOutstandingBars({ data, onFocus }: {
+  data: ChartResponse;
+  onFocus: (title: string, subtitle: string, slice: string) => void;
+}) {
+  const series = data.series.find((x) => x.key === 'items') ?? data.series[0];
+  if (!series) return <p className="muted">No data.</p>;
+
+  const labelFor = new Map(data.buckets.map((b) => [b.key, b.label] as const));
+  const byDay = new Map<string, { label: string; bands: Map<string, number>; total: number }>();
+  for (const pt of series.points) {
+    const day = pt.bucketKey.slice(0, 10);
+    const band = pt.bucketKey.slice(11);
+    const dayLabel = (labelFor.get(pt.bucketKey) ?? day).split('|')[0] ?? day;
+    let d = byDay.get(day);
+    if (!d) { d = { label: dayLabel, bands: new Map(), total: 0 }; byDay.set(day, d); }
+    d.bands.set(band, (d.bands.get(band) ?? 0) + (pt.value ?? 0));
+    d.total += pt.value ?? 0;
+  }
+
+  const days = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (days.length === 0) return <p className="muted">No outstanding requisitions in this window.</p>;
+  const max = Math.max(...days.map(([, d]) => d.total), 1);
+
+  return (
+    <div className="xs-pr">
+      <div className="xs-legend xs-mc-legend">
+        {PR_BANDS.map((b) => (
+          <span key={b.key}><i className="xs-key" style={{ background: b.color }} /> {b.label}</span>
+        ))}
+      </div>
+
+      <div className="xs-pr-plot">
+        {days.map(([day, d]) => (
+          <div key={day} className="xs-pr-col" title={`${d.label} — ${formatNumber(d.total)} outstanding`}>
+            <span className="xs-pr-total">{formatNumber(d.total)}</span>
+            <span className="xs-pr-stack">
+              {PR_BANDS.map((b) => {
+                const n = d.bands.get(b.key) ?? 0;
+                if (n <= 0) return null;
+                return (
+                  <button
+                    key={b.key}
+                    type="button"
+                    className="xs-pr-seg"
+                    style={{ height: `${(n / max) * 100}%`, background: b.color }}
+                    title={`${d.label} — ${b.label} days: ${formatNumber(n)} outstanding PR items`}
+                    onClick={() => onFocus(
+                      `Outstanding ${b.label} days — ${d.label}`,
+                      `${formatNumber(n)} PR items`,
+                      '',
+                    )}
+                  />
+                );
+              })}
+            </span>
+            <span className="xs-pr-day">{d.label.split(' ')[0]}</span>
+          </div>
+        ))}
+      </div>
+
+      <p className="note" style={{ marginTop: '.5rem' }}>
+        Rebuilt for each day rather than measured once: a requisition counts on every day
+        between the day it was raised and the day it first got a purchase order, aged as at
+        that day. Oldest band at the base, so the &gt;31 block sits on a common baseline
+        across the window.
+      </p>
     </div>
   );
 }
@@ -554,6 +915,8 @@ export function ExecSummaryTab({
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
   const [byMonth, setByMonth] = useState<ChartResponse | null>(null);
   const [byCommitted, setByCommitted] = useState<ChartResponse | null>(null);
+  const [byHoSite, setByHoSite] = useState<ChartResponse | null>(null);
+  const [prOutstanding, setPrOutstanding] = useState<ChartResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -563,14 +926,21 @@ export function ExecSummaryTab({
     setByBand(null);
     setByMonth(null);
     setByCommitted(null);
+    setByHoSite(null);
+    setPrOutstanding(null);
     Promise.all([
       api.get<ChartResponse>(`/api/v1/chart/exec_value_by_category${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_txn_size${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_monthly_category${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_committed_by_month${q}`),
+      api.get<ChartResponse>(`/api/v1/chart/exec_ho_site${q}`),
+      api.get<ChartResponse>(`/api/v1/chart/exec_pr_outstanding${q}`),
     ])
-      .then(([c, b, m, cm]) => {
-        if (!dead) { setByCategory(c); setByBand(b); setByMonth(m); setByCommitted(cm); }
+      .then(([c, b, m, cm, hs, pr]) => {
+        if (!dead) {
+          setByCategory(c); setByBand(b); setByMonth(m); setByCommitted(cm);
+          setByHoSite(hs); setPrOutstanding(pr);
+        }
       })
       .catch((e: Error) => { if (!dead) setErr(e.message); });
     return () => { dead = true; };
@@ -645,7 +1015,7 @@ export function ExecSummaryTab({
    * new measure that could disagree with the rest of the app.
    */
   const TILE_FOCUS: Record<string, { kpis: string[]; charts: string[] }> = {
-    'committed value': {
+    'PO value - Procurement PO & SPO': {
       kpis: ['total_po_amount', 'open_po_commitment', 'avg_po_value_idr',
         'top5_category_share_pct', 'foreign_ccy_po_share', 'valuation_coverage_pct'],
       charts: ['po_value_by_category', 'po_value_by_purch_org', 'po_bracket_value'],
@@ -673,7 +1043,7 @@ export function ExecSummaryTab({
     periods?: { name: string; text: string }[];
   }[] = [
     {
-      label: 'committed value',
+      label: 'PO value - Procurement PO & SPO',
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
         : formatMoney(totalUsd, 'USD'),
@@ -882,6 +1252,40 @@ export function ExecSummaryTab({
                   measures are shares rather than amounts, so there is no figure here to restate in
                   dollars. Switching to USD changes the tiles and the category panel above.
                 </p>
+              </div>
+      ),
+    },
+    {
+      id: 'panel:hosite',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">
+                  Manage by HO or Site{' '}
+                  <span className="muted">— who raised the order, by month</span>
+                </h3>
+                {byHoSite
+                  ? <HoSiteBars data={byHoSite} onFocus={openFocus} currency={currency} />
+                  : <div className="spinner" />}
+                <p className="note" style={{ marginTop: '.5rem' }}>
+                  Attributed to the SAP user who raised the order, resolved to Head Office or
+                  Site through the business file. A creator not in that file shows as
+                  <strong> (unmapped)</strong> rather than being dropped or counted as Site —
+                  hiding them would make the split look more complete than it is.
+                </p>
+              </div>
+      ),
+    },
+    {
+      id: 'panel:pr-outstanding',
+      node: (
+              <div className="panel">
+                <h3 className="pr-tbl-h">
+                  Outstanding PR by Days/Months/Quarters/Years{' '}
+                  <span className="muted">— this month and last, by aging on the day</span>
+                </h3>
+                {prOutstanding
+                  ? <PrOutstandingBars data={prOutstanding} onFocus={openFocus} />
+                  : <div className="spinner" />}
               </div>
       ),
     },

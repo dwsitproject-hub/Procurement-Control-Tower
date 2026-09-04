@@ -731,6 +731,44 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 .ms-sort-on .ms-arrow { opacity: 1; }
 th[style*="right"] .ms-sort { justify-content: flex-end; }
 
+/* Outstanding PR: one column per day, stacked by aging band.
+   A vertical plot because the axis is time and there are ~60 of them; horizontal
+   rows would run off the bottom of any screen. */
+.xs-pr { display: flex; flex-direction: column; }
+.xs-pr-plot {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 190px; overflow-x: auto; padding-bottom: .2rem;
+}
+.xs-pr-col {
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  height: 100%; min-width: 15px; flex: 1 1 0;
+}
+.xs-pr-total {
+  font-size: .5rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap; margin-bottom: 1px;
+}
+/* column-reverse so the FIRST band listed sits at the base: the >31 block is
+   what the panel is read for, and it needs a common baseline across days. */
+.xs-pr-stack { display: flex; flex-direction: column-reverse; width: 100%; flex: 1 1 auto; }
+.xs-pr-seg { border: 0; padding: 0; width: 100%; cursor: pointer; min-height: 1px; }
+.xs-pr-seg:hover { filter: brightness(1.15); }
+.xs-pr-seg:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.xs-pr-day { font-size: .5rem; color: var(--muted); margin-top: 2px; }
+
+/* HO/Site: month segments carry their own figure where it fits. */
+.xs-mo-seg { display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: .55rem; font-weight: 700; overflow: hidden; }
+
+/* Transaction size: the closed/open split beside each band percentage. */
+.xs-band-split { display: block; font-size: .6rem; color: var(--muted); }
+
+/* Spend category: a value bar and a PO-lines bar stacked in one row, each on
+   its own scale. The two measures differ by orders of magnitude, so a shared
+   scale would flatten every count to a sliver. */
+.xs-bar-tracks { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.xs-bar-track-lines { height: .42rem; opacity: .62; }
+.xs-bar-track-lines .xs-seg { border-radius: 2px; }
+
 /* Monthly Spend Category: the figures behind the bars.
    A category worth a fraction of a month is a two-pixel segment with nowhere to
    print a label and nothing to click, so the table carries every number and the

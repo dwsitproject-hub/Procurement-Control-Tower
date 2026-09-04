@@ -100,6 +100,10 @@ const TAB_KPIS: Record<Tab, string[]> = {
    */
   execsummary: [
     'total_po_amount', 'po_line_items', 'unique_suppliers', 'active_purch_groups',
+    // The four cycle times, MOVED here from the Overview (1 Sep 2026) rather
+    // than duplicated: they are gone from TAB_KPIS.executive and from
+    // EXEC_SECTIONS below, so one page owns them and the two cannot drift.
+    'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
     'top5_category_share_pct', 'lines_under_25jt_pct', 'value_under_25jt_pct',
     'desks_for_80pct_value', 'vendors_for_80pct_value',
     'ho_share_value_pct', 'ho_share_lines_pct',
@@ -110,7 +114,6 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'emergency_pct_value', 'otd_vs_requested', 'demand_realism', 'expedite_effectiveness',
     'wbs_compliance',
     'total_pr_items', 'delivered_gr', 'open_items',
-    'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
   ],
   openitems: [
     'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
@@ -213,7 +216,6 @@ const EXEC_SECTIONS: { title: string; ids: string[] }[] = [
     title: '📋 Overview',
     ids: [
       'total_pr_items', 'delivered_gr', 'open_items',
-      'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
     ],
   },
 ];

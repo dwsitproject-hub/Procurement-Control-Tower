@@ -78,6 +78,18 @@ function pct(v: number | null, dp = 1): string {
 }
 
 /**
+ * A lead time in days.
+ *
+ * One decimal, and never a bare integer dressed up as precision: 4.7 days and
+ * 3 days are both what the KPI computed, and rounding 4.7 to "5 days" would
+ * make a half-day difference between two desks disappear.
+ */
+function days(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return '—';
+  return `${v.toLocaleString('en-GB', { maximumFractionDigits: 1 })} days`;
+}
+
+/**
  * A ranked horizontal bar list, each bar STACKED into Open and Closed.
  *
  * Stacked rather than grouped on purpose: open + closed is the category's total,
@@ -1035,6 +1047,26 @@ export function ExecSummaryTab({
         'ho_share_lines_pct'],
       charts: ['po_value_by_pgrp', 'po_items_by_pgrp', 'po_value_by_purch_org'],
     },
+    'avg PR approval': {
+      kpis: ['cycle_pr_approval', 'median_pr_approval', 'max_pr_approval',
+        'approved_within_3d', 'pending_pr_approvals', 'oldest_unreleased'],
+      charts: ['pr_approval_distribution', 'pr_approval_by_priority'],
+    },
+    'avg sourcing LT': {
+      kpis: ['cycle_sourcing', 'pr_to_po_conversion', 'pr_no_po', 'direct_po_share',
+        'retro_po_rate'],
+      charts: ['sourcing_by_category', 'sourcing_by_priority'],
+    },
+    'avg PO approval': {
+      kpis: ['cycle_po_approval', 'pending_po_approvals', 'lines_pending_po_approval',
+        'auto_release_share_pct', 'avg_unreleased_age'],
+      charts: ['po_approval_distribution', 'po_approval_by_priority'],
+    },
+    'avg delivery LT': {
+      kpis: ['cycle_delivery', 'cycle_e2e', 'otd_vs_requested', 'delivered_gr',
+        'po_not_delivered', 'grir_over_60d'],
+      charts: ['delivery_distribution', 'delivery_by_category', 'delivery_by_priority'],
+    },
   };
 
   const tiles: {
@@ -1075,6 +1107,39 @@ export function ExecSummaryTab({
       value: formatNumber(val('active_purch_groups') ?? 0),
       sub: 'purchasing groups raising orders',
       ...(k('active_purch_groups') ? { kpi: k('active_purch_groups')! } : {}),
+    },
+    /*
+     * The four cycle times, moved here from the Overview (1 Sep 2026).
+     *
+     * They sit beside the volume tiles on purpose: the four above say how much
+     * was bought, these four say how long it took. Same KPI ids as before — the
+     * Overview no longer lists them, so there is one definition and one owner
+     * rather than two pages that can disagree about what "avg PO approval"
+     * means.
+     */
+    {
+      label: 'avg PR approval',
+      value: days(val('cycle_pr_approval')),
+      sub: 'requisition raised to fully released',
+      ...(k('cycle_pr_approval') ? { kpi: k('cycle_pr_approval')! } : {}),
+    },
+    {
+      label: 'avg sourcing LT',
+      value: days(val('cycle_sourcing')),
+      sub: 'released requisition to purchase order',
+      ...(k('cycle_sourcing') ? { kpi: k('cycle_sourcing')! } : {}),
+    },
+    {
+      label: 'avg PO approval',
+      value: days(val('cycle_po_approval')),
+      sub: 'order raised to released',
+      ...(k('cycle_po_approval') ? { kpi: k('cycle_po_approval')! } : {}),
+    },
+    {
+      label: 'avg delivery LT',
+      value: days(val('cycle_delivery')),
+      sub: 'order released to goods received',
+      ...(k('cycle_delivery') ? { kpi: k('cycle_delivery')! } : {}),
     },
   ];
 

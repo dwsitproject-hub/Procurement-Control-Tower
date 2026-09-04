@@ -144,6 +144,19 @@ function rowSplit(o: Opt): string {
 
 function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [current, setCurrent] = useState<Exclusions | null>(null);
+  /**
+   * The intercompany prefix box, as TYPED.
+   *
+   * It cannot be a controlled input over the parsed array. Typing "LN2," splits
+   * to ['LN2', ''], the empty is filtered out, the array re-renders as "LN2" —
+   * and the comma is deleted on the same keystroke, so a second prefix can
+   * never be entered at all. The raw text lives here; the array is parsed FROM
+   * it rather than back into it.
+   *
+   * null means "not being edited", so the box shows the saved value in its
+   * canonical form until someone types.
+   */
+  const [prefixText, setPrefixText] = useState<string | null>(null);
   const [options, setOptions] = useState<{ docTypes: Opt[]; purchGroups: Opt[]; purchOrgs: Opt[] } | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -156,6 +169,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     )
       .then((d) => {
         setCurrent(d.current);
+        setPrefixText(null);
         setOptions(d.options as never);
         setCoupaOptions(d.coupaOptions ?? []);
       })
@@ -202,6 +216,8 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         '/api/v1/admin/exclusions', current,
       );
       setDirty(false);
+      // Show the saved, normalised list rather than whatever spacing was typed.
+      setPrefixText(null);
       // A Coupa-only change is live already: the views read the rule store
       // directly. Rebuilding every fact for it would cost a minute and change
       // nothing, so the server tells us whether it is actually needed.
@@ -358,18 +374,33 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
           <input
             className="gf-search-in"
             disabled={!isAdmin}
-            placeholder="e.g. LN21, LN29 — comma separated"
-            value={current.intercoVendorPrefixes.join(', ')}
+            placeholder="e.g. LN2, LN29 — separate with a comma"
+            value={prefixText ?? current.intercoVendorPrefixes.join(', ')}
             onChange={(e) => {
+              const raw = e.target.value;
+              setPrefixText(raw);
+              // Split on comma OR whitespace, so a space-separated list works
+              // too rather than becoming one nonsense prefix. Empties are
+              // dropped from the SAVED array only — the typed text keeps its
+              // trailing comma so the next prefix can be entered.
               setCurrent({
                 ...current,
-                intercoVendorPrefixes: e.target.value.split(',')
+                intercoVendorPrefixes: raw.split(/[,\s]+/)
                   .map((x) => x.trim().toUpperCase()).filter((x) => x !== ''),
               });
               setDirty(true);
             }}
           />
         </label>
+        {current.intercoVendorPrefixes.length > 0 && (
+          <p className="note" style={{ margin: 0 }}>
+            <span className="bs sl">applies to</span>{' '}
+            {current.intercoVendorPrefixes.map((x) => <code key={x}>{x}</code>)
+              .reduce<React.ReactNode[]>((a, el, i) => (i === 0 ? [el] : [...a, ', ', el]), [])}
+            {' '}— {current.intercoVendorPrefixes.length} prefix
+            {current.intercoVendorPrefixes.length === 1 ? '' : 'es'}.
+          </p>
+        )}
         <p className="note" style={{ margin: 0 }}>
           A <strong>code prefix</strong>, not a name match. Matching the name on “INTERCO” also
           hits <code>INTERCON TERMINAL INDONESIA</code>, a genuine third-party supplier, so a

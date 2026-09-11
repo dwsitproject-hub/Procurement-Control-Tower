@@ -188,5 +188,14 @@ because the API is stopped before the snapshot rather than after it.
   Admin → Data Exclusions. Confirm them on the Admin page after cutover
   anyway — it is one page load and it proves the app is reading the new
   database.
-- Once the old instance is retired, delete `/opt/pct/migrate/*.dump` — it
-  contains every row of the staging dataset.
+- **Do not retire the old instance and delete the dump.** Those are the two
+  ways back, and this file used to recommend deleting the dump "once the old
+  instance is retired", which would have left none. Order matters:
+  - while `pct-postgres` is alive, `99-rollback.sh` is a config change and a
+    container recreate — about a minute;
+  - once it is gone, `/opt/pct/migrate/pct-<stamp>.dump` (with its `.sha256`)
+    is the only copy of that database. It can be restored anywhere, but it is
+    a 10-20 minute job, not a minute.
+  - delete the dump only when you no longer want either — it holds every row
+    of the staging dataset, so it is not a file to leave lying around
+    indefinitely either.

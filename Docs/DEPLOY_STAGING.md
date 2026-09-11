@@ -96,6 +96,11 @@ First contact prints GitHub's host-key fingerprint — answer `yes`.
 
 ## 2. DB server — 172.28.92.60
 
+> **Superseded 11 Sep 2026.** Staging now runs on ApsaraDB RDS (section 11).
+> This section still applies when building staging from nothing, and the
+> instance it describes is the migration's rollback target — keep it running.
+
+
 Fully self-contained in the PuTTY session on **172.28.92.60** — the compose
 file is written in place (this host has no repo checkout, and pasting beats
 a cross-machine copy):

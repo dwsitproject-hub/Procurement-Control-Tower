@@ -97,16 +97,11 @@ echo "  now: $(grep '^DATABASE_URL=' "$ENV_TARGET" | cut -d= -f2- | redact)"
 say "Recreating the API container"
 docker compose -f "$COMPOSE" up -d --force-recreate api
 
-say "Waiting for the container's own healthcheck"
-for i in $(seq 1 24); do
-  H="$(docker inspect pct-api --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
-  [ "$H" = "healthy" ] && break
-  [ "$i" = "24" ] && break
-  sleep 5
-done
-echo "  health: $H"
-if [ "$H" != "healthy" ]; then
-  bad "API did not become healthy. Logs:"
+say "Waiting for the container's own healthcheck (up to 5 minutes)"
+if ! wait_healthy pct-api 300; then
+  bad "API did not become healthy. Last healthcheck output:"
+  health_detail pct-api | sed 's/^/    /'
+  bad "Logs:"
   docker logs --tail 40 pct-api | sed 's/^/    /'
   bad "Roll back with ./99-rollback.sh -- the old database is untouched."
   exit 1

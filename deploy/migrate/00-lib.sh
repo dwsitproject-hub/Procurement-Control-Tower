@@ -85,6 +85,64 @@ R() {
 # and a migration that touches them breaks the instance, not the app.
 PCT_SCHEMAS="'app','audit','core','ingest','mart','ops','public','staging'"
 
+# Wait for a container to become healthy, distinguishing "still booting" from
+# "failed".
+#
+# The API's healthcheck is start_period 20s + interval 10s + retries 12, so
+# Docker can take 140 SECONDS to decide a fresh container is unhealthy. An
+# earlier version of this waited 120s and then told the operator to roll back
+# -- a false failure, and on a first boot against a REMOTE database (every
+# migration verified over the network) the likely outcome rather than an edge
+# case.
+#
+# So: wait up to five minutes, treat "starting" as patience rather than
+# failure, and bail out early only on a real failing streak, which a fresh
+# container cannot report until its start period and retries are exhausted.
+wait_healthy() {
+  local name="$1" budget="${2:-300}" waited=0 st streak running
+  while [ "$waited" -lt "$budget" ]; do
+    # A container that EXITED will never report a health status, so waiting the
+    # full budget on one is pure delay -- and an API that cannot reach its
+    # database exits at boot, which makes this the most likely failure of a
+    # cutover rather than an unlikely one. Ten seconds of grace, because
+    # compose reports "created" for a moment before it starts.
+    running="$(docker inspect "$name" --format '{{.State.Running}}' 2>/dev/null || echo missing)"
+    if [ "$running" != "true" ] && [ "$waited" -ge 10 ]; then
+      printf '  container is not running after %ss (state=%s, exit code %s)\n' \
+        "$waited" "$running" \
+        "$(docker inspect "$name" --format '{{.State.ExitCode}}' 2>/dev/null || echo '?')"
+      return 1
+    fi
+    st="$(docker inspect "$name" \
+            --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+          2>/dev/null || echo missing)"
+    if [ "$st" = "healthy" ]; then
+      printf '  healthy after %ss\n' "$waited"; return 0
+    fi
+    if [ "$st" = "none" ] && [ "$running" = "true" ]; then
+      # No healthcheck on this container: running is all we can assert.
+      printf '  running after %ss (container defines no healthcheck)\n' "$waited"; return 0
+    fi
+    if [ "$st" = "unhealthy" ]; then
+      streak="$(docker inspect "$name" --format '{{.State.Health.FailingStreak}}' 2>/dev/null || echo 0)"
+      if [ "${streak:-0}" -ge 3 ]; then
+        printf '  unhealthy after %ss (failing streak %s)\n' "$waited" "$streak"; return 1
+      fi
+    fi
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+  printf '  gave up after %ss -- last status: %s\n' "$budget" "$st"
+  return 1
+}
+
+# The last thing the healthcheck actually printed, which is usually the answer.
+health_detail() {
+  docker inspect "$1" --format \
+    '{{if .State.Health}}{{range .State.Health.Log}}{{.ExitCode}} {{.Output}}{{end}}{{end}}' \
+    2>/dev/null | sed '/^$/d' | tail -5
+}
+
 say()  { printf '\n=== %s\n' "$*"; }
 ok()   { printf '  OK    %s\n' "$*"; }
 warn() { printf '  WARN  %s\n' "$*"; }

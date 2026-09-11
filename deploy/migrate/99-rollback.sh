@@ -62,15 +62,25 @@ fi
 echo "=== Recreating the API container"
 docker compose -f "$COMPOSE" up -d --force-recreate api
 
-for i in $(seq 1 24); do
-  H="$(docker inspect pct-api --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
-  [ "$H" = "healthy" ] && break
-  [ "$i" = "24" ] && break
+# Duplicated from 00-lib.sh deliberately: this script has to work when
+# migrate.env or the library is gone. Five minutes, and "starting" is not a
+# failure -- the healthcheck needs up to 140s to reach a verdict.
+waited=0
+while [ "$waited" -lt 300 ]; do
+  H="$(docker inspect pct-api \
+         --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+       2>/dev/null || echo missing)"
+  if [ "$H" = "healthy" ]; then break; fi
+  if [ "$H" = "unhealthy" ]; then
+    STREAK="$(docker inspect pct-api --format '{{.State.Health.FailingStreak}}' 2>/dev/null || echo 0)"
+    if [ "${STREAK:-0}" -ge 3 ]; then break; fi
+  fi
   sleep 5
+  waited=$(( waited + 5 ))
 done
-echo "  health: $H"
+echo "  health: $H after ${waited}s"
 if [ "$H" != "healthy" ]; then
-  echo "  API still unhealthy after rollback. Logs:" >&2
+  echo "  API still not healthy after rollback. Logs:" >&2
   docker logs --tail 40 pct-api >&2
   exit 1
 fi

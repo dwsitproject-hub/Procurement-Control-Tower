@@ -88,6 +88,15 @@ destination = a fresh empty database on the same server. Measured:
 | `02-dump.sh` | 2m 29s | 116 MB dump, gate 131 = 131 |
 | `03-restore.sh` | 2m 03s | 0 errors, every non-empty table analysed |
 | `04-verify.sh` | 0m 51s | 137 tables, 3,232 columns, 446 indexes, 240 constraints, 4 functions, 6 partitioned parents, 16 sequences with values, 2,926,775 rows — all identical |
+| `05-cutover.sh` | — | one line of 132 rewritten, URI-hostile password encoded and proven to authenticate |
+| `99-rollback.sh` | — | `staging.env` restored byte-identical |
+
+`05-cutover.sh` and `99-rollback.sh` — the pair that edits `staging.env` in
+place — were rehearsed separately against a throwaway copy of the file and a
+dummy compose service, with a deliberately URI-hostile password
+(`p@ss:w/rd#1`) on a throwaway database role. Verified: the encoded URI
+(`p%40ss%3Aw%2Frd%231`) actually authenticates, **exactly one line** of a
+132-line file changes, and the rollback restores it **byte-identical**.
 
 The rehearsal is how the scripts got fixed rather than shipped broken. Three
 queries failed against a real catalogue: `relkind` is a `"char"`, so
@@ -99,6 +108,18 @@ originally compared all 118 functions in these schemas, 114 of which belong to
 `citext`, `pg_trgm` and `pgcrypto`, so a minor extension version difference on
 ApsaraDB would have failed verification for a reason unrelated to the
 migration. It now compares this application's own four.
+
+The fifth was the worst, and it only showed up in the cutover rehearsal: the
+health wait gave up after 120 seconds, but this API's healthcheck is
+`start_period 20s` + `interval 10s` + `retries 12`, so Docker needs up to
+**140 seconds** just to reach a verdict. The script would have declared a
+successful cutover a failure and told the operator to roll back. `wait_healthy`
+in `00-lib.sh` now waits five minutes, treats "starting" as patience, and
+fails fast in two cases that genuinely cannot improve: a real failing streak,
+and a container that has **exited** — which is what an API that cannot reach
+its database does, and therefore the single most likely way a cutover fails.
+All four paths are tested; the failure message carries the last healthcheck
+output rather than just a status word.
 
 `CLIENT_NETWORK=bridge` is what made that rehearsal possible: the client
 container runs on the host network by default (right for the BE server, which

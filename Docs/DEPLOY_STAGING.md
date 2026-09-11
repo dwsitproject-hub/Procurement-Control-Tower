@@ -998,26 +998,93 @@ mount -a && findmnt /mnt/synology-apps
 
 ### Phase 3 — stop Docker taking those ranges again
 
-Phase 1 only frees the block; the next `docker compose up` on that stack can
-take it straight back. Either is sufficient, and both need a maintenance window
-because they restart every container on this shared host:
+Phase 1 only frees the block. **It recurred on 11 Sep 2026**: a different
+stack, `tas-staging_tas_staging_network`, had taken `172.30.0.0/16`, the CIFS
+mount went stale (`findmnt` still showed it; `ls` said *Host is down*), and
+`pct-api` could not start at all — Docker refuses to bind a mount source it
+cannot stat. It surfaced mid-database-migration, which is the worst possible
+moment to discover that Phase 3 was skipped.
 
-**A static route** also fixes it, because Docker then sees the clash and skips
-the range:
+So do **both**, not either. They are different guarantees: the pools stop
+Docker *choosing* the range, and the route stops it *mattering* if something
+takes it anyway with an explicit subnet.
 
-```bash
-ip route add 172.30.1.0/24 via <the LAN gateway> dev <the LAN interface>
-```
+Both restart every container on this shared host, so they need a window.
 
-**Or constrain Docker's pools** in `/etc/docker/daemon.json` (there is none
-today), keeping it away from every corporate 172.x range:
+**1. Constrain Docker's pools** in `/etc/docker/daemon.json`:
 
 ```json
-{ "default-address-pools": [ { "base": "10.240.0.0/12", "size": 24 } ] }
+{
+  "default-address-pools": [
+    { "base": "172.17.0.0/16", "size": 24 },
+    { "base": "172.18.0.0/15", "size": 24 },
+    { "base": "172.20.0.0/14", "size": 24 },
+    { "base": "172.24.0.0/14", "size": 24 }
+  ]
+}
 ```
 
+That gives Docker 172.17–172.27 (about 2,800 /24 networks) and fences off
+**172.28**, this server's own LAN — one allocation away from cutting the box
+off from FE↔BE traffic and from your own SSH session — and **172.29–172.31**,
+which includes the NAS at 172.30.1.94. It stays inside the block Docker
+already uses by default, rather than moving it to a 10.x range that may well
+be in use elsewhere in the company.
+
+Validate before restarting, because a malformed daemon.json stops Docker
+starting at all:
+
 ```bash
+python3 -c "import json; json.load(open('/etc/docker/daemon.json')); print('valid')"
 systemctl restart docker      # restarts EVERY container on this host
+docker network create pooltest && docker network inspect pooltest \
+  --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' && docker network rm pooltest
+```
+
+The test network must come back in 172.17–172.27. Existing networks keep the
+subnets they already have — only new ones are allocated from the pools — so a
+stack still holding a bad range has to be removed once (Phase 1) to pick up a
+good one.
+
+**2. A persistent static route to the NAS.** Docker skips ranges that clash
+with an existing host route, so this both prevents and overrides the problem.
+The `ip route add` form is lost on the next reboot, which is why it is a unit
+and not a command:
+
+```bash
+cat > /etc/systemd/system/nas-route.service <<'EOF'
+[Unit]
+Description=Static route to the Synology NAS so Docker cannot shadow it
+Documentation=Docs/DEPLOY_STAGING.md section 10
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 172.28.95.253 is this subnet's gateway; eth0 is the LAN interface.
+# `replace` rather than `add` so re-running is harmless.
+ExecStart=/sbin/ip route replace 172.30.0.0/16 via 172.28.95.253 dev eth0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now nas-route.service
+ip route get 172.30.1.94      # must name eth0, never a br-* device
+```
+
+A oneshot unit rather than a netplan edit on purpose: a mistake in netplan on
+a cloud instance can take the network down with your session on it, while this
+touches nothing that already works and is removed with `systemctl disable`.
+
+**Recovering the stale mount.** Freeing the subnet does not revive the mount —
+CIFS keeps the entry after the server becomes unreachable, so `findmnt` looks
+healthy while every read fails. It has to be dropped and remade, lazily,
+because a plain unmount hangs on a host that is down:
+
+```bash
+umount -l /mnt/synology-apps; mount -a
+findmnt /mnt/synology-apps && ls -1 /mnt/synology-apps | head -3
 ```
 
 ### Phase 4 — point the app at the NAS

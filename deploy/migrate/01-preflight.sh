@@ -112,6 +112,46 @@ if [ "${1:-}" = "--list-target" ]; then
       WHERE c.relkind IN ('r','p','v','S') AND n.nspname IN ($PCT_SCHEMAS) ORDER BY 1"
 fi
 
+# -- 4b. Can the API container actually be recreated? -------------------
+#
+# Learned the hard way on 11 Sep 2026. The migration itself went perfectly and
+# then 05-cutover.sh could not start the container at all:
+#
+#   error while creating mount source path '/mnt/synology-apps':
+#   mkdir /mnt/synology-apps: file exists
+#
+# The NAS had become unreachable (another stack's Docker network took
+# 172.30.0.0/16), which leaves CIFS in a state where findmnt still lists the
+# mount but every read fails with "Host is down" -- and Docker refuses to bind
+# a mount source it cannot stat. Nothing to do with the database, but it turned
+# a clean cutover into an outage of unknown length, discovered AFTER the API
+# had been stopped.
+#
+# So every bind source the running container uses is stat'ed here, while the
+# app is still up and stopping costs nothing. `timeout` because a read against
+# a dead CIFS mount hangs rather than failing.
+say "Host paths the API's bind mounts point at"
+if docker inspect pct-api >/dev/null 2>&1; then
+  docker inspect pct-api \
+    --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' \
+    2>/dev/null | sed '/^$/d' > "$WORKDIR/.binds"
+  # Read from a FILE, not a pipe: a piped while-loop runs in a subshell and its
+  # FAILED=1 would be discarded.
+  while IFS= read -r src; do
+    if timeout 5 ls -d "$src" >/dev/null 2>&1; then
+      ok "$src"
+    else
+      bad "$src is NOT accessible -- the container cannot be recreated"
+      bad "  a stale CIFS mount looks mounted to findmnt and fails every read:"
+      bad "  umount -l <path> && mount -a    (Docs/DEPLOY_STAGING.md section 10)"
+      FAILED=1
+    fi
+  done < "$WORKDIR/.binds"
+  rm -f "$WORKDIR/.binds"
+else
+  warn "pct-api not on this host -- cannot check its bind mounts"
+fi
+
 # -- 5. Baselines, to files ---------------------------------------------
 #
 # Written to disk rather than eyeballed, because 04-verify.sh diffs against

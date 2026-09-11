@@ -126,6 +126,34 @@ container runs on the host network by default (right for the BE server, which
 reaches the source by IP), and on `bridge` it can reach a database published
 on `127.0.0.1` via `host.docker.internal`.
 
+## The staging run, 11 Sep 2026
+
+Ran clean: PostgreSQL 16.4 to **ApsaraDB RDS 18.4** (a two-major jump), 110 MB
+dump, gate 89 = 89, `pg_restore` exit 0 with **zero** errors, and all ten
+verification checks identical over **3,152,780 rows**. The API came back
+`healthy` on the new database and skipped all 26 migrations, as check 10
+predicted.
+
+The migration was not what went wrong. `05-cutover.sh` could not start the
+container:
+
+```
+error while creating mount source path '/mnt/synology-apps':
+mkdir /mnt/synology-apps: file exists
+```
+
+Another stack had taken `172.30.0.0/16`, the subnet the Synology NAS lives on,
+which leaves CIFS in a state where `findmnt` still lists the mount and every
+read fails with *Host is down* -- and Docker refuses to bind a mount source it
+cannot stat. Two lessons are now built in:
+
+* `01-preflight.sh` stats **every bind source of the running container**, so
+  this is caught while the app is still up and stopping costs nothing.
+* `05-cutover.sh` no longer re-swaps an env file that already names the
+  destination. The natural response to that failure is to re-run the script,
+  which would have taken a second backup -- one already containing the new URL
+  -- and pointed the rollback at it.
+
 ## Downtime
 
 From `02-dump.sh` stopping the API to `05-cutover.sh` reporting healthy.

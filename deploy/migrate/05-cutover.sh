@@ -61,33 +61,56 @@ docker run --rm --network "$CLIENT_NETWORK" "$CLIENT_IMAGE" \
 ok "the URL string works as written"
 
 # -- Swap ---------------------------------------------------------------
-STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="$ENV_TARGET.pre-apsaradb-$STAMP"
-cp -p "$ENV_TARGET" "$BACKUP"
-chmod 600 "$BACKUP"
-ok "backed up -> $BACKUP  (99-rollback.sh reads this)"
-echo "$BACKUP" > "$WORKDIR/ENV_BACKUP"
-
-OLD_URL="$(grep '^DATABASE_URL=' "$ENV_TARGET" | head -1 | cut -d= -f2-)"
-printf '%s\n' "$OLD_URL" > "$WORKDIR/OLD_DATABASE_URL"
-chmod 600 "$WORKDIR/OLD_DATABASE_URL"
-
-TMP="$(mktemp)"
-# Written with awk rather than sed -i so the password never becomes part of a
-# sed expression, where a '&' or a '/' in it would be interpreted.
-NEW_URL="$NEW_URL" awk '
-  /^DATABASE_URL=/ { print "DATABASE_URL=" ENVIRON["NEW_URL"]; next }
-  { print }
-' "$ENV_TARGET" > "$TMP"
-grep -q '^DATABASE_URL=' "$TMP" || { bad "DATABASE_URL line vanished -- aborting"; rm -f "$TMP"; exit 1; }
-cat "$TMP" > "$ENV_TARGET"
-rm -f "$TMP"
-chmod 600 "$ENV_TARGET"
-
-say "What changed in $ENV_TARGET"
 redact() { sed -E 's#//([^:]+):[^@]*@#//\1:***@#'; }
-echo "  was: $(printf '%s' "$OLD_URL" | redact)"
-echo "  now: $(grep '^DATABASE_URL=' "$ENV_TARGET" | cut -d= -f2- | redact)"
+CURRENT_URL="$(grep '^DATABASE_URL=' "$ENV_TARGET" | head -1 | cut -d= -f2-)"
+
+if [ "$CURRENT_URL" = "$NEW_URL" ]; then
+  # Already swapped. This happens when the container step failed for a reason
+  # that has nothing to do with the database -- a dead bind mount, say -- and
+  # the operator re-runs the script to finish the job.
+  #
+  # Rewriting now would take a SECOND backup, one that already contains the
+  # NEW url, and point ENV_BACKUP at it. 99-rollback.sh would then faithfully
+  # "roll back" to ApsaraDB. So the swap is skipped and the original backup is
+  # left exactly where it is: re-running this script must never be the thing
+  # that destroys the way back.
+  say "$ENV_TARGET already points at the destination"
+  ok "env file and rollback backup left untouched"
+  EXISTING_BACKUP="$(ls -1t "$ENV_TARGET".pre-apsaradb-* 2>/dev/null | head -1 || true)"
+  if [ -n "$EXISTING_BACKUP" ]; then
+    ok "rollback restores: $EXISTING_BACKUP"
+    echo "  which holds: $(grep '^DATABASE_URL=' "$EXISTING_BACKUP" | cut -d= -f2- | redact)"
+  else
+    warn "no pre-apsaradb backup found -- 99-rollback.sh will need the old URL by hand"
+  fi
+else
+  STAMP="$(date +%Y%m%d-%H%M%S)"
+  BACKUP="$ENV_TARGET.pre-apsaradb-$STAMP"
+  cp -p "$ENV_TARGET" "$BACKUP"
+  chmod 600 "$BACKUP"
+  ok "backed up -> $BACKUP  (99-rollback.sh reads this)"
+  echo "$BACKUP" > "$WORKDIR/ENV_BACKUP"
+
+  OLD_URL="$CURRENT_URL"
+  printf '%s\n' "$OLD_URL" > "$WORKDIR/OLD_DATABASE_URL"
+  chmod 600 "$WORKDIR/OLD_DATABASE_URL"
+
+  TMP="$(mktemp)"
+  # Written with awk rather than sed -i so the password never becomes part of a
+  # sed expression, where a '&' or a '/' in it would be interpreted.
+  NEW_URL="$NEW_URL" awk '
+    /^DATABASE_URL=/ { print "DATABASE_URL=" ENVIRON["NEW_URL"]; next }
+    { print }
+  ' "$ENV_TARGET" > "$TMP"
+  grep -q '^DATABASE_URL=' "$TMP" || { bad "DATABASE_URL line vanished -- aborting"; rm -f "$TMP"; exit 1; }
+  cat "$TMP" > "$ENV_TARGET"
+  rm -f "$TMP"
+  chmod 600 "$ENV_TARGET"
+
+  say "What changed in $ENV_TARGET"
+  echo "  was: $(printf '%s' "$OLD_URL" | redact)"
+  echo "  now: $(grep '^DATABASE_URL=' "$ENV_TARGET" | cut -d= -f2- | redact)"
+fi
 
 # -- Recreate, not restart ----------------------------------------------
 #

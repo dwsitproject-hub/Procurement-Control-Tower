@@ -1042,3 +1042,29 @@ Finally, in Admin → SAP Data Upload, the six folders still point at
 `/mnt/sap_exports`: saved settings outrank the environment on purpose. The panel
 flags the rows as **outside the storage folder** and offers **Use the NAS folder
 for all** — click it, Save, then **Test / preview folders**.
+
+## 11. Moving the database to ApsaraDB RDS
+
+Staging's database is the container-hosted Postgres in section 2. To move it to
+the managed instance
+`pgm-d9jx9o06qae8gf3h.pgsql.ap-southeast-5.rds.aliyuncs.com`, use the gated
+scripts in `deploy/migrate/` rather than ad-hoc `pg_dump` commands:
+
+```bash
+mkdir -p /opt/pct/migrate && cd /opt/pct/migrate    # BE server, 172.28.92.57
+cp /opt/pct/src/deploy/migrate/* .
+cp migrate.env.template migrate.env                 # fill DST_USER/DST_PASSWORD
+chmod 600 migrate.env && chmod +x *.sh
+./01-preflight.sh && ./02-dump.sh && ./03-restore.sh && ./04-verify.sh && ./05-cutover.sh
+```
+
+`deploy/migrate/README.md` is the runbook: what each phase gates on, the three
+places PCT deviates from the generic ApsaraDB runbook (partitioned parents
+break its completeness gate, there is one `DATABASE_URL` rather than two config
+files, and every timestamp column here is `timestamptz`), and the measured
+timings from a full rehearsal.
+
+Only `05-cutover.sh` changes anything the application reads — it rewrites the
+`DATABASE_URL` line in `/opt/pct/staging.env` and recreates the API container.
+`99-rollback.sh` puts it back. Keep `pct-postgres` on 172.28.92.60 running for
+a few days afterwards; it is the rollback.

@@ -34,3 +34,9 @@ deploy/env/secrets.staging.env
 deploy/staging/db.env
 deploy/staging/staging.env
 deploy/staging/secrets.staging.env
+# Filled connection values for the ApsaraDB migration, plus the dumps and
+# baselines the scripts produce. The dump holds every row of the dataset.
+deploy/migrate/migrate.env
+deploy/migrate/*.dump
+deploy/migrate/*.dump.sha256
+

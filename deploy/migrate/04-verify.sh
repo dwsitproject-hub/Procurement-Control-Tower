@@ -129,10 +129,21 @@ else
   FAILED=1
 fi
 
-R "SELECT 'dataset versions: '||count(*)||', published: '||
-          COALESCE((SELECT id::text FROM core.dataset_version WHERE status='published'
-                     ORDER BY published_at DESC LIMIT 1),'none')
-     FROM core.dataset_version" | sed 's/^/  /'
+# The published version is the single fact the dashboard cannot do without:
+# every figure on every page is read from it. So it is COMPARED, not merely
+# printed -- an earlier version of this line printed the target's value only,
+# and compared status against 'published' when the column stores 'PUBLISHED',
+# so it reported "none" on a database that had one. Hence upper() here, and
+# hence cmp_class rather than a bare R.
+cmp_class "published version" "SELECT COALESCE(
+            (SELECT 'v'||id::text FROM core.dataset_version
+              WHERE upper(status) = 'PUBLISHED'
+              ORDER BY published_at DESC NULLS LAST LIMIT 1),
+            'NONE PUBLISHED')" published
+
+R "SELECT 'dataset versions by status: '||COALESCE(string_agg(s||'='||c, ', '),'-')
+     FROM (SELECT upper(status) AS s, count(*)::text AS c
+             FROM core.dataset_version GROUP BY 1 ORDER BY 1) t" | sed 's/^/  /'
 R "SELECT 'chart series: '||count(*)||', with a drill predicate: '||
           count(*) FILTER (WHERE drill_predicate IS NOT NULL) FROM mart.chart_series" | sed 's/^/  /'
 R "SELECT 'rule_config rows: '||count(*) FROM app.rule_config" | sed 's/^/  /'

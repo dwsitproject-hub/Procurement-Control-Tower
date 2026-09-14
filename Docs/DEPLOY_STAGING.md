@@ -618,6 +618,30 @@ so a plain `up -d` reports the container is up to date and leaves the OLD code
 running — a rebuild that appears to deploy and does not. The same applies to a
 changed bind mode, which is fixed at container creation.
 
+> **`docker compose --build` does NOTHING here, and fails silently.** The local
+> `docker-compose.yml` carries `build:` contexts, so `up -d --build api web`
+> works on a workstation. These staging compose files do not: they name
+> prebuilt tags (`image: pct-web:staging`) and nothing else, so `--build` finds
+> no context, skips, and recreates the container from the OLD image. It reports
+> success. This cost a deploy on 14 Sep 2026 — the frontend was "rebuilt" three
+> times and the new button never appeared. The explicit `docker build -f
+> .../Dockerfile -t pct-<svc>:staging .` above is the only thing that produces
+> a new image on these servers.
+
+**Verify the CONTAINER, never the build log.** Both of these must answer:
+
+```bash
+# BE server — the API carries the code you just built
+docker exec pct-api sh -c "ls dist/modules/analytics/<a file from this release>.js"
+
+# FE server — the bundle carries the string you expect
+docker exec pct-web sh -c "grep -rl '<visible text from this release>' /usr/share/nginx/html/assets/ | head -3"
+```
+
+An empty answer means the image did not rebuild, and recreating it again will
+not help. Then hard-reload the browser (Ctrl+Shift+R): `index.html` names a
+hashed bundle, and a cached copy keeps pointing at the previous one.
+
 If a release changed the compose files, env template, or nginx conf, re-copy
 them from `src/deploy/...` (compare first — your filled `staging.env` /
 `secrets.staging.env` are local to the server and must not be overwritten).

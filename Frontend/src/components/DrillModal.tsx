@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ApiError, api, type DrillPage } from '../lib/api';
+import { ApiError, api, downloadFile, type DrillPage } from '../lib/api';
 import { FLAG_META, STATUS_PILL, formatCell, formatNumber, moneyCellText } from '../lib/format';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
@@ -34,6 +34,8 @@ export function DrillModal({
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState<{ expired: boolean; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -70,6 +72,51 @@ export function DrillModal({
     };
   }, [token]);
 
+  /**
+   * Export every row behind this figure.
+   *
+   * No filter parameters: the token carries the stored predicate, so the
+   * server re-executes the same query that produced the count in the header.
+   * That is the same guarantee the panel itself relies on, which is why the
+   * file cannot disagree with the number the user clicked.
+   *
+   * The panel holds 200 rows at a time; the file holds all of them. Exporting
+   * only what had been scrolled into view would be a different, much less
+   * useful feature.
+   */
+  const exportExcel = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setExportNote(null);
+    try {
+      // The heading the user is looking at, so the file is named after it.
+      const shown = label || page?.label || '';
+      const r = await downloadFile(
+        `/api/v1/drill/${token}/export.xlsx${shown ? `?label=${encodeURIComponent(shown)}` : ''}`,
+        'pct-drill.xlsx',
+      );
+      const n = r.rows ?? 0;
+      setExportNote(
+        r.total !== null && r.total > n
+          ? `Downloaded ${r.filename} \u2014 ${formatNumber(n)} of ${formatNumber(r.total)} rows. `
+            + 'The export stops at 50,000.'
+          : `Downloaded ${r.filename} \u2014 ${formatNumber(n)} rows.`,
+      );
+    } catch (e) {
+      // An expired token is the likely failure here, and it is the same
+      // 15-minute expiry the panel explains above -- so say so in the same
+      // words rather than showing a bare 401.
+      const expired = e instanceof ApiError && e.problem.type.includes('drill-token-expired');
+      setExportNote(
+        expired
+          ? 'Export failed: this drill link has expired. Close this and click the figure again.'
+          : `Export failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const loadMore = async () => {
     if (!cursor) return;
     const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}`);
@@ -89,6 +136,16 @@ export function DrillModal({
         <header>
           <h3 id="drill-title">{'\u{1F50D} '}{label || page?.label}</h3>
           <span className="spacer" />
+          {page && !error && page.totalCount > 0 && (
+            <button
+              className="dd-open"
+              onClick={() => void exportExcel()}
+              disabled={exporting}
+              title={`Export all ${formatNumber(page.totalCount)} rows behind this figure to Excel`}
+            >
+              {exporting ? 'Preparing\u2026' : '\u2B07 Export to Excel'}
+            </button>
+          )}
           {page?.detailHandoff && onOpenDetail && (
             <button
               className="dd-open"
@@ -148,6 +205,12 @@ export function DrillModal({
                 {page.note && <> · {page.note}</>}
                 {rows.length < page.totalCount && <> · showing {formatNumber(rows.length)}</>}
               </p>
+
+              {exportNote && (
+                <p className={exportNote.startsWith('Export failed') ? 'err' : 'note'}>
+                  {exportNote}
+                </p>
+              )}
 
               {page.totalCount === 0 ? (
                 <p className="note">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../lib/api';
+import { api, downloadFile } from '../lib/api';
 import {
   FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
 } from '../lib/format';
@@ -99,6 +99,8 @@ export function DetailTable({
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
   const [visible, setVisible] = useState<string[] | null>(null);
   const [chooserOpen, setChooserOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
   const savedRef = useRef(false);
   const dragKey = useRef<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
@@ -121,7 +123,16 @@ export function DetailTable({
       });
   }, []);
 
-  const queryString = useMemo(() => {
+  /**
+   * The filter half of the query, kept separate from the paging half because
+   * the export sends it verbatim.
+   *
+   * The export endpoint REJECTS `limit`, `cursor` and `facets` rather than
+   * ignoring them, so one combined string could not be reused; and building a
+   * second string for the export by hand is how an export quietly stops
+   * honouring a filter someone added to the table.
+   */
+  const filterQuery = useMemo(() => {
     const q = new URLSearchParams();
     for (const [k, v] of Object.entries(filters)) {
       if (v && v.length > 0) q.set(k, v.join(','));
@@ -134,10 +145,13 @@ export function DetailTable({
       q.set('sort', sort.key);
       q.set('dir', sort.dir);
     }
-    q.set('limit', String(pageSize));
-    q.set('facets', 'true');
     return q.toString();
-  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort]);
+
+  const queryString = useMemo(
+    () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
+    [filterQuery, pageSize],
+  );
 
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
@@ -201,6 +215,44 @@ export function DetailTable({
       persistLayout(next);
       return next;
     });
+  };
+
+  /**
+   * Export what is on screen.
+   *
+   * `visible` IS the on-screen column order -- the same array the header row
+   * and the drag-to-reorder handler read -- so passing it as `cols` is what
+   * makes the file match the table rather than merely resemble it.
+   *
+   * Every row that matches the filter is exported, not the page being viewed.
+   * Someone looking at rows 1-50 of 32,704 who clicks Export wants the 32,704;
+   * exporting the visible page would be technically defensible and useless.
+   */
+  const exportExcel = async () => {
+    if (exporting) return;
+    const cols = visible ?? [];
+    if (cols.length === 0) {
+      setExportNote('Choose at least one column before exporting.');
+      return;
+    }
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const q = new URLSearchParams(filterQuery);
+      q.set('cols', cols.join(','));
+      const r = await downloadFile(`/api/v1/detail/export.xlsx?${q.toString()}`, 'pct-detail.xlsx');
+      const rows = r.rows ?? 0;
+      setExportNote(
+        r.total !== null && r.total > rows
+          ? `Downloaded ${r.filename} — ${formatNumber(rows)} of ${formatNumber(r.total)} rows. `
+            + 'The export stops at 50,000; narrow the filters to get the rest.'
+          : `Downloaded ${r.filename} — ${formatNumber(rows)} rows, ${cols.length} columns.`,
+      );
+    } catch (e) {
+      setExportNote(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const toggleFilter = (key: MultiKey, value: string) => {
@@ -283,7 +335,26 @@ export function DetailTable({
           <button className="dt-btn" onClick={() => setChooserOpen(!chooserOpen)} aria-expanded={chooserOpen}>
             Columns ({shown.length}/{data?.columns.length ?? 0})
           </button>
+          <button
+            className="dt-btn"
+            onClick={() => void exportExcel()}
+            disabled={exporting || shown.length === 0}
+            title={
+              data
+                ? `Export all ${formatNumber(data.totalCount)} matching rows with the `
+                  + `${shown.length} column${shown.length === 1 ? '' : 's'} shown`
+                : 'Export these rows to Excel'
+            }
+          >
+            {exporting ? 'Preparing\u2026' : '\u2B07 Export to Excel'}
+          </button>
         </div>
+
+        {exportNote && (
+          <p className={exportNote.startsWith('Export failed') ? 'err' : 'note'} style={{ marginTop: '.5rem' }}>
+            {exportNote}
+          </p>
+        )}
 
         {chooserOpen && data && (
           <div className="dt-chooser">

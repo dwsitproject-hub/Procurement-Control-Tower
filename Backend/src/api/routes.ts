@@ -41,7 +41,13 @@ import { archiveSummary } from '../modules/ingest/archive.js';
 import { notify } from '../modules/notify/mailer.js';
 import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
-import { queryDetail, DETAIL_COLUMNS, type DetailFilters } from '../modules/analytics/detail.js';
+import {
+  queryDetail, DETAIL_COLUMNS, DETAIL_QUERY_PARAMS, parseDetailQuery,
+  describeDetailFilters,
+} from '../modules/analytics/detail.js';
+import {
+  buildExportWorkbook, exportFileName, MAX_EXPORT_ROWS,
+} from '../modules/analytics/export.js';
 import {
   describeFilter, isEmptyFilter, parseGlobalFilter, type GlobalFilter,
 } from '../modules/analytics/globalfilter.js';
@@ -790,6 +796,107 @@ export function buildRouter(): Router {
     }
   }));
 
+  /**
+   * Drill panel -> Excel.
+   *
+   * The token IS the filter: it carries the stored predicate of the figure
+   * that was clicked, so the export needs no query parameters and cannot
+   * disagree with the panel. Columns are the grain's own, which is what the
+   * panel shows -- there is no column chooser there to honour.
+   *
+   * The panel pages 200 rows at a time; this returns every row the figure
+   * counts, up to the export cap, which is the point of the button.
+   */
+  r.get('/api/v1/drill/:token/export.xlsx', role('analyst', async (req, res, ctx) => {
+    try {
+      const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
+      const page = await executeDrill(payload, MAX_EXPORT_ROWS, 0);
+      const v = await currentVersion();
+
+      // The panel's heading, so the file is named after the figure the user
+      // clicked ("Total PO Amount") rather than after the stored predicate
+      // ("po_line: notSto=true, notDeleted=true"). Tokens issued for KPI cards
+      // carry no label of their own, so the server cannot know it.
+      //
+      // Cosmetic only, and treated as such: it names the file and titles the
+      // sheet, while the authoritative description of what the rows ARE stays
+      // server-derived and is recorded below as "Figure". Trimmed and stripped
+      // of control characters because it reaches a Content-Disposition header.
+      const clientLabel = req.query.label === undefined
+        ? null
+        : String(req.query.label).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80);
+      const title = clientLabel || page.label;
+
+      const filters: Array<[string, string]> = Object.entries(payload.filters ?? {})
+        .map(([k, val]) => [k, typeof val === 'object' ? JSON.stringify(val) : String(val)]);
+      filters.unshift(['Figure', page.label]);
+      if (page.note) filters.push(['Note', page.note]);
+      if (page.totals?.idrSum !== null && page.totals?.idrSum !== undefined) {
+        filters.push(['Total (document IDR)', String(page.totals.idrSum)]);
+      }
+      // Stated rather than omitted: a USD total the panel refused to show
+      // because some lines have no rate must not look like a zero here.
+      if (page.totals) {
+        filters.push([
+          'Total (USD)',
+          page.totals.usdComplete && page.totals.usdSum !== null
+            ? String(page.totals.usdSum)
+            : 'not shown \u2014 some lines have no FX rate',
+        ]);
+      }
+
+      const wb = buildExportWorkbook(page.columns, page.rows, {
+        sheetName: 'Rows',
+        title,
+        datasetVersionId: payload.v,
+        asOfDate: v?.asOfDate ?? '',
+        generatedBy: ctx.principal.email,
+        totalRows: page.totalCount,
+        filters,
+      });
+
+      await recordAudit({
+        action: 'drill.export', actorUserId: ctx.principal.userId,
+        actorEmail: ctx.principal.email, outcome: 'success',
+        detail: {
+          datasetVersionId: payload.v,
+          grain: payload.grain,
+          label: page.label,
+          rows: page.rows.length,
+          totalRows: page.totalCount,
+          truncated: page.totalCount > page.rows.length,
+        },
+        ip: req.ip,
+      });
+
+      res.setHeader('Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition',
+        `attachment; filename="${exportFileName(title)}"`);
+      res.setHeader('X-Export-Rows', String(page.rows.length));
+      res.setHeader('X-Export-Total', String(page.totalCount));
+      res.send(wb);
+    } catch (e) {
+      // Same token errors as the panel itself, so an expired link explains
+      // itself the same way rather than arriving as a broken download.
+      if (e instanceof DrillTokenError) {
+        if (e.code === 'foreign') {
+          await recordAudit({
+            action: 'drill.token_replay', actorUserId: ctx.principal.userId,
+            actorEmail: ctx.principal.email, outcome: 'denied', ip: req.ip,
+          });
+          throw new HttpProblem(403, 'drill-token-foreign', 'Drill token does not belong to this session');
+        }
+        throw new HttpProblem(
+          401,
+          e.code === 'expired' ? 'drill-token-expired' : 'drill-token-invalid',
+          e.code === 'expired' ? 'Drill token expired' : 'Invalid drill token',
+        );
+      }
+      throw e;
+    }
+  }));
+
   // ── detail rows ──
 
   r.get('/api/v1/rows', role('analyst', async (req, res, ctx) => {
@@ -830,60 +937,112 @@ export function buildRouter(): Router {
     const v = await currentVersion();
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
 
-    const list = (name: string): string[] | undefined => {
-      const raw = req.query[name];
-      if (raw === undefined) return undefined;
-      const arr = Array.isArray(raw) ? raw.map(String) : String(raw).split(',');
-      const cleaned = arr.map((x) => x.trim()).filter((x) => x !== '');
-      return cleaned.length > 0 ? cleaned : undefined;
-    };
-    const flag = (name: string): boolean => String(req.query[name] ?? '') === 'true';
-
-    const filters: DetailFilters = {
-      status: list('status'),
-      matCat: list('matCat'),
-      matGroup: list('matGroup'),
-      plant: list('plant'),
-      company: list('company'),
-      purchOrg: list('purchOrg'),
-      purchGroup: list('purchGroup'),
-      priority: list('priority'),
-      monthKey: list('monthKey'),
-      search: req.query.q === undefined ? undefined : String(req.query.q),
-      excludeSto: flag('excludeSto'),
-      includeDeleted: flag('includeDeleted'),
-      onlyOpen: flag('onlyOpen'),
-      onlyDirectPo: flag('onlyDirectPo'),
-      onlyReleaseExempt: flag('onlyReleaseExempt'),
-    };
-
     // Unknown parameters are rejected, not ignored: a typo must not silently
     // return unfiltered data.
-    const allowed = new Set([
-      'status','matCat','matGroup','plant','company','purchOrg','purchGroup','priority','monthKey',
-      'q','excludeSto','includeDeleted','onlyOpen','onlyDirectPo','onlyReleaseExempt',
-      'sort','dir','limit','cursor','facets',
-    ]);
+    const allowed = new Set<string>([...DETAIL_QUERY_PARAMS, 'limit', 'cursor', 'facets']);
     for (const k of Object.keys(req.query)) {
       if (!allowed.has(k)) {
         throw new HttpProblem(400, 'invalid-parameter', `Unknown query parameter: ${k}`);
       }
     }
 
-    const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
-    const sortDir = String(req.query.dir ?? 'asc') === 'desc' ? 'desc' : 'asc';
+    // Parsed by the same function the export uses, so the two cannot drift.
+    const { filters, sort } = parseDetailQuery(req.query as Record<string, unknown>);
 
     const page = await queryDetail(
       v.id,
       v.asOfDate,
       ctx.scope,
       filters,
-      sortKey ? { key: sortKey, dir: sortDir } : null,
+      sort,
       Math.min(Number(req.query.limit ?? 200), 1000),
       Number(req.query.cursor ?? 0),
       String(req.query.facets ?? '') === 'true',
     );
     res.json(page);
+  }));
+
+  /**
+   * Detail table -> Excel.
+   *
+   * Takes the SAME query string the table is showing, plus `cols` naming the
+   * visible columns in their on-screen order, and returns those rows as a
+   * workbook. Same parser, same query, same scope: the only differences from
+   * the table request are that paging is replaced by the export cap and facets
+   * are not computed.
+   *
+   * `cols` is validated against the column whitelist rather than trusted --
+   * these keys reach a SELECT list.
+   */
+  r.get('/api/v1/detail/export.xlsx', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+
+    const allowed = new Set<string>([...DETAIL_QUERY_PARAMS, 'cols']);
+    for (const k of Object.keys(req.query)) {
+      if (!allowed.has(k)) {
+        throw new HttpProblem(400, 'invalid-parameter', `Unknown query parameter: ${k}`);
+      }
+    }
+
+    const requested = req.query.cols === undefined
+      ? null
+      : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x !== '');
+    if (requested !== null) {
+      const known = new Set(DETAIL_COLUMNS.map((c) => c.key));
+      const bad = requested.filter((k) => !known.has(k));
+      if (bad.length > 0) {
+        throw new HttpProblem(400, 'invalid-parameter', `Unknown column(s): ${bad.join(', ')}`);
+      }
+      if (requested.length === 0) {
+        throw new HttpProblem(400, 'invalid-parameter', 'No columns selected');
+      }
+    }
+    const byKey = new Map(DETAIL_COLUMNS.map((c) => [c.key, c]));
+    const columns = (requested ?? DETAIL_COLUMNS.filter((c) => c.default).map((c) => c.key))
+      .map((k) => byKey.get(k)!)
+      .map((c) => ({ key: c.key, label: c.label, type: c.type, currency: c.currency }));
+
+    const { filters, sort } = parseDetailQuery(req.query as Record<string, unknown>);
+    const page = await queryDetail(
+      v.id, v.asOfDate, ctx.scope, filters, sort, MAX_EXPORT_ROWS, 0, false,
+    );
+
+    const wb = buildExportWorkbook(columns, page.rows, {
+      sheetName: 'Detail',
+      title: 'Detail table',
+      datasetVersionId: v.id,
+      asOfDate: v.asOfDate,
+      generatedBy: ctx.principal.email,
+      totalRows: page.totalCount,
+      filters: describeDetailFilters(filters, sort),
+    });
+
+    // Audited like the ingest error workbook: this file carries row-level data
+    // out of the application, and how much of it left is worth recording.
+    await recordAudit({
+      action: 'detail.export', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: {
+        datasetVersionId: v.id,
+        rows: page.rows.length,
+        totalRows: page.totalCount,
+        truncated: page.totalCount > page.rows.length,
+        columns: columns.map((c) => c.key),
+      },
+      ip: req.ip,
+    });
+
+    res.setHeader('Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${exportFileName('detail')}"`);
+    // Read by the browser so the page can say a file was cut short. A header,
+    // not a failure: the file is still useful, it is just not the whole set.
+    res.setHeader('X-Export-Rows', String(page.rows.length));
+    res.setHeader('X-Export-Total', String(page.totalCount));
+    res.send(wb);
   }));
 
   // ── ingestion ──

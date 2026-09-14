@@ -106,6 +106,111 @@ export interface DetailFilters {
   onlyReleaseExempt?: boolean;
 }
 
+/**
+ * Query parameters this endpoint understands.
+ *
+ * Exported so the route can reject anything else. A typo must not silently
+ * return unfiltered data, and an export that ignored a filter the screen
+ * applied would be worse still -- it would look complete.
+ */
+export const DETAIL_QUERY_PARAMS = [
+  'status', 'matCat', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
+  'priority', 'monthKey', 'q', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
+] as const;
+
+/**
+ * Read filters and sort out of a query string.
+ *
+ * Shared by the table endpoint and the export endpoint on purpose. These two
+ * MUST read a query string identically: the export exists to hand someone the
+ * rows they are looking at, so a filter honoured by one and not the other
+ * produces a spreadsheet that disagrees with the screen -- and the person
+ * holding the spreadsheet has no way to tell.
+ */
+export function parseDetailQuery(q: Record<string, unknown>): {
+  filters: DetailFilters;
+  sort: { key: string; dir: 'asc' | 'desc' } | null;
+} {
+  const list = (name: string): string[] | undefined => {
+    const raw = q[name];
+    if (raw === undefined) return undefined;
+    const arr = Array.isArray(raw) ? raw.map(String) : String(raw).split(',');
+    const cleaned = arr.map((x) => x.trim()).filter((x) => x !== '');
+    return cleaned.length > 0 ? cleaned : undefined;
+  };
+  const flag = (name: string): boolean => String(q[name] ?? '') === 'true';
+
+  const filters: DetailFilters = {
+    status: list('status'),
+    matCat: list('matCat'),
+    matGroup: list('matGroup'),
+    plant: list('plant'),
+    company: list('company'),
+    purchOrg: list('purchOrg'),
+    purchGroup: list('purchGroup'),
+    priority: list('priority'),
+    monthKey: list('monthKey'),
+    search: q['q'] === undefined ? undefined : String(q['q']),
+    excludeSto: flag('excludeSto'),
+    includeDeleted: flag('includeDeleted'),
+    onlyOpen: flag('onlyOpen'),
+    onlyDirectPo: flag('onlyDirectPo'),
+    onlyReleaseExempt: flag('onlyReleaseExempt'),
+  };
+
+  const sortKey = q['sort'] === undefined ? null : String(q['sort']);
+  const sort = sortKey
+    ? { key: sortKey, dir: (String(q['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc') as 'asc' | 'desc' }
+    : null;
+
+  return { filters, sort };
+}
+
+/**
+ * The active filters as label/value pairs, for the export's provenance sheet.
+ *
+ * Labels rather than parameter names: the reader of the spreadsheet did not
+ * write the query string, and "matCat" means nothing to them.
+ */
+export function describeDetailFilters(
+  filters: DetailFilters,
+  sort: { key: string; dir: 'asc' | 'desc' } | null,
+): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const listLabels: Array<[keyof DetailFilters, string]> = [
+    ['status', 'Status'],
+    ['matCat', 'Category'],
+    ['matGroup', 'Material group'],
+    ['plant', 'Plant'],
+    ['company', 'Company'],
+    ['purchOrg', 'Purchasing org'],
+    ['purchGroup', 'Purchasing group'],
+    ['priority', 'Priority'],
+    ['monthKey', 'Month'],
+  ];
+  for (const [key, label] of listLabels) {
+    const v = filters[key] as string[] | undefined;
+    if (v && v.length > 0) out.push([label, v.join(', ')]);
+  }
+  if ((filters.search ?? '').trim() !== '') out.push(['Search', filters.search!.trim()]);
+
+  // Toggles are listed only when ON, except "include deleted", which is stated
+  // either way: whether deleted rows are in the file changes every total in it.
+  if (filters.excludeSto) out.push(['Exclude STO', 'yes']);
+  if (filters.onlyOpen) out.push(['Open only', 'yes']);
+  if (filters.onlyDirectPo) out.push(['Direct POs only', 'yes']);
+  if (filters.onlyReleaseExempt) out.push(['Release-exempt only', 'yes']);
+  out.push(['Deleted rows', filters.includeDeleted ? 'included' : 'excluded']);
+
+  const sortCol = sort ? COLUMN_BY_KEY.get(sort.key) : undefined;
+  out.push([
+    'Sorted by',
+    sortCol ? `${sortCol.label} ${sort!.dir === 'desc' ? 'descending' : 'ascending'}` : 'PR No, PR item, PO No, PO item',
+  ]);
+  return out;
+}
+
 export interface DetailPage {
   datasetVersionId: number;
   asOfDate: string;

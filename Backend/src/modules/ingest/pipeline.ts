@@ -75,7 +75,24 @@ export type IngestOutcome =
     findings: Finding[]; rowSummary: FeedRowSummary[];
   }
   | { outcome: 'noop_unchanged'; batchId: number | null }
-  | { outcome: 'incomplete_bundle'; missing: Feed[] }
+  | {
+      outcome: 'incomplete_bundle';
+      missing: Feed[];
+      /**
+       * Every file that was read, and what its columns identified it as.
+       *
+       * Reported out of the pipeline because this is the only moment anyone
+       * holds them: an incomplete bundle never creates a batch, so nothing is
+       * written to ingest.batch_file and there is nothing to look up later.
+       *
+       * All files, not only the unrecognised ones, because a feed can be
+       * missing while its file sits right there — if that file's columns
+       * identified it as a DIFFERENT feed. "Found it, but it looks like a PO
+       * export" is a different problem from "found it, recognised nothing",
+       * and the operator should not have to guess which happened.
+       */
+      filesRead: { displayName: string; sheetName: string; headers: string[]; feed: Feed | null }[];
+    }
   | { outcome: 'source_unavailable'; path: string }
   /**
    * The pickup folder is empty because a previous run filed its contents away,
@@ -156,7 +173,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     // No filing on record, or one old enough that the next export is genuinely
     // overdue. Either way this is worth an alert, so it keeps the outcome it
     // always had.
-    return { outcome: 'incomplete_bundle', missing: [...REQUIRED_FEEDS] };
+    return { outcome: 'incomplete_bundle', missing: [...REQUIRED_FEEDS], filesRead: [] };
   }
 
   // ── read, gate, classify ──
@@ -215,7 +232,16 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const foundFeeds = new Set(prepared.map((p) => p.cls.feed).filter((f): f is Feed => f !== null));
   const missing = REQUIRED_FEEDS.filter((f) => !foundFeeds.has(f));
   if (missing.length > 0) {
-    return { outcome: 'incomplete_bundle', missing };
+    return {
+      outcome: 'incomplete_bundle',
+      missing,
+      filesRead: prepared.map((p) => ({
+        displayName: p.displayName,
+        sheetName: p.sheetName,
+        headers: p.headers,
+        feed: p.cls.feed,
+      })),
+    };
   }
 
   // ── create the batch ──

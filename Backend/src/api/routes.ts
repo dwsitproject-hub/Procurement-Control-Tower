@@ -36,7 +36,9 @@ import {
 import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
 import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
-import { PerFeedShareSource, archiveAfterRun, loadShareConfig } from '../modules/ingest/share_poller.js';
+import {
+  PerFeedShareSource, archiveAfterRun, diagnoseMissing, loadShareConfig,
+} from '../modules/ingest/share_poller.js';
 import { archiveSummary } from '../modules/ingest/archive.js';
 import { notify } from '../modules/notify/mailer.js';
 import { ingestFailureBody } from '../modules/notify/messages.js';
@@ -1092,6 +1094,13 @@ export function buildRouter(): Router {
         detail: 'missing' in out ? `missing ${out.missing.join(',')}`
           : 'path' in out ? out.path
           : 'reason' in out ? out.reason : undefined,
+        // The manual button sends the same mail as the scheduler, so it must
+        // carry the same diagnosis — otherwise pressing "Sync now" to
+        // reproduce a failure would produce a LESS informative mail than the
+        // one being investigated.
+        missingReasons: 'missing' in out
+          ? diagnoseMissing(out.missing, source.lastScan, out.filesRead)
+          : undefined,
         batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
         archive: archiveSummary(archive),
       });

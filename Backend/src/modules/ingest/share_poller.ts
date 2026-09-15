@@ -34,7 +34,9 @@ import {
   type ArchiveConfig, type ArchiveReport,
 } from './archive.js';
 import { notify } from '../notify/mailer.js';
-import { ingestFailureBody, ingestSuccessBody } from '../notify/messages.js';
+import {
+  ingestFailureBody, ingestSuccessBody, type MissingFeedReason,
+} from '../notify/messages.js';
 import {
   SourceUnavailableError, type DiscoveredFile, type FileSource,
 } from './sources.js';
@@ -324,14 +326,28 @@ export class PerFeedShareSource implements FileSource {
    */
   private listed: DiscoveredFile[] = [];
 
+  /**
+   * The scan behind that list.
+   *
+   * Kept so a failure can say WHY a feed had no file without re-scanning the
+   * share — a second scan would race the first, and on a slow mount it would
+   * also double the cost of every failed run.
+   */
+  private scanned: FeedScan[] = [];
+
   get lastListed(): readonly DiscoveredFile[] {
     return this.listed;
+  }
+
+  get lastScan(): readonly FeedScan[] {
+    return this.scanned;
   }
 
   constructor(private readonly cfg: ShareConfig) {}
 
   async list(): Promise<DiscoveredFile[]> {
     const scan = await scanShare(this.cfg);
+    this.scanned = scan.feeds;
     // An unreadable folder must NOT look like "no new data" — that is the
     // difference between "nothing to load" and "the mount is broken".
     const dead = scan.feeds.find((f) => !f.readable);
@@ -364,12 +380,57 @@ export class PerFeedShareSource implements FileSource {
 
 // ───────────────────────────────────────────────────────────── the run
 
+/**
+ * Why each required feed had no usable file.
+ *
+ * Two halves of the answer live in two places and neither is enough alone:
+ * the SCAN knows what the folder offered and what it rejected; the PIPELINE
+ * knows what the chosen file turned out to be once its headers were read.
+ * Joining them here is what turns "missing gr" into a sentence somebody can
+ * act on.
+ */
+export function diagnoseMissing(
+  missing: readonly Feed[],
+  scan: readonly FeedScan[],
+  filesRead: readonly { displayName: string; sheetName: string; headers: string[]; feed: Feed | null }[],
+): MissingFeedReason[] {
+  return missing.map((feed) => {
+    const s = scan.find((x) => x.feed === feed);
+
+    // Nothing in the folder survived the pattern, the extension and the
+    // settle window — so the operator's question is about the folder.
+    if (!s || s.chosen === null) {
+      return {
+        feed,
+        kind: 'no_match' as const,
+        path: s?.path,
+        pattern: s?.pattern,
+        rejected: (s?.others ?? []).slice(0, 5).map((o) => ({ name: o.name, reason: o.reason })),
+      };
+    }
+
+    // A file WAS chosen, and the bundle is still short of this feed. Either it
+    // matched no signature at all, or it matched a different one.
+    const read = filesRead.find((f) => f.displayName === s.chosen!.name);
+    return {
+      feed,
+      kind: 'unidentified' as const,
+      file: s.chosen.name,
+      sheetName: read?.sheetName,
+      headers: read?.headers,
+      identifiedAs: read?.feed ?? undefined,
+    };
+  });
+}
+
 export interface ShareRunResult {
   outcome: string;
   detail?: string;
   batchId?: number;
   datasetVersionId?: number;
   archive?: ArchiveReport;
+  /** Per-feed diagnosis, for incomplete_bundle only. */
+  missingReasons?: MissingFeedReason[];
 }
 
 /** Outcomes that mean "nothing was published and something is wrong". */
@@ -453,6 +514,9 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
     const arch = archiveSummary(archive);
     return {
       outcome: out.outcome,
+      missingReasons: 'missing' in out
+        ? diagnoseMissing(out.missing, source.lastScan, out.filesRead)
+        : undefined,
       detail: [base, arch].filter(Boolean).join(' · ') || undefined,
       batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
       datasetVersionId: 'datasetVersionId' in out ? out.datasetVersionId : undefined,
@@ -515,6 +579,7 @@ export function startSharePoller(log: (msg: string) => void): void {
             trigger: 'scheduled' as const,
             outcome: r.outcome,
             detail: r.detail,
+            missingReasons: r.missingReasons,
             archive: r.archive ? archiveSummary(r.archive) : undefined,
             batchId: r.batchId,
             datasetVersionId: r.datasetVersionId,

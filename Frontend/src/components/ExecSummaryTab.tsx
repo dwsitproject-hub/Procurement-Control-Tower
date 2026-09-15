@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
@@ -901,11 +901,59 @@ export function ExecSummaryTab({
     title: string; subtitle: string; slice: string;
     /** What to show inside. Absent means the Overview's own lists. */
     kpiIds?: string[]; chartIds?: string[];
+    /** Offer All / Open / Closed inside the panel. */
+    lifecycleToggle?: boolean;
   } | null>(null);
 
   const openFocus = useCallback((title: string, subtitle: string, slice: string) => {
     setFocus({ title, subtitle, slice });
   }, []);
+
+  /**
+   * Cards that a spend-category slice cannot answer, and so must not show.
+   *
+   * Three reasons, all of them "this card is not about this population":
+   *
+   *   - demand_realism, otd_vs_requested are disabled by V-M01 (the SAP export
+   *     carries no need-by date), so they render as unavailable in every panel
+   *     and say nothing about the category;
+   *   - cycle_e2e, expedite_effectiveness, wbs_compliance and pr_pipeline_value
+   *     are PR-grain measures, while a spend category is a property of PO
+   *     lines — the slice reaches them only through their linked POs, which
+   *     makes the number a different question from the one on screen;
+   *   - open_items duplicates the Open segment the reader just clicked.
+   *
+   * Requested 15 Sep 2026 after reading a panel where seven of the cards were
+   * either blank or answering something else.
+   */
+  const CATEGORY_HIDDEN_KPIS = useMemo(() => new Set([
+    'pr_pipeline_value', 'cycle_e2e', 'otd_vs_requested', 'demand_realism',
+    'expedite_effectiveness', 'wbs_compliance', 'open_items',
+  ]), []);
+
+  /**
+   * A spend-category bar opens the category, not the segment.
+   *
+   * The clicked segment (Open or Closed) names the panel, but the slice itself
+   * carries no lifecycle — the panel's own toggle starts at All and the reader
+   * moves between states without reopening it.
+   */
+  const openCategoryFocus = useCallback(
+    (title: string, subtitle: string, slice: string) => {
+      setFocus({
+        // The segment named the click; it must not name the PANEL, which opens
+        // on every lifecycle state. Leaving "METHANOL — Closed" above a view
+        // showing open lines too is the kind of caption that gets quoted in a
+        // meeting and is wrong. The clicked figure stays on the bar behind.
+        title: title.replace(/\s+—\s+(Open|Closed)$/, ''),
+        subtitle: 'Open and closed together — use the toggle to narrow',
+        slice: slice.replace(/&?lifecycle=(open|closed)/g, ''),
+        kpiIds: overviewKpis.filter((id) => !CATEGORY_HIDDEN_KPIS.has(id)),
+        lifecycleToggle: true,
+      });
+    },
+    [overviewKpis, CATEGORY_HIDDEN_KPIS],
+  );
 
   /**
    * A headline tile opens the figures that EXPLAIN that tile.
@@ -1245,7 +1293,7 @@ export function ExecSummaryTab({
                   Where the value is <span className="muted">— committed value by spend category</span>
                 </h3>
                 {byCategory
-                  ? <RankedBars data={byCategory} onFocus={openFocus} emphasiseTop={5} currency={currency} />
+                  ? <RankedBars data={byCategory} onFocus={openCategoryFocus} emphasiseTop={5} currency={currency} />
                   : <div className="spinner" />}
                 <p className="note" style={{ marginTop: '.5rem' }}>
                   {/*
@@ -1475,6 +1523,7 @@ export function ExecSummaryTab({
           <ExecFocusModal
             title={focus.title}
             subtitle={focus.subtitle}
+            lifecycleToggle={focus.lifecycleToggle ?? false}
             // The clicked slice on top of the page's own filter, so the panel can
             // never show a wider population than the page it was opened from.
             filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}

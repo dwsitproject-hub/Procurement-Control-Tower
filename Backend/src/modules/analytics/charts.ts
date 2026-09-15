@@ -177,7 +177,7 @@ export const CHART_META: ChartMeta[] = [
   { chartId: 'pr_by_plant',              title: 'PR items by plant',                tab: 'pr',        grain: 'pr_item', unit: 'count' },
   { chartId: 'pr_approval_distribution', title: 'PR approval distribution',         tab: 'pr',        grain: 'pr_item', unit: 'count' },
   { chartId: 'monthly_pr_no_po',         title: 'Monthly PR with no PO',            tab: 'pr',        grain: 'pr_item', unit: 'count' },
-  { chartId: 'items_by_category',        title: 'Items by Material Category',       tab: 'pr',        grain: 'pr_item', unit: 'count' },
+  { chartId: 'items_by_category',        title: 'Items by Spend Category',          tab: 'pr',        grain: 'pr_item', unit: 'count', notes: ['Spend category from the business mapping file — the same dimension the Executive Summary uses'] },
   { chartId: 'sourcing_by_priority',     title: 'Sourcing lead time by priority',   tab: 'po',        grain: 'po_line', unit: 'days', notes: ['STO lines excluded'] },
   { chartId: 'po_approval_by_priority',  title: 'PO approval by priority',          tab: 'po',        grain: 'po_line', unit: 'days', notes: ['STO lines excluded'] },
   { chartId: 'po_approval_distribution', title: 'PO approval distribution',         tab: 'po',        grain: 'po_line', unit: 'count' },
@@ -195,7 +195,7 @@ export const CHART_META: ChartMeta[] = [
   { chartId: 'delivery_by_priority',     title: 'Delivery LT by priority',          tab: 'delivery',  grain: 'po_line', unit: 'days' },
   { chartId: 'delivery_distribution',    title: 'Delivery LT distribution',         tab: 'delivery',  grain: 'po_line', unit: 'count' },
   { chartId: 'e2e_by_month',             title: 'End-to-end by month',              tab: 'delivery',  grain: 'po_line', unit: 'days' },
-  { chartId: 'e2e_by_category',          title: 'Avg E2E by Material Category (days)',  tab: 'delivery',  grain: 'pr_item', unit: 'days' },
+  { chartId: 'e2e_by_category',          title: 'Avg E2E by Spend Category (days)', tab: 'delivery',  grain: 'pr_item', unit: 'days', notes: ['Spend category from the business mapping file — the same dimension the Executive Summary uses'] },
 
   // ── v1's Outstanding-PR family (7 Aug 2026) ──
   // "Outstanding" is v1's word for an active requisition that has not yet

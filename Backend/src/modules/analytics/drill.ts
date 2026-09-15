@@ -18,6 +18,7 @@ import { query, queryOne } from '../../db/client.js';
 import {
   intersectScopes, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+import { spendCategoryWithPlantSql } from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
 
 const env = loadEnv();
@@ -455,6 +456,26 @@ const FILTERS: Record<string, Compiler> = {
   // GR postings carry neither, and buildFilterClause throws for that grain, so
   // no drill on it can arrive here carrying one.
   spendCategory: (v, a, ps, grain) => poLineScoped(grain, a, `spend_category = ${p(ps, String(v))}`),
+  /**
+   * The same spend category, applied to the row ITSELF rather than through its
+   * purchase orders.
+   *
+   * spendCategory above reaches a PR item's linked PO lines, which is right for
+   * a PO-value figure sliced by category. It is wrong for a chart that groups
+   * PR ITEMS by their own material's category: a requisition with no PO belongs
+   * to a bar and would be excluded by an EXISTS on PO lines, so the bar and its
+   * drill would disagree — and the parity sweep would say so.
+   *
+   * The PR grain has no spend_category column (020 added it to fact_po_line
+   * only), so the value is derived here from the same generator the transform
+   * used to fill that column. One rule, two call sites, no drift.
+   */
+  ownSpendCategory: (v, a, ps, grain) => {
+    const expr = grain === 'pr_item'
+      ? spendCategoryWithPlantSql(`${a}.material_code`, `${a}.material_group`, `${a}.plant`)
+      : `${a}.spend_category`;
+    return `${expr} = ${p(ps, String(v))}`;
+  },
   spendCategoryIn: (v, a, ps, grain) =>
     poLineScoped(grain, a, `spend_category = ANY(${p(ps, (v as unknown[]).map(String))})`),
   sizeBand: (v, a, ps, grain) => poLineScoped(grain, a, `size_band = ${p(ps, String(v))}`),

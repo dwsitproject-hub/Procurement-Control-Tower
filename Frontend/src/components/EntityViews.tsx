@@ -588,7 +588,7 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
-        <h3 className="pr-tbl-h">Summary by Material Category <span className="muted">— avg aging metrics (days)</span></h3>
+        <h3 className="pr-tbl-h">Summary by Spend Category <span className="muted">— avg aging metrics (days)</span></h3>
         <div className="table-wrap">
           <table className="data dd-tbl">
             <thead>

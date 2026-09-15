@@ -222,42 +222,71 @@ export interface DetailPage {
   facets: Record<string, Array<{ value: string; count: number }>>;
 }
 
-export async function queryDetail(
+/**
+ * The facet columns, and which filter key each one is driven by.
+ *
+ * One list rather than two so a facet cannot be offered in the UI without the
+ * filter that narrows it, or vice versa.
+ */
+const FACETS: { name: keyof DetailFilters & string; col: string }[] = [
+  { name: 'status', col: 'status' },
+  { name: 'matCat', col: 'mat_cat' },
+  { name: 'matGroup', col: 'mat_group' },
+  { name: 'plant', col: 'plant' },
+  { name: 'company', col: 'company' },
+  { name: 'purchOrg', col: 'purch_org' },
+  { name: 'purchGroup', col: 'purch_group' },
+  { name: 'priority', col: 'p_cat' },
+];
+
+/**
+ * Build the WHERE clause and the parameters that go with it.
+ *
+ * `omit` drops ONE filter, and exists for the facet counts. A facet computed
+ * under its OWN filter can only ever return the values already chosen: tick
+ * "Delivered" and the Status list collapses to just "Delivered", so there is
+ * no second value left to tick and multi-select becomes impossible. Omitting
+ * the facet's own filter is what makes the list stay open — and it makes the
+ * count mean "how many rows would match if I added this value too", which is
+ * the useful reading.
+ *
+ * The clause and its params are built together and returned together, because
+ * they cannot be separated: PostgreSQL infers a parameter's type from where it
+ * is used, so passing a param whose clause was dropped fails with "could not
+ * determine data type of parameter $n". One pass per facet, each with its own
+ * params array, is the only correct shape.
+ */
+function buildDetailWhere(
   versionId: number,
-  asOfDate: string,
   scope: readonly ScopeEntry[],
   filters: DetailFilters,
-  sort: { key: string; dir: 'asc' | 'desc' } | null,
-  limit: number,
-  offset: number,
-  includeFacets: boolean,
-): Promise<DetailPage> {
+  omit?: string,
+): { sql: string; params: unknown[] } {
   const params: unknown[] = [versionId];
   const where: string[] = ['d.dataset_version_id = $1'];
 
-  // Scope is composed in the data layer; an empty scope yields no rows.
+  // Scope is composed in the data layer; an empty scope yields no rows. Never
+  // omitted — a facet must not offer a value the reader cannot open.
   where.push(scopeSql(mintScopedQuery('detail', scope), 'd', params));
 
-  const inList = (col: string, vals: string[] | undefined) => {
-    if (!vals || vals.length === 0) return;
+  const inList = (col: string, vals: string[] | undefined, key: string) => {
+    if (!vals || vals.length === 0 || key === omit) return;
     params.push(vals);
     where.push(`d.${col} = ANY($${params.length})`);
   };
 
-  inList('status', filters.status);
-  inList('mat_cat', filters.matCat);
-  inList('mat_group', filters.matGroup);
-  inList('plant', filters.plant);
-  inList('company', filters.company);
-  inList('purch_org', filters.purchOrg);
-  inList('purch_group', filters.purchGroup);
-  inList('p_cat', filters.priority);
+  for (const f of FACETS) {
+    inList(f.col, filters[f.name] as string[] | undefined, f.name);
+  }
 
-  if (filters.monthKey && filters.monthKey.length > 0) {
+  if (filters.monthKey && filters.monthKey.length > 0 && omit !== 'monthKey') {
     params.push(filters.monthKey);
     where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY-MM') = ANY($${params.length})`);
   }
 
+  // Toggles are NOT omitted for any facet: they narrow the population the
+  // reader is looking at rather than one dimension of it, so a facet count
+  // that ignored them would not describe the rows they would get.
   if (filters.excludeSto) where.push('NOT d.is_sto');
   if (!filters.includeDeleted) where.push('NOT d.pr_deleted');
   if (filters.onlyOpen) {
@@ -269,11 +298,24 @@ export async function queryDetail(
   const search = (filters.search ?? '').trim();
   if (search !== '') {
     params.push(`%${search}%`);
-    const p = `$${params.length}`;
-    where.push(`(${SEARCH_COLUMNS.map((c) => `d.${c} ILIKE ${p}`).join(' OR ')})`);
+    const ph = `$${params.length}`;
+    where.push(`(${SEARCH_COLUMNS.map((c) => `d.${c} ILIKE ${ph}`).join(' OR ')})`);
   }
 
-  const whereSql = where.join(' AND ');
+  return { sql: where.join(' AND '), params };
+}
+
+export async function queryDetail(
+  versionId: number,
+  asOfDate: string,
+  scope: readonly ScopeEntry[],
+  filters: DetailFilters,
+  sort: { key: string; dir: 'asc' | 'desc' } | null,
+  limit: number,
+  offset: number,
+  includeFacets: boolean,
+): Promise<DetailPage> {
+  const { sql: whereSql, params } = buildDetailWhere(versionId, scope, filters);
 
   const countRow = await queryOne<{ n: number }>(
     `SELECT count(*)::int AS n FROM core.v_detail d WHERE ${whereSql}`,
@@ -316,29 +358,34 @@ export async function queryDetail(
     return { ...r, flags };
   });
 
-  // Facets power the filter dropdowns and are computed from the SAME predicate
-  // minus the facet's own column, so counts reflect the other active filters.
+  // Facets power the filter dropdowns. Each is computed from the same predicate
+  // MINUS its own column — see buildDetailWhere. Before that omission the list
+  // collapsed to whatever was already selected, which made it impossible to
+  // pick a second value in any filter.
   const facets: DetailPage['facets'] = {};
   if (includeFacets) {
-    for (const [name, col] of [
-      ['status', 'status'],
-      ['matCat', 'mat_cat'],
-      ['matGroup', 'mat_group'],
-      ['plant', 'plant'],
-      ['company', 'company'],
-      ['purchOrg', 'purch_org'],
-      ['purchGroup', 'purch_group'],
-      ['priority', 'p_cat'],
-    ] as const) {
+    for (const { name, col } of FACETS) {
+      const w = buildDetailWhere(versionId, scope, filters, name);
       const f = await query<{ value: string | null; n: number }>(
         `SELECT d.${col} AS value, count(*)::int AS n
-           FROM core.v_detail d WHERE ${whereSql}
-          GROUP BY 1 ORDER BY 2 DESC LIMIT 60`,
-        params,
+           FROM core.v_detail d WHERE ${w.sql}
+          GROUP BY 1 ORDER BY 2 DESC LIMIT 200`,
+        w.params,
       );
-      facets[name] = f
+      const opts = f
         .filter((x) => x.value !== null)
         .map((x) => ({ value: x.value as string, count: x.n }));
+
+      // A value the reader has already selected must appear in the list even
+      // if this dataset no longer offers it — otherwise the only way to clear
+      // it is the "Clear filters" button, and the tick it came from is gone
+      // from the screen while still filtering the rows.
+      const chosen = (filters[name] as string[] | undefined) ?? [];
+      const present = new Set(opts.map((o) => o.value));
+      for (const v of chosen) {
+        if (!present.has(v)) opts.push({ value: v, count: 0 });
+      }
+      facets[name] = opts;
     }
   }
 

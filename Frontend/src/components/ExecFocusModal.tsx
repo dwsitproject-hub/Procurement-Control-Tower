@@ -24,11 +24,26 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  */
 export function ExecFocusModal({
   title, subtitle, filterQuery, kpiIds, chartIds, currency, onDrill, onClose,
+  lifecycleToggle = false,
 }: {
   title: string;
   subtitle: string;
   /** Global filter AND the clicked slice, already merged. */
   filterQuery: string;
+  /**
+   * Offer All / Open / Closed inside the panel.
+   *
+   * For a slice that is a POPULATION rather than a lifecycle state — a spend
+   * category, say. Clicking the Open segment of a category bar used to pin the
+   * panel to open lines, so the obvious next question ("and what about the
+   * closed ones?") meant closing the panel and clicking a different segment.
+   * The toggle keeps the category and changes the state, which is the axis the
+   * reader is actually moving along.
+   *
+   * Owned here rather than by the caller because it is a property of looking,
+   * not of what was clicked: re-opening the panel starts from All again.
+   */
+  lifecycleToggle?: boolean;
   kpiIds: string[];
   chartIds: string[];
   currency: 'USD' | 'IDR';
@@ -37,16 +52,31 @@ export function ExecFocusModal({
 }) {
   const [kpis, setKpis] = useState<Kpi[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [lifecycle, setLifecycle] = useState<'' | 'open' | 'closed'>('');
+
+  /**
+   * The slice the panel actually asks for.
+   *
+   * The toggle REPLACES any lifecycle the caller passed rather than adding to
+   * it — two `lifecycle` values in one query string would leave the server to
+   * pick one, and which one is not something the reader could predict.
+   */
+  const effectiveQuery = (() => {
+    const qs = new URLSearchParams(filterQuery);
+    qs.delete('lifecycle');
+    if (lifecycle) qs.set('lifecycle', lifecycle);
+    return qs.toString();
+  })();
 
   useEffect(() => {
     let dead = false;
-    const qs = new URLSearchParams(filterQuery);
+    const qs = new URLSearchParams(effectiveQuery);
     qs.set('ids', kpiIds.join(','));
     api.get<{ kpis: Kpi[] }>(`/api/v1/kpi?${qs.toString()}`)
       .then((d) => { if (!dead) setKpis(d.kpis); })
       .catch((e: Error) => { if (!dead) setErr(e.message); });
     return () => { dead = true; };
-  }, [filterQuery, kpiIds]);
+  }, [effectiveQuery, kpiIds]);
 
   // Escape closes, matching the drill modal. A panel this large is easy to open
   // by accident from a stacked bar segment.
@@ -71,6 +101,21 @@ export function ExecFocusModal({
           <h3>🎯 {title}</h3>
           <span className="count">{subtitle}</span>
           <span className="spacer" />
+          {lifecycleToggle && (
+            <div className="gf-scope" role="group" aria-label="Lifecycle">
+              {([['', 'All'], ['open', 'Open'], ['closed', 'Closed']] as const).map(([v, l]) => (
+                <button
+                  key={v || 'all'}
+                  type="button"
+                  className={lifecycle === v ? 'on' : ''}
+                  aria-pressed={lifecycle === v}
+                  onClick={() => setLifecycle(v)}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
           <button type="button" className="dd-x" onClick={onClose} aria-label="Close">✕</button>
         </header>
         <div className="body">
@@ -94,7 +139,7 @@ export function ExecFocusModal({
               <ChartPanel
                 chartId={c}
                 onDrill={onDrill}
-                filterQuery={filterQuery}
+                filterQuery={effectiveQuery}
                 currency={currency}
               />
             </Suspense>

@@ -9,7 +9,36 @@
  */
 
 import { query, queryOne } from '../../db/client.js';
+import { spendCategoryWithPlantSql } from '@pct/rules';
 import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
+
+/**
+ * Spend category, on each of the two grains this module aggregates.
+ *
+ * The Material Group page used `material_category` — derived in code from
+ * material-group NUMBER RANGES ("Chemical", "Spare Parts-General", "Other").
+ * The Executive Summary uses spend category, from the business mapping file
+ * (material code, then code prefix, then material group) with CAPEX split
+ * OPS/PROJ by the plant's third digit. Two different answers to "what kind of
+ * spend is this", side by side in one application.
+ *
+ * Aligned on 15 Sep 2026: this page now reads in spend categories too.
+ *
+ * The PO grain uses the column 020 materialised; the PR grain derives it from
+ * the same generator, because fact_pr_item has no such column. Both therefore
+ * come from one rule, and a mapping change moves them together.
+ *
+ * Note the change of meaning for rows that had no category: the old columns
+ * were NULL and those rows were dropped from the summary entirely. The
+ * generator never returns NULL — an unmapped material is '(unmapped)' and a
+ * service line is '(no material code)' — so they are now counted and named.
+ * That is deliberate: they are real spend, and a summary that silently omits
+ * them does not add up to the page above it.
+ */
+const PRI_SPEND_CAT = spendCategoryWithPlantSql(
+  'pri.material_code', 'pri.material_group', 'pri.plant',
+);
+const POL_SPEND_CAT = `COALESCE(pol.spend_category, '(unmapped)')`;
 
 const OPEN_STATUSES = `('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`;
 
@@ -550,7 +579,7 @@ export async function materialDetail(
     qty: number | null; usd: number | null; avg_price: number | null;
   }>(
     `SELECT left(max(pol.short_text), 80) AS descr, max(pol.material_group) AS grp,
-            max(pol.material_category) AS cat, count(*)::int AS lines,
+            max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors, sum(pol.order_qty) AS qty,
             sum(pol.net_order_value_usd) AS usd,
             avg(pol.unit_price) FILTER (WHERE NOT pol.is_sto AND NOT pol.is_token_price AND pol.unit_price > 0) AS avg_price
@@ -699,7 +728,7 @@ export async function materialGroupPage(
   const priSummary = await query<{
     cat: string; items: number; open_n: number; avg_pra: number | null;
   }>(
-    `SELECT pri.material_category AS cat, count(*)::int AS items,
+    `SELECT ${PRI_SPEND_CAT} AS cat, count(*)::int AS items,
             count(*) FILTER (WHERE pri.status IN ('Unapproved PR','PR Approved-No PO')
               OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
                           WHERE _pl.dataset_version_id = pri.dataset_version_id
@@ -708,14 +737,14 @@ export async function materialGroupPage(
             avg(pri.release_final_date - pri.requisition_date)
               FILTER (WHERE pri.release_final_date - pri.requisition_date >= 0) AS avg_pra
        FROM core.fact_pr_item pri
-      WHERE ${priScoped.where} AND NOT pri.is_deleted AND pri.material_category IS NOT NULL
+      WHERE ${priScoped.where} AND NOT pri.is_deleted
       GROUP BY 1`,
     priScoped.params,
   );
   const polSummary = await query<{
     cat: string; avg_src: number | null; avg_poa: number | null; avg_dlt: number | null; avg_e2e: number | null;
   }>(
-    `SELECT pol.material_category AS cat,
+    `SELECT ${POL_SPEND_CAT} AS cat,
             avg(pol.sourcing_days) FILTER (WHERE pol.sourcing_days >= 0) AS avg_src,
             avg(pol.po_approval_days) FILTER (WHERE pol.po_approval_days >= 0) AS avg_poa,
             avg(pol.delivery_days) FILTER (WHERE pol.delivery_days >= 0) AS avg_dlt,
@@ -726,7 +755,6 @@ export async function materialGroupPage(
          ON pri.dataset_version_id = pol.dataset_version_id
         AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
       WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
-        AND pol.material_category IS NOT NULL
       GROUP BY 1`,
     params,
   );
@@ -738,7 +766,7 @@ export async function materialGroupPage(
   let extra = '';
   if (category) {
     matParams.push(category);
-    extra += ` AND COALESCE(pol.material_category,'Other') = $${matParams.length}`;
+    extra += ` AND ${POL_SPEND_CAT} = $${matParams.length}`;
   }
   if (materialGroup) {
     matParams.push(materialGroup);
@@ -768,7 +796,7 @@ export async function materialGroupPage(
     vendors: number; qty: number | null; usd: number | null; idr: number | null;
   }>(
     `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
-            max(pol.material_group) AS grp, max(pol.material_category) AS cat, count(*)::int AS lines,
+            max(pol.material_group) AS grp, max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors,
             sum(pol.order_qty) AS qty, sum(pol.net_order_value_usd) AS usd,
             sum(pol.net_order_value_idr) AS idr

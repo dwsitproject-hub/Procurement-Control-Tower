@@ -9,7 +9,7 @@
  */
 
 import type pg from 'pg';
-import { sizeBandLabelSql } from '@pct/rules';
+import { sizeBandLabelSql, spendCategoryWithPlantSql } from '@pct/rules';
 import { insertMany } from '../../db/client.js';
 
 // Statuses v1 treats as "open".
@@ -39,6 +39,30 @@ interface KpiSpec {
 }
 
 const PRI = 'core.fact_pr_item';
+/**
+ * Spend category for a PR item, derived rather than stored.
+ *
+ * fact_pr_item has material_code, material_group and plant — everything the
+ * rule needs — but no spend_category column of its own. Deriving it here keeps
+ * the Material Group page on the same categories as the Executive Summary
+ * without a migration and without a recompute, so it works against datasets
+ * that were published before this change.
+ */
+/*
+ * Qualified with the table alias, and that is load-bearing rather than tidy.
+ *
+ * The generator embeds subqueries over core.dim_spend_category sc_, which has
+ * its own material_code and material_group columns. An UNQUALIFIED outer
+ * reference binds to the inner table instead — `sc_.material_code =
+ * material_code` becomes `sc_.material_code = sc_.material_code`, true for
+ * every row, and the subquery returns thousands. The recompute fails with
+ * "more than one row returned by a subquery used as an expression", which
+ * names the symptom and not the cause. Every caller must pass alias-qualified
+ * column names.
+ */
+const PR_SPEND_CAT = spendCategoryWithPlantSql(
+  'pri.material_code', 'pri.material_group', 'pri.plant',
+);
 const POL = 'core.fact_po_line';
 
 export const PARITY_KPIS: KpiSpec[] = [
@@ -1868,14 +1892,34 @@ export const PARITY_CHARTS: ChartSpec[] = [
            WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
   },
+  /*
+   * The three items_by_category series group by SPEND category, not by the
+   * material-group-range category they used to.
+   *
+   * Asked for on 15 Sep 2026 so the Material Group page reads in the same
+   * categories as the Executive Summary's "Where the value is". The two
+   * dimensions genuinely differ: material_category is derived from material
+   * group NUMBER RANGES in code, while spend category comes from the business
+   * mapping file (material code, code prefix, then material group) with the
+   * CAPEX OPS/PROJ split by plant. A page that showed "Chemical" beside an
+   * Executive Summary showing "CHEMICAL REFINERY" invited the question of
+   * which one was right.
+   *
+   * The PR grain has no spend_category column, so it is derived inline from
+   * the shared generator — the same expression the transform uses to fill
+   * fact_po_line.spend_category, and the same one ownSpendCategory filters
+   * with, which is what keeps the bars and their drills in agreement.
+   */
   {
     chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'notDeleted',true)) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   // Annotation series (label_*): not drawn as bars - the per-category PR
@@ -1883,36 +1927,42 @@ export const PARITY_CHARTS: ChartSpec[] = [
   // display toggle picks the right one (user ask 5 Aug 2026).
   {
     chartId: 'items_by_category', seriesKey: 'label_amount', seriesLabel: 'Value (USD)', unit: 'usd',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
-                 sum(total_value_usd)::numeric AS value, count(*)::int AS row_count,
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
+                 sum(pri.total_value_usd)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'notDeleted',true)) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
            GROUP BY 1,2 ORDER BY count(*) DESC`,
   },
   {
     chartId: 'items_by_category', seriesKey: 'label_amount_idr', seriesLabel: 'Value (IDR)', unit: 'idr',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
-                 sum(total_value_idr)::numeric AS value, count(*)::int AS row_count,
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
+                 sum(pri.total_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'notDeleted',true)) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
            GROUP BY 1,2 ORDER BY count(*) DESC`,
   },
   {
     chartId: 'e2e_by_category', seriesKey: 'days', seriesLabel: 'Avg E2E (days)', unit: 'days',
     // Grouped by the PO line's own category (not the PR's) so the po_line-grain
-    // drill opens exactly the aggregated rows. The two categories agree on all
-    // but a handful of lines, and self-consistency wins over that nuance.
-    // Average basis like v1's ch-mge2 (5 Aug 2026).
-    sql: `SELECT COALESCE(pol.material_category,'Other') AS bucket_key,
-                 COALESCE(pol.material_category,'Other') AS bucket_label,
+    // drill opens exactly the aggregated rows. Average basis like v1's ch-mge2
+    // (5 Aug 2026); moved to SPEND category 15 Sep 2026 to match the rest of
+    // the Material Group page. This grain needs no inline derivation — 020
+    // materialised spend_category on fact_po_line, filled by the same
+    // generator, so the stored column and the PR-grain expression agree.
+    sql: `SELECT COALESCE(pol.spend_category,'(unmapped)') AS bucket_key,
+                 COALESCE(pol.spend_category,'(unmapped)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(pol.material_category),
+                   jsonb_build_object('ownSpendCategory', min(COALESCE(pol.spend_category,'(unmapped)')),
                                       'hasReceipt',true,'hasPr',true)) AS drill
             FROM ${POL} pol JOIN ${PRI} pri
               ON pri.dataset_version_id = pol.dataset_version_id

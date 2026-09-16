@@ -1324,10 +1324,20 @@ export const PARITY_CHARTS: ChartSpec[] = [
              WHERE v.id = (SELECT min(dataset_version_id) FROM pr)
           ), x AS (
             SELECT win.d,
-                   CASE WHEN (win.d - pr.req) >= 31 THEN '>31'
-                        WHEN (win.d - pr.req) >= 22 THEN '22-30'
-                        WHEN (win.d - pr.req) >= 15 THEN '15-21'
-                        WHEN (win.d - pr.req) >= 8  THEN '8-14'
+                   -- Re-banded 16 Sep 2026 (was <7 / 8-14 / 15-21 / 22-30 / >31).
+                   -- 61-90 is not in the requested list, which named <7, 8-30,
+                   -- 31-60, 91-150 and >150 and so left days 61 to 90 with
+                   -- nowhere to go. A band that matches nothing does not drop
+                   -- quietly out of a stacked chart -- it drops the ROWS, and
+                   -- the column silently stops adding up to the backlog. It is
+                   -- carried here as its own band so every outstanding item is
+                   -- still counted; collapse it into 91-150 by deleting this
+                   -- line and widening the next, if that was the intent.
+                   CASE WHEN (win.d - pr.req) > 150 THEN '>150'
+                        WHEN (win.d - pr.req) >= 91 THEN '91-150'
+                        WHEN (win.d - pr.req) >= 61 THEN '61-90'
+                        WHEN (win.d - pr.req) >= 31 THEN '31-60'
+                        WHEN (win.d - pr.req) >= 8  THEN '8-30'
                         ELSE '<7' END AS band
               FROM win
               JOIN pr ON pr.req <= win.d
@@ -1910,6 +1920,71 @@ export const PARITY_CHARTS: ChartSpec[] = [
    * fact_po_line.spend_category, and the same one ownSpendCategory filters
    * with, which is what keeps the bars and their drills in agreement.
    */
+  /*
+   * status_mix and po_value_by_month, moved out of mart.ts on 16 Sep 2026.
+   *
+   * Nothing about the numbers changes — the SQL below is the inline SQL, and
+   * the drill filters are the same ones. What changes is that a spec in this
+   * registry can be RECOMPUTED under a filter, which the inline builders could
+   * not be: liveChartAvailable() consults this registry, so both charts used
+   * to render the whole dataset with a "Global filter NOT applied" warning
+   * however the page was sliced.
+   *
+   * That was most wrong inside the spend-category focus panel, where every
+   * figure is supposed to describe the clicked category, and these two
+   * described everything.
+   *
+   * Being live also fixes the drill: computeLiveChartSeries merges the active
+   * filter into each point's predicate, so clicking a month in the panel now
+   * opens that month WITHIN the category rather than the month across all
+   * spend.
+   */
+  {
+    chartId: 'status_mix', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
+    // No is_sto / is_deleted filter, deliberately: this chart counts every
+    // document by the state it is in, and an excluded line is still in a
+    // state. The drill carries the same single filter, so the two agree.
+    sql: `SELECT status AS bucket_key, status AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('status', min(status))) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 /*F*/
+           GROUP BY 1, 2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'po_value_by_month', seriesKey: 'value', seriesLabel: 'Net order value (USD)', unit: 'usd',
+    sql: `SELECT to_char(document_date, 'YYYY-MM') AS bucket_key,
+                 to_char(document_date, 'Mon YYYY') AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date, 'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  {
+    chartId: 'po_value_by_month', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
+    // The IDR twin reports NOTHING for a month containing a line with a value
+    // but no rate, rather than a total that silently omits it. Same rows, same
+    // drill, same rule the rest of the application applies to IDR sums.
+    sql: `SELECT to_char(document_date, 'YYYY-MM') AS bucket_key,
+                 to_char(document_date, 'Mon YYYY') AS bucket_label,
+                 CASE WHEN count(*) FILTER (
+                             WHERE net_order_value IS NOT NULL
+                               AND net_order_value_idr IS NULL) > 0
+                      THEN NULL ELSE sum(net_order_value_idr) END::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date, 'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
   {
     chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
     sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,

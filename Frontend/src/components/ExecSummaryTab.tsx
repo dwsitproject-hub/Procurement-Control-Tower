@@ -803,15 +803,21 @@ function HoSiteBars({ data, onFocus, currency }: {
  * well as shrink, and the shape of the backlog over two months is the point.
  *
  * Bands are drawn oldest-first from the axis, which is the reference design's
- * order and the useful one: the ">31 days" block is what a reader is looking
- * for, and putting it at the base keeps it on a common baseline across days
- * instead of floating on top of whatever came below it.
+ * order and the useful one: the oldest block is what a reader is looking for,
+ * and putting it at the base keeps it on a common baseline across days instead
+ * of floating on top of whatever came below it.
+ *
+ * Re-banded 16 Sep 2026. The requested list named <7, 8-30, 31-60, 91-150 and
+ * >150, which leaves days 61-90 in no band at all; those items are carried in
+ * their own band rather than dropped from the chart. Keys must match the CASE
+ * in the exec_pr_outstanding spec exactly — they ARE the bucket keys.
  */
 const PR_BANDS = [
-  { key: '>31', label: '> 31', color: '#dc2626' },
-  { key: '22-30', label: '22 - 30', color: '#ea7317' },
-  { key: '15-21', label: '15 - 21', color: '#d4b106' },
-  { key: '8-14', label: '8 - 14', color: '#a3c93a' },
+  { key: '>150', label: '> 150', color: '#7f1d1d' },
+  { key: '91-150', label: '91 - 150', color: '#dc2626' },
+  { key: '61-90', label: '61 - 90', color: '#ea7317' },
+  { key: '31-60', label: '31 - 60', color: '#d4b106' },
+  { key: '8-30', label: '8 - 30', color: '#a3c93a' },
   { key: '<7', label: '< 7', color: '#4CAF50' },
 ] as const;
 
@@ -926,7 +932,7 @@ export function ExecSummaryTab({
    * Requested 15 Sep 2026 after reading a panel where seven of the cards were
    * either blank or answering something else.
    */
-  const CATEGORY_HIDDEN_KPIS = useMemo(() => new Set([
+  const SLICE_HIDDEN_KPIS = useMemo(() => new Set([
     'pr_pipeline_value', 'cycle_e2e', 'otd_vs_requested', 'demand_realism',
     'expedite_effectiveness', 'wbs_compliance', 'open_items',
   ]), []);
@@ -938,21 +944,26 @@ export function ExecSummaryTab({
    * carries no lifecycle — the panel's own toggle starts at All and the reader
    * moves between states without reopening it.
    */
-  const openCategoryFocus = useCallback(
+  const openAlignedFocus = useCallback(
     (title: string, subtitle: string, slice: string) => {
       setFocus({
-        // The segment named the click; it must not name the PANEL, which opens
-        // on every lifecycle state. Leaving "METHANOL — Closed" above a view
-        // showing open lines too is the kind of caption that gets quoted in a
-        // meeting and is wrong. The clicked figure stays on the bar behind.
-        title: title.replace(/\s+—\s+(Open|Closed)$/, ''),
+        // The clicked segment named the click; it must not name the PANEL,
+        // which opens on every lifecycle state. Leaving "METHANOL — Closed"
+        // above a view that includes open lines is the kind of caption that
+        // gets quoted in a meeting and is wrong. Two forms reach here:
+        // "… — Open"/"… — Closed" from the category and size-band bars, and
+        // "… — delivered in Jan 2026" from the monthly stack. Both lose the
+        // lifecycle word and keep the slice they actually describe.
+        title: title
+          .replace(/\s+—\s+(Open|Closed)$/, '')
+          .replace(/\s+—\s+delivered in\s+/, ' — '),
         subtitle: 'Open and closed together — use the toggle to narrow',
         slice: slice.replace(/&?lifecycle=(open|closed)/g, ''),
-        kpiIds: overviewKpis.filter((id) => !CATEGORY_HIDDEN_KPIS.has(id)),
+        kpiIds: overviewKpis.filter((id) => !SLICE_HIDDEN_KPIS.has(id)),
         lifecycleToggle: true,
       });
     },
-    [overviewKpis, CATEGORY_HIDDEN_KPIS],
+    [overviewKpis, SLICE_HIDDEN_KPIS],
   );
 
   /**
@@ -1293,7 +1304,7 @@ export function ExecSummaryTab({
                   Where the value is <span className="muted">— committed value by spend category</span>
                 </h3>
                 {byCategory
-                  ? <RankedBars data={byCategory} onFocus={openCategoryFocus} emphasiseTop={5} currency={currency} />
+                  ? <RankedBars data={byCategory} onFocus={openAlignedFocus} emphasiseTop={5} currency={currency} />
                   : <div className="spinner" />}
                 <p className="note" style={{ marginTop: '.5rem' }}>
                   {/*
@@ -1341,7 +1352,7 @@ export function ExecSummaryTab({
                   <span className="muted">— delivered value by month, stacked by category</span>
                 </h3>
                 {byMonth
-                  ? <MonthlyCategoryBars data={byMonth} onFocus={openFocus} currency={currency} />
+                  ? <MonthlyCategoryBars data={byMonth} onFocus={openAlignedFocus} currency={currency} />
                   : <div className="spinner" />}
               </div>
       ),
@@ -1353,7 +1364,7 @@ export function ExecSummaryTab({
                 <h3 className="pr-tbl-h">
                   Transaction size <span className="muted">— share of value against share of lines</span>
                 </h3>
-                {byBand ? <BandPairs data={byBand} onFocus={openFocus} /> : <div className="spinner" />}
+                {byBand ? <BandPairs data={byBand} onFocus={openAlignedFocus} /> : <div className="spinner" />}
                 <p className="note" style={{ marginTop: '.5rem' }}>
                   Bands are ordered by size, never by measure. Lines with no rupiah value are
                   excluded rather than counted as zero, which would inflate the smallest band —
@@ -1377,7 +1388,7 @@ export function ExecSummaryTab({
                   <span className="muted">— who raised the order, by month</span>
                 </h3>
                 {byHoSite
-                  ? <HoSiteBars data={byHoSite} onFocus={openFocus} currency={currency} />
+                  ? <HoSiteBars data={byHoSite} onFocus={openAlignedFocus} currency={currency} />
                   : <div className="spinner" />}
                 <p className="note" style={{ marginTop: '.5rem' }}>
                   Attributed to the SAP user who raised the order, resolved to Head Office or

@@ -373,11 +373,15 @@ const FILTERS: Record<string, Compiler> = {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error(`bad asOf: ${asOf}`);
     const d = p(ps, asOf);
     const age = `(${d}::date - ${a}.requisition_date::date)`;
+    // Mirrors the CASE in the exec_pr_outstanding spec, band for band. The
+    // sweep compares the bar against this predicate, so an off-by-one here is
+    // caught rather than shipped.
     const bands: Record<string, string> = {
-      '>31': `${age} >= 31`,
-      '22-30': `${age} BETWEEN 22 AND 30`,
-      '15-21': `${age} BETWEEN 15 AND 21`,
-      '8-14': `${age} BETWEEN 8 AND 14`,
+      '>150': `${age} > 150`,
+      '91-150': `${age} BETWEEN 91 AND 150`,
+      '61-90': `${age} BETWEEN 61 AND 90`,
+      '31-60': `${age} BETWEEN 31 AND 60`,
+      '8-30': `${age} BETWEEN 8 AND 30`,
       '<7': `${age} <= 7`,
     };
     const clause = bands[band];

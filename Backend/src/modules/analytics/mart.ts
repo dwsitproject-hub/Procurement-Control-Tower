@@ -565,18 +565,13 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
   // silently ignoring it.
 
 
-  // status mix
-  {
-    const r = await client.query<{ status: string; n: number }>(
-      `SELECT status, count(*)::int AS n FROM core.fact_po_line
-        WHERE dataset_version_id = $1 GROUP BY status ORDER BY n DESC`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) =>
-      push('status_mix', 'lines', 'PO lines', x.status, x.status, i + 1, x.n, x.n, 'count',
-        { grain: 'po_line', filters: { status: x.status } }),
-    );
-  }
+  // status_mix and po_value_by_month used to be built here. They moved into
+  // PARITY_CHARTS on 16 Sep 2026 for the reason the paragraph above gives:
+  // only a spec in that registry can be recomputed under a filter. As inline
+  // builders they were the two charts that kept showing unfiltered totals with
+  // a "filter NOT applied" warning, on the Overview and inside every focus
+  // panel — including the spend-category panel, where the whole point is that
+  // the figures describe the category.
 
   // PR by month
   {
@@ -591,30 +586,6 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
       push('pr_by_month', 'items', 'PR items', x.mk, monthLabel(x.mk), i + 1, x.n, x.n, 'count',
         { grain: 'pr_item', filters: { monthKey: x.mk } }),
     );
-  }
-
-  // PO value by month (STO excluded from spend)
-  {
-    const r = await client.query<{ mk: string; usd: number | null; idr: number | null; unrated_idr: number; n: number }>(
-      `SELECT to_char(document_date, 'YYYY-MM') AS mk,
-              sum(net_order_value_usd) AS usd,
-              sum(net_order_value_idr) AS idr,
-              count(*) FILTER (WHERE net_order_value IS NOT NULL AND net_order_value_idr IS NULL)::int AS unrated_idr,
-              count(*)::int AS n
-         FROM core.fact_po_line
-        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
-        GROUP BY 1 ORDER BY 1`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) => {
-      // Must mirror the aggregate's WHERE exactly, or the drill over-counts.
-      const drill = { grain: 'po_line', filters: { monthKey: x.mk, notSto: true, notDeleted: true } };
-      push('po_value_by_month', 'value', 'Net order value (USD)', x.mk, monthLabel(x.mk), i + 1,
-        x.usd, x.n, 'usd', drill);
-      // IDR display twin — same rows, same drill, strict per-line FX.
-      push('po_value_by_month', 'value_idr', 'Net order value (IDR)', x.mk, monthLabel(x.mk), i + 1,
-        x.unrated_idr > 0 ? null : x.idr, x.n, 'idr', drill);
-    });
   }
 
   // ordered vs received by PO month (STO included in delivery)

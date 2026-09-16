@@ -844,10 +844,34 @@ function PrOutstandingBars({ data, onFocus }: {
   if (days.length === 0) return <p className="muted">No outstanding requisitions in this window.</p>;
   const max = Math.max(...days.map(([, d]) => d.total), 1);
 
+  /**
+   * Bands the data carries that this legend does not name.
+   *
+   * These points are precomputed into the mart at ingest, so after the bands
+   * are changed in code the CURRENTLY PUBLISHED version still holds the old
+   * keys until the next recompute. Rendering only the known bands would draw
+   * columns with a total on top and nothing beneath it — the chart would look
+   * broken while being merely stale, and worse, the rows would be silently
+   * absent from the stack.
+   *
+   * So anything unrecognised is drawn too, in grey, and named. It disappears
+   * by itself once a new dataset version is published. This is the same rule
+   * the rest of the application follows: never drop rows quietly to keep a
+   * picture tidy.
+   */
+  const known = new Set<string>(PR_BANDS.map((b) => b.key));
+  const strays = [...new Set(days.flatMap(([, d]) => [...d.bands.keys()]))]
+    .filter((k) => !known.has(k))
+    .sort();
+  const bands: { key: string; label: string; color: string }[] = [
+    ...strays.map((k) => ({ key: k, label: `${k} (old banding)`, color: '#94a3b8' })),
+    ...PR_BANDS.map((b) => ({ key: b.key, label: b.label, color: b.color })),
+  ];
+
   return (
     <div className="xs-pr">
       <div className="xs-legend xs-mc-legend">
-        {PR_BANDS.map((b) => (
+        {bands.map((b) => (
           <span key={b.key}><i className="xs-key" style={{ background: b.color }} /> {b.label}</span>
         ))}
       </div>
@@ -857,7 +881,7 @@ function PrOutstandingBars({ data, onFocus }: {
           <div key={day} className="xs-pr-col" title={`${d.label} — ${formatNumber(d.total)} outstanding`}>
             <span className="xs-pr-total">{formatNumber(d.total)}</span>
             <span className="xs-pr-stack">
-              {PR_BANDS.map((b) => {
+              {bands.map((b) => {
                 const n = d.bands.get(b.key) ?? 0;
                 if (n <= 0) return null;
                 return (

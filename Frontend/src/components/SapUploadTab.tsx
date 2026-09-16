@@ -431,6 +431,33 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
     } finally { setBusy(null); }
   };
 
+  /**
+   * Recompute the derived layer only, from facts already in the database.
+   *
+   * The sibling above needs the source files; this one does not. Reach for it
+   * after a release that changed how a figure is COMPUTED when the pickup
+   * folder cannot produce a bundle — filed away, not yet arrived, or an export
+   * that is itself broken. It publishes no new version.
+   */
+  const rebuildMart = async () => {
+    setBusy('mart');
+    setMsg('Recomputing every KPI and chart from the facts already stored — no files are read…');
+    try {
+      const out = await api.post<{
+        datasetVersionId: number; chartSeries: number; chartSeriesBefore: number;
+        kpiValues: number; disabledKpisPreserved: number;
+      }>('/api/v1/admin/mart/rebuild');
+      setMsg(
+        `Recomputed dataset version ${out.datasetVersionId}: ${out.chartSeries} chart points `
+        + `(was ${out.chartSeriesBefore}) and ${out.kpiValues} KPI values. `
+        + `The facts and the as-of date are unchanged. Reload to see it.`,
+      );
+      load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'recompute failed');
+    } finally { setBusy(null); }
+  };
+
   if (!cfg) {
     return <div className="panel"><h2>🔁 SAP Data Sync</h2><div className="spinner" /></div>;
   }
@@ -628,6 +655,16 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
             {busy === 'rebuild' ? 'Rebuilding…' : 'Rebuild from the same files'}
           </button>
         )}
+        {canEdit && (
+          <button
+            className="dt-btn"
+            disabled={busy !== null}
+            onClick={() => void rebuildMart()}
+            title="Recompute every KPI and chart from the facts already in the database — reads no files, publishes no new version"
+          >
+            {busy === 'mart' ? 'Recomputing…' : 'Recompute charts only (no files)'}
+          </button>
+        )}
       </div>
       <p className="note">
         <strong>Sync now</strong> does nothing when the folders hold files that are already
@@ -635,6 +672,14 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         with the same numbers. <strong>Rebuild</strong> insists anyway. Reach for it after a
         release that changed how figures are computed: the files are byte-identical, so
         nothing else will pick the change up.
+      </p>
+      <p className="note">
+        <strong>Recompute charts only</strong> does the same job for KPIs and charts without
+        reading any file, so it works when the pickup folder cannot produce a complete bundle —
+        filed away, not yet arrived, or an export that is itself broken. It rewrites the derived
+        figures for the version already published and creates no new one, so the facts, the row
+        counts and the as-of date do not move. Use the two above when the DATA has changed;
+        use this one when only the software has.
       </p>
 
       {msg && <p className="note"><strong>{msg}</strong></p>}

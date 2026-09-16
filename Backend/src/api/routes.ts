@@ -19,7 +19,8 @@ import {
 } from '../modules/ingest/error_report.js';
 import { resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
-import { healthCheck, query, queryOne } from '../db/client.js';
+import { healthCheck, pool, query, queryOne } from '../db/client.js';
+import { buildMart } from '../modules/analytics/mart.js';
 import {
   AuthError, buildAuthorizeUrl, changeLocalPassword, ensureOidcReady, handleOidcCallback,
   loadPrincipal, localLogin, oidcEnabled,
@@ -1045,6 +1046,112 @@ export function buildRouter(): Router {
     res.setHeader('X-Export-Rows', String(page.rows.length));
     res.setHeader('X-Export-Total', String(page.totalCount));
     res.send(wb);
+  }));
+
+  /**
+   * Rebuild the derived layer for the CURRENTLY published version, from the
+   * facts already stored. No files are read and no new version is created.
+   *
+   * ── Why this exists ─────────────────────────────────────────────────────
+   *
+   * KPI values and chart series are precomputed at ingest. A release that
+   * changes how a figure is computed therefore changes nothing until someone
+   * re-ingests — and "Rebuild from the same files" can only do that while the
+   * source files are still in the pickup folder. They often are not: after-run
+   * filing moves them, or the next export has not arrived, or (staging, 16 Sep
+   * 2026) the export itself is broken and no bundle will complete at all.
+   *
+   * That left a deployed change visible nowhere, with no way forward that did
+   * not involve the share folder. The facts, though, are already in the
+   * database; only the derivation was stale.
+   *
+   * ── What it does and does not touch ─────────────────────────────────────
+   *
+   * Rewrites mart.kpi_value and mart.chart_series for that version. Does NOT
+   * touch core.fact_*, the row counts, the as-of date or the version id — so
+   * drill tokens, saved links and published snapshots stay valid.
+   *
+   * It does mean a published version can DISPLAY different numbers after a
+   * release than it did before one, which is worth being clear about rather
+   * than hiding: the alternative is a figure that the code says is wrong and
+   * the screen keeps showing. The facts it is derived from have not moved.
+   *
+   * The rule snapshot and the disabled-KPI set are read back from the version
+   * itself — the snapshot from the row, the disabled set from the KPI rows
+   * about to be replaced — so the rebuild reproduces the rules the version was
+   * PUBLISHED under, not whatever is configured today. A rule change still
+   * needs a real recompute, and Admin -> Data Exclusions still says so.
+   */
+  r.post('/api/v1/admin/mart/rebuild', role('admin', async (req, res, ctx) => {
+    const v = await queryOne<{ id: number; as_of: string; rule_snapshot: Record<string, unknown> }>(
+      `SELECT id, as_of_date::text AS as_of, rule_snapshot
+         FROM core.dataset_version
+        WHERE upper(status) = 'PUBLISHED'
+        ORDER BY published_at DESC LIMIT 1`,
+    );
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset to rebuild');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Read the disabled set BEFORE deleting the rows that carry it. A KPI
+      // disabled by a validation finding must stay disabled and keep saying
+      // why, rather than quietly coming back with a computed number.
+      const dis = await client.query<{ kpi_id: string }>(
+        `SELECT kpi_id FROM mart.kpi_value
+          WHERE dataset_version_id = $1 AND status = 'disabled'`,
+        [v.id],
+      );
+      const before = await client.query<{ charts: number; kpis: number }>(
+        `SELECT (SELECT count(*)::int FROM mart.chart_series WHERE dataset_version_id = $1) AS charts,
+                (SELECT count(*)::int FROM mart.kpi_value    WHERE dataset_version_id = $1) AS kpis`,
+        [v.id],
+      );
+
+      await client.query(`DELETE FROM mart.chart_series WHERE dataset_version_id = $1`, [v.id]);
+      await client.query(`DELETE FROM mart.kpi_value    WHERE dataset_version_id = $1`, [v.id]);
+      await buildMart(
+        client, v.id, v.as_of, v.rule_snapshot,
+        new Set(dis.rows.map((r2) => r2.kpi_id)),
+      );
+
+      const after = await client.query<{ charts: number; kpis: number }>(
+        `SELECT (SELECT count(*)::int FROM mart.chart_series WHERE dataset_version_id = $1) AS charts,
+                (SELECT count(*)::int FROM mart.kpi_value    WHERE dataset_version_id = $1) AS kpis`,
+        [v.id],
+      );
+      // One transaction: a half-rebuilt mart would leave pages with some
+      // figures and not others, and no way to tell which.
+      await client.query('COMMIT');
+
+      await recordAudit({
+        action: 'admin.mart.rebuild', actorUserId: ctx.principal.userId,
+        actorEmail: ctx.principal.email, outcome: 'success',
+        detail: {
+          datasetVersionId: v.id,
+          chartSeries: { before: before.rows[0]?.charts ?? 0, after: after.rows[0]?.charts ?? 0 },
+          kpiValues: { before: before.rows[0]?.kpis ?? 0, after: after.rows[0]?.kpis ?? 0 },
+          disabledKpisPreserved: dis.rows.length,
+        },
+        ip: req.ip,
+      });
+
+      res.json({
+        outcome: 'rebuilt',
+        datasetVersionId: v.id,
+        asOfDate: v.as_of,
+        chartSeries: after.rows[0]?.charts ?? 0,
+        kpiValues: after.rows[0]?.kpis ?? 0,
+        chartSeriesBefore: before.rows[0]?.charts ?? 0,
+        disabledKpisPreserved: dis.rows.length,
+      });
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      client.release();
+    }
   }));
 
   // ── ingestion ──

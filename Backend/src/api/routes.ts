@@ -21,6 +21,7 @@ import { resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
 import { healthCheck, pool, query, queryOne } from '../db/client.js';
 import { buildMart } from '../modules/analytics/mart.js';
+import { openItemsSummary } from '../modules/analytics/openitems.js';
 import {
   AuthError, buildAuthorizeUrl, changeLocalPassword, ensureOidcReady, handleOidcCallback,
   loadPrincipal, localLogin, oidcEnabled,
@@ -1151,6 +1152,36 @@ export function buildRouter(): Router {
       throw e;
     } finally {
       client.release();
+    }
+  }));
+
+  /**
+   * The Open Items page's stage pipeline and desk table.
+   *
+   * Everything else on that page comes from the KPI and chart endpoints it
+   * already used; this covers the three figures those cannot supply — oldest
+   * age per stage, the priority split per stage, and the backlog grouped by
+   * purchasing group. See modules/analytics/openitems.ts for why the stage
+   * counts are computed here rather than read from the tiles.
+   */
+  r.get('/api/v1/openitems/summary', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+    // The same global filter every other figure on the page is recomputed
+    // under. A filter this page cannot express (a GR-grain dimension, say)
+    // throws inside, and is reported rather than quietly ignored.
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    try {
+      res.json({
+        datasetVersionId: v.id,
+        ...(await openItemsSummary(v.id, v.asOfDate, ctx.scope, gf)),
+      });
+    } catch (e) {
+      throw new HttpProblem(
+        400, 'invalid-parameter',
+        `This page cannot be filtered that way: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }));
 

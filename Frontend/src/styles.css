@@ -1001,3 +1001,80 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 @media (max-width: 1100px) {
   .xs-cell { grid-column: span 12; }
 }
+
+/* ── Open Items: the stage-pipeline redesign (16 Sep 2026) ─────────────────
+   Every colour below is an existing token. The page introduces no palette of
+   its own — the age bands reuse accent / warn / orange / crit in the order the
+   aging chart already draws them, so a reader moving between the two pages is
+   reading the same colours to mean the same thing. */
+
+.oi-head-row { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.oi-asof { margin: 0; font-size: .78rem; color: var(--muted); }
+.oi-total { margin: .1rem 0 0; font-size: 1.9rem; font-weight: 800; color: var(--navy); line-height: 1.1; }
+.oi-total span { font-size: .95rem; font-weight: 600; color: var(--muted); }
+.oi-says { margin: .6rem 0 0; font-size: .95rem; line-height: 1.5; max-width: 74ch; }
+.oi-desk-pick select { margin: 0 .35rem; padding: .2rem .35rem; }
+
+.oi-lens { display: inline-flex; align-items: center; gap: .3rem; }
+.oi-lens > span { margin-right: .2rem; font-size: .76rem; }
+.oi-lens button {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: .28rem .7rem; font-size: .8rem; cursor: pointer;
+}
+.oi-lens button:first-of-type { border-radius: 6px 0 0 6px; }
+.oi-lens button:last-child { border-radius: 0 6px 6px 0; }
+.oi-lens button.on { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 700; }
+
+.oi-caveat {
+  margin: .5rem 0; padding: .45rem .7rem; font-size: .82rem;
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: 6px;
+}
+
+/* The pipeline. Five across on a wide screen, and never fewer than two — a
+   single-column pipeline is a list, and the point is the comparison. */
+.oi-pipe { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .6rem; }
+.oi-pipe--compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.oi-stage {
+  border: 1px solid var(--line); border-radius: 9px; padding: .6rem .7rem;
+  background: var(--panel); min-width: 0;
+}
+.oi-stage--hot { border-color: var(--orange); box-shadow: inset 0 0 0 1px var(--orange); }
+.oi-stage-h { display: flex; align-items: center; gap: .4rem; min-height: 1.1rem; }
+.oi-stage-name { font-size: .78rem; font-weight: 700; color: var(--navy); }
+.oi-tag {
+  font-size: .6rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+  background: var(--orange); color: #fff; padding: .05rem .3rem; border-radius: 3px;
+}
+.oi-stage-n { margin: .25rem 0 .1rem; font-size: 1.45rem; font-weight: 800; color: var(--ink); }
+.oi-stage-n span { font-size: .72rem; font-weight: 600; }
+.oi-stage-sub { margin: 0 0 .4rem; font-size: .72rem; color: var(--muted); }
+.oi-stage-foot { display: flex; justify-content: space-between; gap: .4rem; margin: .35rem 0 0; font-size: .72rem; }
+.oi-stage-prio { display: flex; flex-wrap: wrap; gap: .5rem; margin: .3rem 0 0; font-size: .68rem; color: var(--muted); }
+.oi-stage-prio i { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: .2rem; }
+
+/* The age-mix bar, shared by the stage cards and the desk table. */
+.oi-mix { display: flex; height: 7px; border-radius: 4px; overflow: hidden; background: var(--line); }
+.oi-mix span { display: block; height: 100%; }
+.oi-mix--empty { opacity: .4; }
+
+.oi-watch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
+.oi-watch-card { border: 1px solid var(--line); border-radius: 9px; padding: .6rem .7rem; background: var(--panel); }
+.oi-watch-v { margin: 0; font-size: 1.35rem; font-weight: 800; color: var(--navy); }
+.oi-watch-l { margin: .05rem 0 .25rem; font-size: .76rem; font-weight: 700; }
+.oi-watch-n { margin: 0; font-size: .72rem; color: var(--muted); line-height: 1.4; }
+
+.oi-hyg { display: flex; flex-wrap: wrap; gap: .4rem 1.6rem; align-items: baseline; }
+.oi-hyg-item { display: flex; align-items: baseline; gap: .4rem; }
+.oi-hyg-v { font-size: 1.05rem; font-weight: 800; color: var(--navy); }
+.oi-hyg-l { font-size: .76rem; color: var(--muted); }
+
+.oi-desks td.oi-desk-mix { width: 26%; min-width: 120px; }
+
+@media (max-width: 1250px) {
+  .oi-pipe, .oi-pipe--compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .oi-watch { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .oi-pipe, .oi-pipe--compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

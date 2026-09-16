@@ -1985,6 +1985,64 @@ export const PARITY_CHARTS: ChartSpec[] = [
              AND document_date IS NOT NULL
            GROUP BY 1, 2 ORDER BY 1`,
   },
+  /*
+   * Open backlog by the month the requisition was raised. Requested by the
+   * Open Items redesign (16 Sep 2026) for the Management view's question, "is
+   * this getting better or worse".
+   *
+   * ── Why requisitions only, and why "month raised" ───────────────────────
+   *
+   * Two constraints, both worth stating because the obvious chart is not the
+   * one that can be built:
+   *
+   * A month bucket spanning BOTH grains cannot hold drill parity. The PR and
+   * PO grains would each contribute a row for the same month — a duplicate
+   * bucket key, which the mart's unique key rejects — and folding them
+   * together first leaves one bucket that no single drill token can open,
+   * because a token carries exactly one grain. So this chart is PR-grain: the
+   * two requisition stages, which hold 13,482 of the 19,516 open lines and all
+   * of the bottleneck.
+   *
+   * And it is a COHORT, not a time series. A true "backlog as it stood each
+   * month" has to be reconstructed day by day from the raise date and the
+   * first PO date, the way exec_pr_outstanding does. That is a different and
+   * larger chart. Grouping by the month raised answers a narrower question
+   * honestly — which months' demand is still unmet — and the title and notes
+   * say so rather than letting it be read as a trend line.
+   */
+  {
+    chartId: 'open_backlog_by_month', seriesKey: 'open', seriesLabel: 'Open requisitions', unit: 'count',
+    sql: `SELECT to_char(requisition_date, 'YYYY-MM') AS bucket_key,
+                 to_char(requisition_date, 'Mon YYYY') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('monthKey', to_char(requisition_date, 'YYYY-MM'),
+                                      'statusIn', jsonb_build_array('Unapproved PR','PR Approved-No PO'),
+                                      'notDeleted', true)) AS drill
+            FROM ${PRI}
+           WHERE dataset_version_id = $1 AND NOT is_deleted /*F*/
+             AND status IN ('Unapproved PR','PR Approved-No PO')
+             AND requisition_date IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  {
+    chartId: 'open_backlog_by_month', seriesKey: 'over90', seriesLabel: 'Of those, over 90 days', unit: 'count',
+    // The same population narrowed by age, so the second series is always a
+    // subset of the first and the two can be read against each other.
+    sql: `SELECT to_char(requisition_date, 'YYYY-MM') AS bucket_key,
+                 to_char(requisition_date, 'Mon YYYY') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('monthKey', to_char(requisition_date, 'YYYY-MM'),
+                                      'statusIn', jsonb_build_array('Unapproved PR','PR Approved-No PO'),
+                                      'ageBand4', '>90',
+                                      'notDeleted', true)) AS drill
+            FROM ${PRI}
+           WHERE dataset_version_id = $1 AND NOT is_deleted /*F*/
+             AND status IN ('Unapproved PR','PR Approved-No PO')
+             AND requisition_date IS NOT NULL AND aging_days > 90
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
   {
     chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
     sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,

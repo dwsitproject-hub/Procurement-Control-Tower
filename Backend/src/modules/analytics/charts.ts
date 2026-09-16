@@ -173,6 +173,18 @@ export const CHART_META: ChartMeta[] = [
   { chartId: 'unapproved_by_category',   title: 'Unapproved by material category',  tab: 'openitems', grain: 'pr_item', unit: 'count' },
   { chartId: 'unreleased_aging_buckets', title: 'Unreleased PR aging buckets',      tab: 'openitems', grain: 'pr_item', unit: 'count' },
   { chartId: 'aging_severity_by_stage',   title: 'Aging severity by open stage — item count in age bands', tab: 'openitems', grain: 'pr_item', unit: 'count' },
+  {
+    chartId: 'open_backlog_by_month',
+    title: 'Open requisitions by month raised — and how many passed 90 days',
+    tab: 'openitems',
+    grain: 'pr_item',
+    unit: 'count',
+    notes: [
+      'Requisitions only (not approved, or approved with no PO) — the stage holding most of the backlog',
+      'Grouped by the month the requisition was RAISED, so a tall recent bar is new demand and a tall old bar is demand still unmet',
+      'Not a reconstruction of the backlog as it stood in each month',
+    ],
+  },
   { chartId: 'pr_approval_by_priority',  title: 'PR approval by priority',          tab: 'pr',        grain: 'pr_item', unit: 'days' },
   { chartId: 'pr_by_plant',              title: 'PR items by plant',                tab: 'pr',        grain: 'pr_item', unit: 'count' },
   { chartId: 'pr_approval_distribution', title: 'PR approval distribution',         tab: 'pr',        grain: 'pr_item', unit: 'count' },

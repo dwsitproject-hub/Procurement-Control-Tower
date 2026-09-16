@@ -28,6 +28,7 @@ import {
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
+const OpenItemsTab = lazy(() => import('./components/OpenItemsTab').then((m) => ({ default: m.OpenItemsTab })));
 const AdminTab = lazy(() => import('./components/AdminTab').then((m) => ({ default: m.AdminTab })));
 const MasterTab = lazy(() => import('./components/MasterTab').then((m) => ({ default: m.MasterTab })));
 const CustomTab = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomTab })));
@@ -669,6 +670,23 @@ export default function App() {
             />
             </PageChunk>
           </>
+        ) : tab === 'openitems' ? (
+          /*
+            Open Items has its own page (redesign, 16 Sep 2026): a stage
+            pipeline with a stated conclusion rather than a wall of equal tiles.
+            It reads the same TAB_KPIS.openitems values the tiles used, so the
+            KPI fetch above is unchanged and no figure was dropped.
+          */
+          <PageChunk tab={tab}>
+            <OpenItemsTab
+              kpis={kpis}
+              findings={findings}
+              onDrill={onDrill}
+              currency={currency}
+              asOfDate={dataset?.asOfDate ?? null}
+              filterQuery={gfQuery}
+            />
+          </PageChunk>
         ) : tab === 'vendors' ? (
           <PageChunk tab={tab}><VendorsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'materials' ? (
@@ -944,18 +962,8 @@ export default function App() {
             {/* v1's PO-page top-spend tables with Vendor/Material 360 popups. */}
             {tab === 'po' && <PoTables onDrill={onDrill} />}
 
-            {/* v1's "Open Items Detail" table: the open rows themselves, with
-                the detail facets (category / priority / mat cat / plant) and a
-                live row count — server-side, same engine as the Detail tab. */}
-            {tab === 'openitems' && (
-              <div style={{ marginTop: '1rem' }}>
-                <DetailTable
-                  key="openitems-detail"
-                  initial={{ onlyOpen: 'true' }}
-                  initialLabel="Open items only"
-                />
-              </div>
-            )}
+            {/* The Open Items detail table moved into OpenItemsTab, which owns
+                the whole page now and filters it per view. */}
           </>
         )}
       </main>

@@ -81,6 +81,10 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'purchOrg',        label: 'Purch Org',              sql: 'purch_org',           type: 'string', default: false, sortable: true },
   { key: 'purchGroup',      label: 'Purch Grp',              sql: 'purch_group',         type: 'string', default: false, sortable: true },
   { key: 'requisitioner',   label: 'Requisitioner',          sql: 'requisitioner',       type: 'string', default: false, sortable: true },
+  // 028. The age of the row in the stage it is in — a PR still waiting ages on
+  // the requisition, one that reached an order ages on the order. Added so the
+  // Open Items stage cards' age figures can filter this table.
+  { key: 'ageDays',         label: 'Age (d)',                sql: 'age_days',            type: 'int',    default: false, sortable: true },
 ];
 
 const COLUMN_BY_KEY = new Map(DETAIL_COLUMNS.map((c) => [c.key, c]));
@@ -99,6 +103,14 @@ export interface DetailFilters {
   priority?: string[];
   monthKey?: string[];
   search?: string;
+  /**
+   * One of the four age bands, or 'past-sla' for everything beyond the first.
+   *
+   * A whitelist, not a number: the values come from a card the reader clicked,
+   * and the band boundaries have to be the SAME boundaries the card drew or the
+   * table will not return the number that was clicked.
+   */
+  ageBand?: string;
   excludeSto?: boolean;
   includeDeleted?: boolean;
   onlyOpen?: boolean;
@@ -115,9 +127,28 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'q', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'q', 'ageBand', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
+
+/**
+ * Age bands, matching the boundaries the Open Items cards draw.
+ *
+ * Defined here and nowhere else. If these drifted from the card's own bands,
+ * clicking "2,722 past 15 d" would open a table with a different number in the
+ * corner, and there would be no way for a reader to tell which was right.
+ */
+const AGE_BANDS: Record<string, string> = {
+  '0-15': 'd.age_days <= 15',
+  '16-30': 'd.age_days > 15 AND d.age_days <= 30',
+  '31-90': 'd.age_days > 30 AND d.age_days <= 90',
+  '>90': 'd.age_days > 90',
+  'past-sla': 'd.age_days > 15',
+};
+
+export function isAgeBand(v: string): boolean {
+  return Object.prototype.hasOwnProperty.call(AGE_BANDS, v);
+}
 
 /**
  * Read filters and sort out of a query string.
@@ -152,6 +183,7 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     priority: list('priority'),
     monthKey: list('monthKey'),
     search: q['q'] === undefined ? undefined : String(q['q']),
+    ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
     excludeSto: flag('excludeSto'),
     includeDeleted: flag('includeDeleted'),
     onlyOpen: flag('onlyOpen'),
@@ -194,6 +226,9 @@ export function describeDetailFilters(
     if (v && v.length > 0) out.push([label, v.join(', ')]);
   }
   if ((filters.search ?? '').trim() !== '') out.push(['Search', filters.search!.trim()]);
+  if (filters.ageBand) {
+    out.push(['Age', filters.ageBand === 'past-sla' ? 'over 15 days' : `${filters.ageBand} days`]);
+  }
 
   // Toggles are listed only when ON, except "include deleted", which is stated
   // either way: whether deleted rows are in the file changes every total in it.
@@ -294,6 +329,12 @@ function buildDetailWhere(
   }
   if (filters.onlyDirectPo) where.push('d.is_direct_po');
   if (filters.onlyReleaseExempt) where.push('d.release_exempt');
+
+  // Never interpolated: the clause comes from the whitelist above, and an
+  // unknown band is ignored rather than widening the query silently.
+  if (filters.ageBand && AGE_BANDS[filters.ageBand]) {
+    where.push(`(${AGE_BANDS[filters.ageBand]})`);
+  }
 
   const search = (filters.search ?? '').trim();
   if (search !== '') {

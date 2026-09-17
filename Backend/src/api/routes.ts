@@ -47,7 +47,7 @@ import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
 import {
   queryDetail, DETAIL_COLUMNS, DETAIL_QUERY_PARAMS, parseDetailQuery,
-  describeDetailFilters,
+  describeDetailFilters, isAgeBand,
 } from '../modules/analytics/detail.js';
 import {
   buildExportWorkbook, exportFileName, MAX_EXPORT_ROWS,
@@ -952,6 +952,9 @@ export function buildRouter(): Router {
 
     // Parsed by the same function the export uses, so the two cannot drift.
     const { filters, sort } = parseDetailQuery(req.query as Record<string, unknown>);
+    if (filters.ageBand !== undefined && !isAgeBand(filters.ageBand)) {
+      throw new HttpProblem(400, 'invalid-parameter', `Unknown age band: ${filters.ageBand}`);
+    }
 
     const page = await queryDetail(
       v.id,

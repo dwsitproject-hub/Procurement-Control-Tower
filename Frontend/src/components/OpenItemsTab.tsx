@@ -35,21 +35,35 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
 /** Age bands, in the order the aging chart already uses. */
 const BAND_LABELS = ['0-15 d', '16-30 d', '31-90 d', 'over 90 d'];
 const BAND_COLORS = ['var(--accent)', 'var(--warn)', 'var(--orange)', 'var(--crit)'];
+/**
+ * The filter value for each band, positionally aligned with the labels above.
+ *
+ * These strings are the server's whitelist (detail.ts AGE_BANDS). Keeping them
+ * in the same order as the labels is what makes clicking the third segment open
+ * the third band rather than something adjacent to it.
+ */
+const BAND_KEYS = ['0-15', '16-30', '31-90', '>90'];
 
 interface StageRow {
   key: string; name: string; sub: string; count: number;
   bands: [number, number, number, number];
   pastSla: number; oldest: number | null;
   emergency: number; urgent: number; standard: number;
+  prioUnset: number; standardLabels: string[];
+  /** The detail filter that reproduces this card's own population. */
+  detailFilter: Record<string, string>;
 }
 interface DeskRow {
   desk: string; label: string; open: number; over90: number;
   oldest: number | null; bands: [number, number, number, number];
+  detailFilter: Record<string, string>;
 }
 interface Summary {
   asOfDate: string; pastSlaDays: number;
   stages: StageRow[]; desks: DeskRow[];
   totalOpen: number; totalPastSla: number;
+  /** The filter for every open line this page counts. */
+  detailFilter: Record<string, string>;
 }
 
 type Lens = 'buyer' | 'lead' | 'mgmt';
@@ -76,16 +90,34 @@ function ageColor(days: number): string {
   return days > 90 ? 'var(--crit)' : days > 30 ? 'var(--orange)' : days > 15 ? 'var(--warn)' : 'var(--accent)';
 }
 
-function AgeMixBar({ bands, total }: { bands: readonly number[]; total: number }) {
+function AgeMixBar({ bands, total, onBand }: {
+  bands: readonly number[];
+  total: number;
+  /** When given, each segment opens that band's rows. */
+  onBand?: (i: number, n: number) => void;
+}) {
   if (total <= 0) return <div className="oi-mix oi-mix--empty" />;
   return (
-    <div className="oi-mix" role="img" aria-label={bands.map((n, i) => `${BAND_LABELS[i]}: ${n}`).join(', ')}>
+    <div className="oi-mix" role={onBand ? 'group' : 'img'}
+      aria-label={bands.map((n, i) => `${BAND_LABELS[i]}: ${n}`).join(', ')}>
       {bands.map((n, i) => (n > 0 ? (
-        <span
-          key={BAND_LABELS[i]}
-          style={{ width: `${(n / total) * 100}%`, background: BAND_COLORS[i] }}
-          title={`${BAND_LABELS[i]}: ${formatNumber(n)} lines`}
-        />
+        onBand ? (
+          <button
+            key={BAND_LABELS[i]}
+            type="button"
+            className="oi-mix-seg"
+            style={{ width: `${(n / total) * 100}%`, background: BAND_COLORS[i] }}
+            title={`${BAND_LABELS[i]}: ${formatNumber(n)} lines — click for the rows`}
+            aria-label={`${BAND_LABELS[i]}: ${formatNumber(n)} lines`}
+            onClick={() => onBand(i, n)}
+          />
+        ) : (
+          <span
+            key={BAND_LABELS[i]}
+            style={{ width: `${(n / total) * 100}%`, background: BAND_COLORS[i] }}
+            title={`${BAND_LABELS[i]}: ${formatNumber(n)} lines`}
+          />
+        )
       ) : null))}
     </div>
   );
@@ -109,6 +141,30 @@ export function OpenItemsTab({
   });
   const [desk, setDesk] = useState<string>(() => stored(DESK_KEY) ?? '');
   const [showCharts, setShowCharts] = useState(false);
+
+  /**
+   * What the reader last clicked, and the filter that reproduces it.
+   *
+   * Every figure on a stage card is a button, and clicking one narrows the
+   * detail table at the bottom of the page rather than opening a modal — the
+   * rows are already on the page, so the useful move is to point the table at
+   * them.
+   *
+   * The filter always starts from the card's OWN detailFilter, which the server
+   * states, so the table's row count matches the number that was clicked
+   * instead of approximating it.
+   */
+  const [focus, setFocus] = useState<{ label: string; init: Record<string, string> } | null>(null);
+
+  const openRows = (label: string, init: Record<string, string>) => {
+    setFocus({ label, init });
+    // A filter applied to a table two screens below the click is invisible, and
+    // reads as nothing having happened. Defer a frame so the table has
+    // re-rendered under its new key before we scroll to it.
+    requestAnimationFrame(() => {
+      document.getElementById('oi-rows')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
 
   useEffect(() => {
     let dead = false;
@@ -260,7 +316,15 @@ export function OpenItemsTab({
                   {isBottleneck && <span className="oi-tag">Bottleneck</span>}
                 </div>
                 <p className="oi-stage-n">
-                  {formatNumber(s.count)}
+                  <button
+                    type="button"
+                    className="oi-num"
+                    disabled={s.count === 0}
+                    title={`Show the ${formatNumber(s.count)} ${s.name} lines in the table below`}
+                    onClick={() => openRows(s.name, s.detailFilter)}
+                  >
+                    {formatNumber(s.count)}
+                  </button>
                   <span className="muted">
                     {sum.totalOpen > 0 ? ` ${Math.round((s.count / sum.totalOpen) * 100)}% of open` : ''}
                   </span>
@@ -268,20 +332,63 @@ export function OpenItemsTab({
                 {showPipelineFull && (
                   <>
                     <p className="oi-stage-sub">{s.sub}</p>
-                    <AgeMixBar bands={s.bands} total={s.count} />
+                    <AgeMixBar
+                      bands={s.bands}
+                      total={s.count}
+                      onBand={(i) => openRows(
+                        `${s.name} · ${BAND_LABELS[i]}`,
+                        { ...s.detailFilter, ageBand: BAND_KEYS[i]! },
+                      )}
+                    />
                     <p className="oi-stage-foot">
-                      <span style={{ color: s.pastSla > 0 ? 'var(--crit)' : 'inherit' }}>
+                      <button
+                        type="button"
+                        className="oi-num oi-num--sm"
+                        disabled={s.pastSla === 0}
+                        style={{ color: s.pastSla > 0 ? 'var(--crit)' : 'inherit' }}
+                        title={`Show the ${formatNumber(s.pastSla)} lines past ${sum.pastSlaDays} days`}
+                        onClick={() => openRows(
+                          `${s.name} · past ${sum.pastSlaDays} d`,
+                          { ...s.detailFilter, ageBand: 'past-sla' },
+                        )}
+                      >
                         {formatNumber(s.pastSla)} past {sum.pastSlaDays} d
                         {s.count > 0 ? ` (${Math.round((s.pastSla / s.count) * 100)}%)` : ''}
-                      </span>
+                      </button>
                       <span className="muted">
                         oldest {s.oldest === null ? '—' : `${formatNumber(s.oldest)} d`}
                       </span>
                     </p>
                     <p className="oi-stage-prio">
-                      <span><i style={{ background: 'var(--crit)' }} />{formatNumber(s.emergency)} emergency</span>
-                      <span><i style={{ background: 'var(--orange)' }} />{formatNumber(s.urgent)} urgent</span>
-                      <span><i style={{ background: 'var(--accent)' }} />{formatNumber(s.standard)} standard</span>
+                      {([
+                        ['emergency', s.emergency, 'var(--crit)', '01-Emergency'],
+                        ['urgent', s.urgent, 'var(--orange)', '02-Urgent'],
+                        // The catch-all bucket filters by the labels the server
+                        // says it counted, not by a guess at what "standard"
+                        // means — a priority code nobody has seen yet would
+                        // otherwise be counted here and missing from the rows.
+                        ['standard', s.standard, 'var(--accent)', s.standardLabels.join(',')],
+                        // An order with no requisition has no priority. Counted
+                        // so the four add up, not clickable because the filter
+                        // cannot ask for null — see openitems.ts.
+                        ...(s.prioUnset > 0
+                          ? [['not set', s.prioUnset, 'var(--muted)', ''] as const]
+                          : []),
+                      ] as const).map(([label, n, color, prio]) => (
+                        <button
+                          key={label}
+                          type="button"
+                          className="oi-num oi-num--sm"
+                          disabled={n === 0 || prio === ''}
+                          title={`Show the ${formatNumber(n)} ${label} lines in ${s.name}`}
+                          onClick={() => openRows(
+                            `${s.name} · ${label}`,
+                            { ...s.detailFilter, priority: prio },
+                          )}
+                        >
+                          <i style={{ background: color }} />{formatNumber(n)} {label}
+                        </button>
+                      ))}
                     </p>
                   </>
                 )}
@@ -305,7 +412,26 @@ export function OpenItemsTab({
               const k = kpi.get(w.id);
               return (
                 <div key={w.id} className="oi-watch-card">
-                  <p className="oi-watch-v">{kval(w.id)}</p>
+                  {/*
+                    The watchlist figures do NOT filter the table. Three of the
+                    four are an average or a rate — there is no set of detail
+                    rows that "329 days" or "5.7%" selects. Their KPI drill
+                    token opens exactly the rows the figure was computed from,
+                    with the parity the sweep checks, so that is what a click
+                    does here. A figure without a token is not a button.
+                  */}
+                  <p className="oi-watch-v">
+                    {k?.drillToken ? (
+                      <button
+                        type="button"
+                        className="oi-num"
+                        title={`Show the rows behind ${k.title}`}
+                        onClick={() => onDrill(k.drillToken!, k.title)}
+                      >
+                        {kval(w.id)}
+                      </button>
+                    ) : kval(w.id)}
+                  </p>
                   <p className="oi-watch-l">{k?.title ?? w.id}</p>
                   <p className="oi-watch-n">{w.note}</p>
                 </div>
@@ -323,7 +449,18 @@ export function OpenItemsTab({
             {['open_pr_no_wbs', 'open_pr_with_wbs', 'commitment_over_60d', 'urgent_po_before_pr', 'po_hold']
               .map((id) => (
                 <div key={id} className="oi-hyg-item">
-                  <span className="oi-hyg-v">{kval(id)}</span>
+                  <span className="oi-hyg-v">
+                    {kpi.get(id)?.drillToken ? (
+                      <button
+                        type="button"
+                        className="oi-num oi-num--sm"
+                        title={`Show the rows behind ${kpi.get(id)!.title}`}
+                        onClick={() => onDrill(kpi.get(id)!.drillToken!, kpi.get(id)!.title)}
+                      >
+                        {kval(id)}
+                      </button>
+                    ) : kval(id)}
+                  </span>
                   <span className="oi-hyg-l">{kpi.get(id)?.title ?? id}</span>
                 </div>
               ))}
@@ -357,10 +494,41 @@ export function OpenItemsTab({
                     <th scope="row">
                       <strong>{d.desk}</strong> <span className="muted">{d.label}</span>
                     </th>
-                    <td className="oi-desk-mix"><AgeMixBar bands={d.bands} total={d.open} /></td>
-                    <td className="num">{formatNumber(d.open)}</td>
-                    <td className="num" style={{ color: d.over90 > 0 ? 'var(--crit)' : undefined }}>
-                      {formatNumber(d.over90)}
+                    <td className="oi-desk-mix">
+                      <AgeMixBar
+                        bands={d.bands}
+                        total={d.open}
+                        onBand={Object.keys(d.detailFilter).length === 0 ? undefined : (i) => openRows(
+                          `${d.desk} · ${BAND_LABELS[i]}`,
+                          { ...d.detailFilter, ageBand: BAND_KEYS[i]! },
+                        )}
+                      />
+                    </td>
+                    <td className="num">
+                      <button
+                        type="button"
+                        className="oi-num oi-num--sm"
+                        title={`Show the ${formatNumber(d.open)} open lines on ${d.desk}`}
+                        disabled={Object.keys(d.detailFilter).length === 0}
+                        onClick={() => openRows(d.desk, d.detailFilter)}
+                      >
+                        {formatNumber(d.open)}
+                      </button>
+                    </td>
+                    <td className="num">
+                      <button
+                        type="button"
+                        className="oi-num oi-num--sm"
+                        style={{ color: d.over90 > 0 ? 'var(--crit)' : undefined }}
+                        title={`Show the ${formatNumber(d.over90)} lines over 90 days on ${d.desk}`}
+                        disabled={d.over90 === 0 || Object.keys(d.detailFilter).length === 0}
+                        onClick={() => openRows(
+                          `${d.desk} · over 90 d`,
+                          { ...d.detailFilter, ageBand: '>90' },
+                        )}
+                      >
+                        {formatNumber(d.over90)}
+                      </button>
                     </td>
                     <td className="num" style={{ color: d.oldest === null ? undefined : ageColor(d.oldest) }}>
                       {d.oldest === null ? '—' : `${formatNumber(d.oldest)} d`}
@@ -408,16 +576,41 @@ export function OpenItemsTab({
 
       {/* ── the rows ───────────────────────────────────────────────── */}
       {showTable ? (
-        <div style={{ marginTop: '1rem' }}>
+        <div id="oi-rows" style={{ marginTop: '1rem' }}>
+          {focus && (
+            <p className="note oi-focus">
+              Showing <strong>{focus.label}</strong>{' '}
+              <button className="dt-btn" onClick={() => setFocus(null)}>
+                show all open items
+              </button>
+            </p>
+          )}
           <DetailTable
-            key={`openitems-detail-${lens === 'buyer' ? desk || 'all' : 'all'}`}
+            /*
+              The key carries the focus, so a click REMOUNTS the table with the
+              new filter. DetailTable takes `initial` as a seed for its own
+              state — changing the prop alone would leave the old filter in
+              place and the click would appear to do nothing.
+            */
+            key={`openitems-detail-${focus ? JSON.stringify(focus.init) : lens === 'buyer' ? desk || 'all' : 'all'}`}
+            /*
+              The default table shows the SAME population the pipeline counts —
+              the five stage statuses — not the wider `onlyOpen` list, which
+              also holds Partially Delivered. Otherwise the headline total and
+              the row count under the table disagree on the page's own
+              definition of an open item.
+            */
             initial={
-              lens === 'buyer' && desk
-                ? { onlyOpen: 'true', purchGroup: desk }
-                : { onlyOpen: 'true' }
+              focus
+                ? { ...sum.detailFilter, ...focus.init }
+                : lens === 'buyer' && desk
+                  ? { ...sum.detailFilter, purchGroup: desk }
+                  : sum.detailFilter
             }
             initialLabel={
-              lens === 'buyer' && desk ? `Open items on ${desk}` : 'Open items only'
+              focus
+                ? focus.label
+                : lens === 'buyer' && desk ? `Open items on ${desk}` : 'Open items only'
             }
           />
         </div>

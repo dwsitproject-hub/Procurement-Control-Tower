@@ -93,6 +93,14 @@ export function DetailTable({
     }
     return f;
   });
+  /**
+   * Age band, arriving from an Open Items stage card.
+   *
+   * A single value rather than a list: the card that sent it drew one band, and
+   * the boundaries are the server's (detail.ts AGE_BANDS) so the table returns
+   * the number that was clicked.
+   */
+  const [ageBand, setAgeBand] = useState(init['ageBand'] ?? '');
   const [excludeSto, setExcludeSto] = useState(init['excludeSto'] === 'true');
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [onlyOpen, setOnlyOpen] = useState(init['onlyOpen'] === 'true');
@@ -138,6 +146,7 @@ export function DetailTable({
       if (v && v.length > 0) q.set(k, v.join(','));
     }
     if (debounced.trim() !== '') q.set('q', debounced.trim());
+    if (ageBand) q.set('ageBand', ageBand);
     if (excludeSto) q.set('excludeSto', 'true');
     if (includeDeleted) q.set('includeDeleted', 'true');
     if (onlyOpen) q.set('onlyOpen', 'true');
@@ -146,7 +155,7 @@ export function DetailTable({
       q.set('dir', sort.dir);
     }
     return q.toString();
-  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort]);
+  }, [filters, debounced, ageBand, excludeSto, includeDeleted, onlyOpen, sort]);
 
   const queryString = useMemo(
     () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
@@ -156,7 +165,7 @@ export function DetailTable({
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
     setPage(0);
-  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [filters, debounced, ageBand, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -266,6 +275,7 @@ export function DetailTable({
   const clearFilters = () => {
     setFilters({});
     setSearch('');
+    setAgeBand('');
     setExcludeSto(false);
     setIncludeDeleted(false);
     setOnlyOpen(false);
@@ -274,6 +284,7 @@ export function DetailTable({
   const activeFilterCount =
     Object.values(filters).reduce((n, v) => n + (v?.length ?? 0), 0) +
     (debounced.trim() ? 1 : 0) +
+    (ageBand ? 1 : 0) +
     (excludeSto ? 1 : 0) +
     (includeDeleted ? 1 : 0) +
     (onlyOpen ? 1 : 0);
@@ -349,6 +360,13 @@ export function DetailTable({
             {exporting ? 'Preparing\u2026' : '\u2B07 Export to Excel'}
           </button>
         </div>
+
+        {ageBand && (
+          <p className="note dt-agechip">
+            Age filter: <strong>{ageBand === 'past-sla' ? 'over 15 days' : `${ageBand} days`}</strong>{' '}
+            <button className="dt-btn" onClick={() => setAgeBand('')}>clear</button>
+          </p>
+        )}
 
         {exportNote && (
           <p className={exportNote.startsWith('Export failed') ? 'err' : 'note'} style={{ marginTop: '.5rem' }}>

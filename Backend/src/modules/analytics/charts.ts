@@ -100,10 +100,18 @@ export const CHART_META: ChartMeta[] = [
   },
   {
     chartId: 'pr_by_month',
-    title: 'Requisitions raised by month',
+    title: 'Requisition flow by month — in against out',
     tab: 'pr',
     grain: 'pr_item',
     unit: 'count',
+    notes: [
+      'IN = brought forward + newly raised. OUT = became PO + cancelled.',
+      'Brought forward is a STOCK, not a flow: a requisition waiting three months '
+      + 'is counted in all three, so those bars must not be added up.',
+      'The export carries a deletion flag and no deletion date, so cancellations '
+      + 'are shown against the month the requisition was RAISED, not the month it '
+      + 'was cancelled.',
+    ],
   },
   {
     chartId: 'po_value_by_month',

@@ -44,6 +44,23 @@ export const CATEGORY_COLORS: Record<string, string> = {
 };
 const BAR_COLORS: Record<string, string> = { ...PRIORITY_COLORS, ...CATEGORY_COLORS };
 
+/**
+ * Colours pinned to a SERIES, for charts whose series mean something the
+ * palette's rotation would contradict.
+ *
+ * The requisition flow chart is the case that needed it: incoming and outgoing
+ * have to read as two pairs at a glance, and the default rotation gave "became
+ * PO" the same blue as "brought forward" would have had on another page.
+ * Requested 22 Sep 2026 with the colours named - green new, orange waiting,
+ * blue converted, grey cancelled.
+ */
+const SERIES_COLORS: Record<string, string> = {
+  'Newly raised': '#4CAF50',
+  'Brought forward (still open)': '#ED7D31',
+  'Became PO': '#2E75B6',
+  'Cancelled (by month raised)': '#94a3b8',
+};
+
 // v1's PR Status Distribution donut colours, keyed by status.
 const STATUS_COLORS: Record<string, string> = {
   Delivered: '#4CAF50',
@@ -281,7 +298,9 @@ export function ChartPanel({
           backgroundColor:
             shownSeries.length === 1 && data.buckets.some((b) => BAR_COLORS[b.label])
               ? data.buckets.map((b) => BAR_COLORS[b.label] ?? PALETTE[0]!)
-              : PALETTE[i % PALETTE.length],
+              // A series that owns a colour keeps it whatever its position in
+              // the legend; everything else keeps the rotation.
+              : SERIES_COLORS[s.label] ?? PALETTE[i % PALETTE.length],
           borderRadius: 3,
         })),
       },

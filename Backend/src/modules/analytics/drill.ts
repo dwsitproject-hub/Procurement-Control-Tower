@@ -163,7 +163,83 @@ function poLineScoped(grain: Grain | undefined, a: string, predicate: string): s
   return `${a}.${predicate}`;
 }
 
+/**
+ * The month a requisition CONVERTED in: its earliest linked PO line, but never
+ * earlier than the month it was raised.
+ *
+ * Earliest, not any: a requisition split across three orders converted once, on
+ * the first of them, and counting it three times would make the outflow larger
+ * than the population it drains.
+ *
+ * Never earlier than the raise month because of RETRO POs - 57 of this
+ * dataset's 10,228 converted requisitions carry an order dated before the
+ * requisition itself. Taken literally they leave the pipeline in a month they
+ * had not yet entered, and the flow stops balancing: measured before this
+ * floor, six months were out by between 1 and 28 requisitions. Flooring says
+ * the requisition was born already converted, which is what a retro PO IS.
+ *
+ * The CASE is not decoration. GREATEST ignores NULLs in Postgres, so
+ * GREATEST(NULL, raised) returns the raise month - and every requisition that
+ * never converted would have counted as converted on the day it arrived.
+ */
+const PR_CONVERTED_MONTH = (a: string): string =>
+  `(SELECT CASE WHEN min(_pf.document_date) IS NULL THEN NULL
+                ELSE GREATEST(to_char(min(_pf.document_date), 'YYYY-MM'),
+                              to_char(${a}.requisition_date, 'YYYY-MM')) END
+      FROM core.fact_po_line _pf
+     WHERE _pf.dataset_version_id = ${a}.dataset_version_id
+       AND _pf.pr_no = ${a}.pr_no AND _pf.pr_item = ${a}.pr_item)`;
+
 const FILTERS: Record<string, Compiler> = {
+  /**
+   * One phase of the requisition flow chart, for one month.
+   *
+   * The four phases are written here ONCE and the chart's aggregate calls the
+   * same expressions, so a bar and the rows it opens cannot disagree about what
+   * "still outstanding in March" means.
+   *
+   *   new        raised in the month, whatever became of it afterwards
+   *   cancelled  raised in the month and since deleted
+   *   to_po      converted in the month, and not cancelled
+   *   carried_in raised BEFORE the month, not cancelled, and not yet converted
+   *              when the month opened
+   *
+   * Those four make the month balance exactly:
+   *
+   *   carried_in(M+1) = carried_in(M) + new(M) - to_po(M) - cancelled(M)
+   *
+   * which is why `new` deliberately includes rows that were later cancelled -
+   * excluding them would subtract the same requisition twice.
+   *
+   * carried_in is a STOCK, not a flow: one requisition appears in every month
+   * it spent waiting. Its bars therefore do not sum to anything meaningful
+   * across months, and the chart says so.
+   */
+  prFlow: (v, a, ps) => {
+    const o = v as { phase?: string; month?: string };
+    const month = String(o.month ?? '');
+    if (!/^[0-9]{4}-[0-9]{2}$/.test(month)) {
+      throw new Error(`prFlow needs a YYYY-MM month, got: ${month}`);
+    }
+    const m = p(ps, month);
+    const raised = `to_char(${a}.requisition_date, 'YYYY-MM')`;
+    // '9999-99' for "never converted": the comparison is on 'YYYY-MM' text, so
+    // a sentinel that sorts after every real month keeps unconverted rows in
+    // the outstanding stock without a second IS NULL branch.
+    const conv = `COALESCE(${PR_CONVERTED_MONTH(a)}, '9999-99')`;
+    switch (o.phase) {
+      case 'new':
+        return `${raised} = ${m}`;
+      case 'cancelled':
+        return `${a}.is_deleted AND ${raised} = ${m}`;
+      case 'to_po':
+        return `NOT ${a}.is_deleted AND ${PR_CONVERTED_MONTH(a)} = ${m}`;
+      case 'carried_in':
+        return `NOT ${a}.is_deleted AND ${raised} < ${m} AND ${conv} >= ${m}`;
+      default:
+        throw new Error(`unknown prFlow phase: ${String(o.phase)}`);
+    }
+  },
   // Filters the mart aggregates apply. Every predicate must carry the SAME
   // filters as the query that produced its number — the omission of these two is
   // what made 29 chart points drill to a higher count than they displayed.

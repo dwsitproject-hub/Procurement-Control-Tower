@@ -573,20 +573,10 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
   // panel — including the spend-category panel, where the whole point is that
   // the figures describe the category.
 
-  // PR by month
-  {
-    const r = await client.query<{ mk: string; n: number }>(
-      `SELECT to_char(requisition_date, 'YYYY-MM') AS mk, count(*)::int AS n
-         FROM core.fact_pr_item
-        WHERE dataset_version_id = $1 AND requisition_date IS NOT NULL
-        GROUP BY 1 ORDER BY 1`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) =>
-      push('pr_by_month', 'items', 'PR items', x.mk, monthLabel(x.mk), i + 1, x.n, x.n, 'count',
-        { grain: 'pr_item', filters: { monthKey: x.mk } }),
-    );
-  }
+  // PR by month moved to PARITY_CHARTS on 22 Sep 2026, when it became the
+  // four-series requisition flow. An inline builder here can never be
+  // recomputed under a filter, and this chart is on a page whose filter bar is
+  // the first thing a reader touches.
 
   // ordered vs received by PO month (STO included in delivery)
   {

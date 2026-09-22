@@ -49,7 +49,10 @@ echo "COUPA_BASE_URL = $HOST"
 case "$HOST" in
   *"$OLD_HOST_MATCH"*)
     die "that is still the OLD tenant ($OLD_HOST_MATCH). Point the container at the new one and restart it first:
-       edit secrets.staging.env, then: docker compose -f be.compose.yml up -d --force-recreate api" ;;
+       edit secrets.staging.env, then recreate with the DEPLOYED compose file name
+       (the repo ships be.compose.yml; deploy copies it to /opt/pct/compose.yml):
+         docker compose -f compose.yml up -d --force-recreate api
+       A restart will NOT do: Compose re-reads env_file only on recreate." ;;
 esac
 echo "not the old tenant -- ok"
 

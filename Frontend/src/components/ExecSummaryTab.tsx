@@ -1039,6 +1039,17 @@ export function ExecSummaryTab({
     },
     [],
   );
+  /**
+   * YTD and current-month figures for every headline tile.
+   *
+   * Server-side (execperiods.ts) rather than summed from a monthly chart here,
+   * because only a total and a count can be summed: distinct vendors and desks
+   * would double-count everyone who appears in two months, and an average of
+   * averages is not an average.
+   */
+  const [periods, setPeriods] = useState<{
+    year: string; month: string; tiles: Record<string, { ytd: number | null; mtd: number | null }>;
+  } | null>(null);
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
   const [byMonth, setByMonth] = useState<ChartResponse | null>(null);
@@ -1056,6 +1067,14 @@ export function ExecSummaryTab({
     setByCommitted(null);
     setByHoSite(null);
     setPrOutstanding(null);
+    setPeriods(null);
+    // Its own request, deliberately NOT in the Promise.all below: a chart that
+    // fails must not blank the tiles' period lines, and vice versa.
+    api.get<{ year: string; month: string;
+      tiles: Record<string, { ytd: number | null; mtd: number | null }> }>(
+      `/api/v1/exec/tile-periods${q}`)
+      .then((d) => { if (!dead) setPeriods(d); })
+      .catch(() => { if (!dead) setPeriods(null); });
     Promise.all([
       api.get<ChartResponse>(`/api/v1/chart/exec_value_by_category${q}`),
       api.get<ChartResponse>(`/api/v1/chart/exec_txn_size${q}`),
@@ -1086,38 +1105,20 @@ export function ExecSummaryTab({
   const totalUsd = totalKpi?.value ?? null;
 
   /**
-   * YTD and current-month figures for the headline tiles.
+   * The period the tiles report.
    *
-   * Derived from exec_committed_by_month rather than from four more KPIs,
-   * because a KPI spec's drill is a static literal and cannot express "the
-   * months of the as-of year". Summing the month points here keeps one
-   * definition of the population and one place where the date arithmetic lives.
+   * From the DATASET's as-of date, never the wall clock: this is an extract
+   * with its own end date, and reading the browser's calendar would make the
+   * same published version report different numbers on different days — and
+   * show nothing at all on the 1st of a month the data has not reached.
    *
-   * The period comes from the DATASET's as-of date, never the wall clock: this
-   * is an extract with its own end date, and reading the browser's calendar
-   * would make the same published version report different numbers on different
-   * days — and show nothing at all on the 1st of a month the data has not
-   * reached.
+   * The figures themselves come from /api/v1/exec/tile-periods. They were
+   * summed from exec_committed_by_month here until 22 Sep 2026, which works for
+   * a total and a count and for nothing else the row now carries.
    */
   const periodOf = (): { year: string; month: string } | null => {
     if (!asOfDate) return null;
     return { year: asOfDate.slice(0, 4), month: asOfDate.slice(0, 7) };
-  };
-
-  const sumMonths = (seriesKey: string, keep: (monthKey: string) => boolean): number | null => {
-    const series = byCommitted?.series.find((x) => x.key === seriesKey);
-    if (!series) return null;
-    let any = false;
-    let total = 0;
-    for (const pt of series.points) {
-      if (!keep(pt.bucketKey)) continue;
-      any = true;
-      total += pt.value ?? 0;
-    }
-    // null rather than 0 when the period has no rows at all: "no data for this
-    // month" and "zero committed this month" are different statements, and
-    // printing 0 for the first would be a quiet lie.
-    return any ? total : null;
   };
 
   const period = periodOf();
@@ -1126,10 +1127,36 @@ export function ExecSummaryTab({
   const money = (v: number | null): string =>
     v === null ? '—' : currency === 'IDR' ? rupiah(v) : formatMoney(v, 'USD');
 
-  const valueYtd = period ? sumMonths(valueKey, (mk) => mk.slice(0, 4) === period.year) : null;
-  const valueMtd = period ? sumMonths(valueKey, (mk) => mk === period.month) : null;
-  const linesYtd = period ? sumMonths('lines', (mk) => mk.slice(0, 4) === period.year) : null;
-  const linesMtd = period ? sumMonths('lines', (mk) => mk === period.month) : null;
+  /**
+   * The tile periods, from the endpoint.
+   *
+   * The two money/count tiles were derived here by summing
+   * exec_committed_by_month. They now read the same endpoint as the other six,
+   * so the page has ONE definition of "YTD" rather than two that happen to
+   * agree. Verified against the local dataset before the switch: the endpoint
+   * and the summed chart differ by 0.000000 on value, 0 on lines, for both the
+   * year and the month.
+   */
+  const per = (id: string): { ytd: number | null; mtd: number | null } =>
+    periods?.tiles[id] ?? { ytd: null, mtd: null };
+  const valueTile = per(currency === 'IDR' ? 'total_po_amount_idr' : 'total_po_amount');
+  const valueYtd = valueTile.ytd;
+  const valueMtd = valueTile.mtd;
+  const linesYtd = per('po_line_items').ytd;
+  const linesMtd = per('po_line_items').mtd;
+
+  /**
+   * A tile's period pair, formatted the way that tile's own figure is.
+   *
+   * Passing the formatter in keeps a count from being printed as days and an
+   * average from being printed with a thousands separator and no unit — the
+   * headline figure and the two under it are the same measure, so they have to
+   * read as the same measure.
+   */
+  const periodPair = (id: string, fmt: (v: number | null) => string) => [
+    { name: `YTD ${period?.year ?? ''}`, text: fmt(per(id).ytd) },
+    { name: monthName, text: fmt(per(id).mtd) },
+  ];
 
   /** "YTD 2026" / "Jul 2026", so the tile names the period it is claiming. */
   const monthName = period
@@ -1216,12 +1243,16 @@ export function ExecSummaryTab({
       label: 'active vendors',
       value: formatNumber(val('unique_suppliers') ?? 0),
       sub: 'distinct vendors',
+      // DISTINCT within each period, never the sum of the months: a vendor
+      // billing in March and April is one vendor for the year.
+      periods: periodPair('unique_suppliers', (v) => (v === null ? '\u2014' : formatNumber(v))),
       ...(k('unique_suppliers') ? { kpi: k('unique_suppliers')! } : {}),
     },
     {
       label: 'purchasing desks',
       value: formatNumber(val('active_purch_groups') ?? 0),
       sub: 'groups raising orders',
+      periods: periodPair('active_purch_groups', (v) => (v === null ? '\u2014' : formatNumber(v))),
       ...(k('active_purch_groups') ? { kpi: k('active_purch_groups')! } : {}),
     },
     /*
@@ -1233,28 +1264,42 @@ export function ExecSummaryTab({
      * rather than two pages that can disagree about what "avg PO approval"
      * means.
      */
+    /*
+     * The four cycle tiles' periods are AVERAGES OVER THE PERIOD, recomputed
+     * from the rows - not an average of monthly averages, which would weight a
+     * quiet August the same as a busy March.
+     *
+     * The requisition-approval period is windowed on the requisition date and
+     * the three PO measures on the document date: a measure is attributed to
+     * the month it STARTED in, so a December requisition approved in January
+     * cannot flatter December by leaving it.
+     */
     {
       label: 'avg PR approval',
       value: days(val('cycle_pr_approval')),
       sub: 'PR raised → released',
+      periods: periodPair('cycle_pr_approval', days),
       ...(k('cycle_pr_approval') ? { kpi: k('cycle_pr_approval')! } : {}),
     },
     {
       label: 'avg sourcing LT',
       value: days(val('cycle_sourcing')),
       sub: 'released PR → PO',
+      periods: periodPair('cycle_sourcing', days),
       ...(k('cycle_sourcing') ? { kpi: k('cycle_sourcing')! } : {}),
     },
     {
       label: 'avg PO approval',
       value: days(val('cycle_po_approval')),
       sub: 'PO raised → released',
+      periods: periodPair('cycle_po_approval', days),
       ...(k('cycle_po_approval') ? { kpi: k('cycle_po_approval')! } : {}),
     },
     {
       label: 'avg delivery LT',
       value: days(val('cycle_delivery')),
       sub: 'PO released → GR',
+      periods: periodPair('cycle_delivery', days),
       ...(k('cycle_delivery') ? { kpi: k('cycle_delivery')! } : {}),
     },
   ];

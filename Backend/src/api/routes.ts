@@ -22,6 +22,7 @@ import { loadEnv } from '../config/env.js';
 import { healthCheck, pool, query, queryOne } from '../db/client.js';
 import { buildMart } from '../modules/analytics/mart.js';
 import { openItemsSummary } from '../modules/analytics/openitems.js';
+import { execTilePeriods } from '../modules/analytics/execperiods.js';
 import {
   AuthError, buildAuthorizeUrl, changeLocalPassword, ensureOidcReady, handleOidcCallback,
   loadPrincipal, localLogin, oidcEnabled,
@@ -1167,6 +1168,25 @@ export function buildRouter(): Router {
    * purchasing group. See modules/analytics/openitems.ts for why the stage
    * counts are computed here rather than read from the tiles.
    */
+  /**
+   * YTD and current-month figures for the Executive Summary's headline tiles.
+   *
+   * Its own endpoint rather than more KPIs: a KPI's drill is a static literal
+   * and cannot say "the months of the as-of year", and the measures that needed
+   * this most - distinct vendors, distinct desks, four averages - cannot be
+   * summed out of a monthly chart the way a total can.
+   */
+  r.get('/api/v1/exec/tile-periods', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    res.json({
+      datasetVersionId: v.id,
+      ...(await execTilePeriods(v.id, v.asOfDate, ctx.scope, gf)),
+    });
+  }));
+
   r.get('/api/v1/openitems/summary', role('analyst', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await currentVersion();

@@ -39,7 +39,9 @@
  */
 
 import { query } from '../../db/client.js';
-import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
+import {
+  DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
+} from '../authz/scope.js';
 import type { GlobalFilter } from './globalfilter.js';
 
 /** The age boundary this page reads "past SLA" at. See the header. */
@@ -212,7 +214,8 @@ function buildWhere(
   filter: GlobalFilter,
 ): { sql: string; params: unknown[]; ignored: string[] } {
   const params: unknown[] = [versionId];
-  const s = scopeSql(mintScopedQuery('openitems', scope), 'd', params);
+  // The VIEW's column names, as in detail.ts - see ScopeColumns.
+  const s = scopeSql(mintScopedQuery('openitems', scope), 'd', params, DETAIL_SCOPE_COLUMNS);
   // v_detail carries both grains in one row set, so the PO-line dimensions are
   // the ones to filter on.
   const f = detailFilterClause(filter, params);

@@ -12,7 +12,9 @@
  */
 
 import { query, queryOne } from '../../db/client.js';
-import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
+import {
+  DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
+} from '../authz/scope.js';
 
 export interface DetailColumn {
   key: string;
@@ -302,7 +304,8 @@ function buildDetailWhere(
 
   // Scope is composed in the data layer; an empty scope yields no rows. Never
   // omitted — a facet must not offer a value the reader cannot open.
-  where.push(scopeSql(mintScopedQuery('detail', scope), 'd', params));
+  // DETAIL_SCOPE_COLUMNS: this is the VIEW, which spells the company `company`.
+  where.push(scopeSql(mintScopedQuery('detail', scope), 'd', params, DETAIL_SCOPE_COLUMNS));
 
   const inList = (col: string, vals: string[] | undefined, key: string) => {
     if (!vals || vals.length === 0 || key === omit) return;

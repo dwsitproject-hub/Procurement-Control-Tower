@@ -34,21 +34,39 @@ import * as XLSX from 'xlsx';
 /**
  * Row cap.
  *
- * Not a database limit — the view answers far larger queries happily — but a
- * memory one: SheetJS builds the whole workbook in memory before it can write
- * a byte, and one cell is an object.
+ * Not a database limit — the view answers far larger queries happily, and this
+ * value is also the query's LIMIT so nothing larger is ever fetched — but a
+ * limit on how long one request may hold the event loop, and how much heap it
+ * may take while doing it. SheetJS builds the whole workbook in memory before
+ * it can write a byte, one cell is an object, and the build is SYNCHRONOUS: for
+ * as long as it runs, this single-process API answers nobody.
  *
- * Measured at this cap with the 14 default columns: 2.3 s, a 10 MB file, and a
- * 280 MB heap peak against the 2 GB the API container is given
- * (--max-old-space-size=2048 in the Dockerfile). That is ~14% of the heap for
- * one export, so a handful at once is survivable and an order of magnitude
- * more rows would not be. Raising this without re-measuring turns a slow
- * download into an API that dies.
+ * RAISED 22 Sep 2026, from 50,000. The detail table had grown to ~54,000 rows,
+ * so the one export a reader actually wanted was the one that came back
+ * truncated. Re-measured first, against the real writer with the 14 default
+ * columns (Node 22, --max-old-space-size=2048 as in the Dockerfile):
+ *
+ *     rows      time     file      heap (writer only)
+ *     30,000     1.3 s    5.8 MB   115 MB
+ *     60,000     7.7 s   11.5 MB   139 MB
+ *    120,000    17.6 s   23.0 MB   275 MB
+ *    200,000    34.0 s   38.5 MB   493 MB
+ *
+ * Time, not memory, is what picks the number: 493 MB is a quarter of the heap,
+ * but 34 seconds is 34 seconds in which every other request waits. 150,000
+ * costs roughly 22 s and ~350 MB, leaves years of headroom over today's 54,000,
+ * and keeps the worst case inside nginx's 300 s ceiling with room to spare.
+ *
+ * Growth is not linear — the number-format pass walks every cell — so raising
+ * this again means re-running that measurement, not interpolating it. If the
+ * table ever needs more than this, the fix is not a bigger number here: it is
+ * building the workbook off the event loop, in a worker thread, so a long
+ * export stops being everyone's problem.
  *
  * Excel's own sheet limit is 1,048,576 rows, so this is well inside what the
  * file format allows.
  */
-export const MAX_EXPORT_ROWS = 50_000;
+export const MAX_EXPORT_ROWS = 150_000;
 
 export interface ExportColumn {
   key: string;

@@ -877,6 +877,97 @@ interface ChartSpec {
   filterAlias?: string;
 }
 
+/**
+ * Requisition flow by month - incoming against outgoing.
+ *
+ * Replaces a plain count of requisitions raised (an inline builder in mart.ts,
+ * so it could never be recomputed under a filter). Requested 22 Sep 2026: a
+ * count of what arrived says nothing about whether the desk is keeping up,
+ * which is the question the page is opened with.
+ *
+ *   IN    carried_in  requisitions still waiting when the month opened
+ *         new_pr      requisitions raised during the month
+ *   OUT   to_po       requisitions that became a purchase order
+ *         cancelled   requisitions since deleted, by the month they were raised
+ *
+ * The four balance exactly, month to month:
+ *
+ *   carried_in(M+1) = carried_in(M) + new_pr(M) - to_po(M) - cancelled(M)
+ *
+ * verified across all 24 transitions in the reference dataset.
+ *
+ * -- One spine, four series ------------------------------------------------
+ *
+ * Every series selects from the SAME month list and LEFT JOINs its own phase
+ * onto it. Not tidiness: the chart endpoint merges buckets by key and keeps the
+ * ordinal of the first series that mentioned each one, while every series
+ * numbers its own buckets from 1. A series spanning 7 months beside one
+ * spanning 25 therefore assigns two different ordinals to the same month and
+ * the x-axis scrambles - 2026-01 sorted to the front, ahead of 2023-12. Shared
+ * buckets also mean a month with no conversions draws a zero bar instead of a
+ * gap the eye reads as missing data.
+ *
+ * The spine is raise months UNION conversion months, so a month in which
+ * nothing was raised but something converted still appears.
+ *
+ * -- Retro POs -------------------------------------------------------------
+ *
+ * A conversion month is never earlier than the raise month. 57 of this
+ * dataset's 10,228 converted requisitions carry an order dated before the
+ * requisition, and taken literally they drain a month they had not yet
+ * entered - six months were out of balance by 1 to 28 before the floor was
+ * applied. The CASE around GREATEST is load-bearing: GREATEST ignores NULL, so
+ * without it every requisition that never converted counts as converted on
+ * arrival, and the balance then passes degenerately with carried_in at zero.
+ *
+ * -- What this data cannot do ----------------------------------------------
+ *
+ * The SAP export carries a deletion FLAG and no deletion DATE, so "cancelled in
+ * March" does not exist here. `cancelled` is bucketed by the month the
+ * requisition was RAISED - "raised in March, since cancelled" - which the
+ * chart's note says out loud rather than leaving a reader to assume the outflow
+ * is timed. It is also the only bucketing under which the balance above holds.
+ *
+ * -- Why carried_in is a stock ---------------------------------------------
+ *
+ * A requisition raised in January and converted in April is counted in
+ * February, March and April. That is the point - it was waiting in all three -
+ * but it means those bars must never be added up. Stated in the chart's notes,
+ * where a reader will meet it.
+ */
+const PR_FLOW_BASE = `WITH pr AS (
+    SELECT pri.pr_no, pri.pr_item, pri.is_deleted,
+           to_char(pri.requisition_date, 'YYYY-MM') AS rm,
+           (SELECT CASE WHEN min(pl.document_date) IS NULL THEN NULL
+                        ELSE GREATEST(to_char(min(pl.document_date), 'YYYY-MM'),
+                                      to_char(pri.requisition_date, 'YYYY-MM')) END
+              FROM ${POL} pl
+             WHERE pl.dataset_version_id = pri.dataset_version_id
+               AND pl.pr_no = pri.pr_no AND pl.pr_item = pri.pr_item) AS pm
+      FROM ${PRI} pri
+     WHERE pri.dataset_version_id = $1 /*F*/
+       AND pri.requisition_date IS NOT NULL
+  ),
+  spine AS (
+    SELECT rm AS mk FROM pr WHERE rm IS NOT NULL
+    UNION
+    SELECT pm      FROM pr WHERE pm IS NOT NULL
+  )`;
+
+/** One series of the flow chart: the spine, its phase, and its own drill. */
+const prFlowSeries = (phase: string, joinOn: string): string =>
+  `${PR_FLOW_BASE}
+   SELECT s.mk AS bucket_key,
+          to_char(to_date(s.mk, 'YYYY-MM'), 'Mon YYYY') AS bucket_label,
+          count(pr.pr_no)::int AS value,
+          count(pr.pr_no)::int AS row_count,
+          jsonb_build_object('grain','pr_item','filters',
+            jsonb_build_object('prFlow',
+              jsonb_build_object('phase','${phase}','month', s.mk))) AS drill
+     FROM spine s
+     LEFT JOIN pr ON ${joinOn}
+    GROUP BY 1,2 ORDER BY 1`;
+
 /** Six PO-approval bands (user decision 4 Aug 2026), same-day first. */
 const APPR6_BUCKET = `CASE WHEN d <= 0 THEN '0d' WHEN d <= 3 THEN '1-3d' WHEN d <= 7 THEN '4-7d'
                            WHEN d <= 14 THEN '8-14d' WHEN d <= 30 THEN '15-30d' ELSE '>30d' END`;
@@ -968,147 +1059,26 @@ function poBracketSql(
 }
 
 export const PARITY_CHARTS: ChartSpec[] = [
-  /**
-   * Requisition flow by month - incoming against outgoing.
-   *
-   * Replaces a plain count of requisitions raised (an inline builder in
-   * mart.ts, so it could never be recomputed under a filter). Requested 22 Sep
-   * 2026: a count of what arrived says nothing about whether the desk is
-   * keeping up, which is the question the page is opened with.
-   *
-   *   IN    carried_in  requisitions still waiting when the month opened
-   *         new_pr      requisitions raised during the month
-   *   OUT   to_po       requisitions that became a purchase order
-   *         cancelled   requisitions since deleted, by the month they were raised
-   *
-   * The four balance exactly, month to month:
-   *
-   *   carried_in(M+1) = carried_in(M) + new_pr(M) - to_po(M) - cancelled(M)
-   *
-   * ── The one thing this data cannot do ──────────────────────────────────
-   *
-   * The SAP export carries a deletion FLAG and no deletion DATE. So there is no
-   * such thing as "cancelled in March" in this dataset, and inventing one would
-   * mean picking a date and hoping. `cancelled` is therefore bucketed by the
-   * month the requisition was RAISED - "raised in March, since cancelled" - and
-   * the chart's note says so rather than leaving a reader to assume the outflow
-   * is timed. It is the only bucketing that keeps the balance above true, which
-   * is a second reason to prefer it over a guess.
-   *
-   * ── Retro POs ──────────────────────────────────────────────────────────
-   *
-   * A conversion month is never earlier than the raise month. 57 of this
-   * dataset's 10,228 converted requisitions carry an order dated before the
-   * requisition, and taken literally they drain a month they had not yet
-   * entered - six months were out of balance by 1 to 28 before the floor was
-   * applied, and all 24 transitions balance exactly with it.
-   *
-   * ── Why carried_in is a stock ──────────────────────────────────────────
-   *
-   * A requisition raised in January and converted in April is counted in
-   * February, March and April's carried_in. That is the point - it was waiting
-   * in all three - but it means the orange bars must never be added up. Stated
-   * in the chart's notes, where a reader will meet it.
-   *
-   * Cost: the CTE resolves each requisition's conversion month once, and the
-   * stock series joins that to the month spine. One pass over the requisitions
-   * and one index lookup per row, not a subquery per month per row.
-   */
   {
     chartId: 'pr_by_month', seriesKey: 'carried_in',
     seriesLabel: 'Brought forward (still open)', unit: 'count',
-    sql: `WITH pr AS (
-            SELECT pri.pr_no, pri.pr_item, pri.is_deleted,
-                   to_char(pri.requisition_date, 'YYYY-MM') AS rm,
-                   -- Floored at the raise month: see PR_CONVERTED_MONTH in
-                   -- drill.ts for why, and note the CASE is load-bearing -
-                   -- GREATEST ignores NULL, which would turn every requisition
-                   -- that never converted into one converted on arrival.
-                   (SELECT CASE WHEN min(pl.document_date) IS NULL THEN NULL
-                                ELSE GREATEST(to_char(min(pl.document_date), 'YYYY-MM'),
-                                              to_char(pri.requisition_date, 'YYYY-MM')) END
-                      FROM ${POL} pl
-                     WHERE pl.dataset_version_id = pri.dataset_version_id
-                       AND pl.pr_no = pri.pr_no AND pl.pr_item = pri.pr_item) AS pm
-              FROM ${PRI} pri
-             WHERE pri.dataset_version_id = $1 /*F*/
-               AND pri.requisition_date IS NOT NULL
-          ),
-          m AS (SELECT DISTINCT rm FROM pr WHERE rm IS NOT NULL)
-          SELECT m.rm AS bucket_key,
-                 to_char(to_date(m.rm, 'YYYY-MM'), 'Mon YYYY') AS bucket_label,
-                 count(pr.pr_no)::int AS value,
-                 count(pr.pr_no)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('prFlow',
-                     jsonb_build_object('phase','carried_in','month', m.rm))) AS drill
-            FROM m
-            LEFT JOIN pr ON NOT pr.is_deleted AND pr.rm < m.rm
-                        AND COALESCE(pr.pm, '9999-99') >= m.rm
-           GROUP BY 1,2 ORDER BY 1`,
+    sql: prFlowSeries('carried_in',
+      `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk`),
   },
   {
     chartId: 'pr_by_month', seriesKey: 'new_pr',
     seriesLabel: 'Newly raised', unit: 'count',
-    sql: `SELECT to_char(pri.requisition_date, 'YYYY-MM') AS bucket_key,
-                 to_char(pri.requisition_date, 'Mon YYYY') AS bucket_label,
-                 count(*)::int AS value,
-                 count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('prFlow',
-                     jsonb_build_object('phase','new',
-                       'month', to_char(pri.requisition_date, 'YYYY-MM')))) AS drill
-            FROM ${PRI} pri
-           WHERE pri.dataset_version_id = $1 /*F*/
-             AND pri.requisition_date IS NOT NULL
-           GROUP BY 1,2 ORDER BY 1`,
+    sql: prFlowSeries('new', `pr.rm = s.mk`),
   },
   {
     chartId: 'pr_by_month', seriesKey: 'to_po',
     seriesLabel: 'Became PO', unit: 'count',
-    sql: `WITH pr AS (
-            SELECT pri.is_deleted,
-                   -- Floored at the raise month: see PR_CONVERTED_MONTH in
-                   -- drill.ts for why, and note the CASE is load-bearing -
-                   -- GREATEST ignores NULL, which would turn every requisition
-                   -- that never converted into one converted on arrival.
-                   (SELECT CASE WHEN min(pl.document_date) IS NULL THEN NULL
-                                ELSE GREATEST(to_char(min(pl.document_date), 'YYYY-MM'),
-                                              to_char(pri.requisition_date, 'YYYY-MM')) END
-                      FROM ${POL} pl
-                     WHERE pl.dataset_version_id = pri.dataset_version_id
-                       AND pl.pr_no = pri.pr_no AND pl.pr_item = pri.pr_item) AS pm
-              FROM ${PRI} pri
-             WHERE pri.dataset_version_id = $1 /*F*/
-               AND pri.requisition_date IS NOT NULL
-          )
-          SELECT pm AS bucket_key,
-                 to_char(to_date(pm, 'YYYY-MM'), 'Mon YYYY') AS bucket_label,
-                 count(*)::int AS value,
-                 count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('prFlow',
-                     jsonb_build_object('phase','to_po','month', pm))) AS drill
-            FROM pr
-           WHERE NOT is_deleted AND pm IS NOT NULL
-           GROUP BY 1,2 ORDER BY 1`,
+    sql: prFlowSeries('to_po', `NOT pr.is_deleted AND pr.pm = s.mk`),
   },
   {
     chartId: 'pr_by_month', seriesKey: 'cancelled',
     seriesLabel: 'Cancelled (by month raised)', unit: 'count',
-    sql: `SELECT to_char(pri.requisition_date, 'YYYY-MM') AS bucket_key,
-                 to_char(pri.requisition_date, 'Mon YYYY') AS bucket_label,
-                 count(*)::int AS value,
-                 count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('prFlow',
-                     jsonb_build_object('phase','cancelled',
-                       'month', to_char(pri.requisition_date, 'YYYY-MM')))) AS drill
-            FROM ${PRI} pri
-           WHERE pri.dataset_version_id = $1 /*F*/
-             AND pri.is_deleted
-             AND pri.requisition_date IS NOT NULL
-           GROUP BY 1,2 ORDER BY 1`,
+    sql: prFlowSeries('cancelled', `pr.is_deleted AND pr.rm = s.mk`),
   },
 
   // ── Executive Summary charts (022) ──

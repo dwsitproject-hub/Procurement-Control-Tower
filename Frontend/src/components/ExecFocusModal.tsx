@@ -23,11 +23,26 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  * and chart routes and is the reason this is safe to assemble from them.
  */
 export function ExecFocusModal({
-  title, subtitle, filterQuery, kpiIds, chartIds, currency, onDrill, onClose,
+  title, subtitle, clicked, filterQuery, kpiIds, chartIds, currency, onDrill, onClose,
   lifecycleToggle = false,
 }: {
   title: string;
   subtitle: string;
+  /**
+   * The figure the reader clicked, in words, INCLUDING which measure it is.
+   *
+   * Added 22 Sep 2026. A reader clicked a METHANOL bar worth Rp 1.11 T and the
+   * panel's first card read IDR 82.4 B, which looks like a defect and is not
+   * one: the bar is net order value over open and closed together, while Open
+   * PO Commitment is the value still TO BE delivered on the lines that are not
+   * yet complete. Two measures, two numbers, no way for the reader to tell.
+   *
+   * The caller passes the clicked figure and names its measure, so the panel
+   * can restate it above the cards. The caller must describe the population the
+   * panel OPENS with, not the segment that was clicked, or the caption will
+   * describe something the cards below do not show.
+   */
+  clicked?: string;
   /** Global filter AND the clicked slice, already merged. */
   filterQuery: string;
   /**
@@ -125,6 +140,15 @@ export function ExecFocusModal({
             under the same slice, so a number here can be compared with the same number on
             the Overview page and the difference is the slice.
           </p>
+          {/* The clicked figure, restated. Cards below measure the same slice in
+              other ways — order value, value still to deliver, lines — so the
+              one number the reader arrived with has to be on screen for the
+              others to be read as different questions rather than as errors. */}
+          {clicked && (
+            <p className="note">
+              <strong>You clicked:</strong> {clicked}
+            </p>
+          )}
 
           {kpis === null ? <div className="spinner" /> : (
             <div className="kpi-grid">

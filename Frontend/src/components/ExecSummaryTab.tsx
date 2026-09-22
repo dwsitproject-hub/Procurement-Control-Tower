@@ -113,7 +113,7 @@ function days(v: number | null): string {
  */
 function RankedBars({ data, onFocus, emphasiseTop, currency }: {
   data: ChartResponse;
-  onFocus: (title: string, subtitle: string, slice: string) => void;
+  onFocus: (title: string, subtitle: string, slice: string, clicked?: string) => void;
   emphasiseTop: number;
   currency: 'USD' | 'IDR';
 }) {
@@ -136,6 +136,20 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
 
   const at = (key: string, s: typeof openS) =>
     s?.points.find((pt) => pt.bucketKey === key) ?? null;
+
+  /**
+   * The bar's own arithmetic, in words, for the focus panel's caption.
+   *
+   * Says NET ORDER VALUE explicitly. The panel also carries Open PO Commitment,
+   * which is the value still to be delivered and is a smaller number on the same
+   * rows — without the measure named, the two look like the same figure
+   * disagreeing with itself.
+   */
+  const barFigure = (r: { total: number; lines: number;
+    c: { value: number | null } | null; o: { value: number | null } | null }): string =>
+    `${money(r.total)} net order value`
+    + ` = ${money(r.c?.value ?? 0)} closed + ${money(r.o?.value ?? 0)} open`
+    + `, ${formatNumber(r.lines)} PO lines (all states)`;
 
   // PO-LINE COUNTS, beside the money. Value alone hides the shape of the work:
   // METHANOL is the biggest category on this page by a wide margin and a
@@ -209,6 +223,10 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
                 `${r.label} — ${what}`,
                 `${money(pt.value)} · ${formatNumber(pt.rowCount)} PO lines`,
                 `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
+                // The WHOLE bar, not the clicked segment: the panel strips the
+                // lifecycle and opens on All, so a caption naming only the open
+                // half would describe rows the cards below do not count.
+                barFigure(r),
               );
             }}
           />
@@ -230,6 +248,7 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
                 `${r.label} — ${what}`,
                 `${formatNumber(pt.value ?? 0)} PO lines`,
                 `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
+                barFigure(r),
               );
             }}
           />
@@ -928,7 +947,7 @@ export function ExecSummaryTab({
    * these dimensions rather than the panel borrowing the drill's token.
    */
   const [focus, setFocus] = useState<{
-    title: string; subtitle: string; slice: string;
+    title: string; subtitle: string; slice: string; clicked?: string;
     /** What to show inside. Absent means the Overview's own lists. */
     kpiIds?: string[]; chartIds?: string[];
     /** Offer All / Open / Closed inside the panel. */
@@ -969,7 +988,7 @@ export function ExecSummaryTab({
    * moves between states without reopening it.
    */
   const openAlignedFocus = useCallback(
-    (title: string, subtitle: string, slice: string) => {
+    (title: string, subtitle: string, slice: string, clicked?: string) => {
       setFocus({
         // The clicked segment named the click; it must not name the PANEL,
         // which opens on every lifecycle state. Leaving "METHANOL — Closed"
@@ -983,8 +1002,22 @@ export function ExecSummaryTab({
           .replace(/\s+—\s+delivered in\s+/, ' — '),
         subtitle: 'Open and closed together — use the toggle to narrow',
         slice: slice.replace(/&?lifecycle=(open|closed)/g, ''),
-        kpiIds: overviewKpis.filter((id) => !SLICE_HIDDEN_KPIS.has(id)),
+        /*
+         * Committed value and line count FIRST, before the Overview's own list.
+         *
+         * total_po_amount is sum(net_order_value) over exactly the population
+         * the category bars are built from — NOT is_sto AND NOT is_deleted — so
+         * under this slice the card equals the bar by construction, not by
+         * coincidence. It is not in TAB_KPIS.executive because it was promoted
+         * to a headline tile, which left this panel with no card at all for the
+         * figure the reader had just clicked: the first card was Open PO
+         * Commitment, a different measure, and the panel read as broken.
+         */
+        kpiIds: ['total_po_amount', 'po_line_items',
+          ...overviewKpis.filter((id) => !SLICE_HIDDEN_KPIS.has(id)
+            && id !== 'total_po_amount' && id !== 'po_line_items')],
         lifecycleToggle: true,
+        ...(clicked ? { clicked } : {}),
       });
     },
     [overviewKpis, SLICE_HIDDEN_KPIS],
@@ -1110,7 +1143,7 @@ export function ExecSummaryTab({
    * new measure that could disagree with the rest of the app.
    */
   const TILE_FOCUS: Record<string, { kpis: string[]; charts: string[] }> = {
-    'PO value - Procurement PO & SPO': {
+    'PO value – PO & SPO (ex STO & Interco)': {
       kpis: ['total_po_amount', 'open_po_commitment', 'avg_po_value_idr',
         'top5_category_share_pct', 'foreign_ccy_po_share', 'valuation_coverage_pct'],
       charts: ['po_value_by_category', 'po_value_by_purch_org', 'po_bracket_value'],
@@ -1158,7 +1191,7 @@ export function ExecSummaryTab({
     periods?: { name: string; text: string }[];
   }[] = [
     {
-      label: 'PO value - Procurement PO & SPO',
+      label: 'PO value – PO & SPO (ex STO & Interco)',
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
         : formatMoney(totalUsd, 'USD'),
@@ -1558,6 +1591,7 @@ export function ExecSummaryTab({
           <ExecFocusModal
             title={focus.title}
             subtitle={focus.subtitle}
+            {...(focus.clicked ? { clicked: focus.clicked } : {})}
             lifecycleToggle={focus.lifecycleToggle ?? false}
             // The clicked slice on top of the page's own filter, so the panel can
             // never show a wider population than the page it was opened from.

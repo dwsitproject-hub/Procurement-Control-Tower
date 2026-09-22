@@ -64,6 +64,8 @@ interface Summary {
   totalOpen: number; totalPastSla: number;
   /** The filter for every open line this page counts. */
   detailFilter: Record<string, string>;
+  /** Parts of the global filter this page could not apply. Usually empty. */
+  filterIgnored?: string[];
 }
 
 type Lens = 'buyer' | 'lead' | 'mgmt';
@@ -305,6 +307,17 @@ export function OpenItemsTab({
           approval policy is 3 days, which the banded data cannot express — so this is the closest
           honest line, and it is labelled rather than presented as the policy figure.
         </p>
+        {/* An active filter this page cannot express. Said here, beside the
+            figures it would have narrowed, rather than left for the reader to
+            infer from a total that looks too big. */}
+        {(sum.filterIgnored?.length ?? 0) > 0 && (
+          <p className="note">
+            <span className="bs spdel">filter</span>{' '}
+            These figures ignore the {sum.filterIgnored!.join(' and ')} filter: the detail view
+            behind this page does not carry {sum.filterIgnored!.length > 1 ? 'those dimensions' : 'that dimension'}.
+            Everything else in the filter bar is applied.
+          </p>
+        )}
 
         <div className={showPipelineFull ? 'oi-pipe' : 'oi-pipe oi-pipe--compact'}>
           {sum.stages.map((s) => {

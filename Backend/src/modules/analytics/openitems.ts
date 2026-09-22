@@ -40,7 +40,7 @@
 
 import { query } from '../../db/client.js';
 import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
-import { buildFilterClause, type GlobalFilter } from './globalfilter.js';
+import type { GlobalFilter } from './globalfilter.js';
 
 /** The age boundary this page reads "past SLA" at. See the header. */
 export const PAST_SLA_DAYS = 15;
@@ -112,6 +112,14 @@ export interface OpenItemsSummary {
   totalPastSla: number;
   /** The filter for "every open line this page counts". */
   detailFilter: Record<string, string>;
+  /**
+   * Parts of the active global filter this page could not apply.
+   *
+   * Empty on every ordinary request. Non-empty means the figures describe a
+   * WIDER population than the filter bar claims, which the page must say out
+   * loud rather than leave the reader to discover.
+   */
+  filterIgnored: string[];
 }
 
 /**
@@ -136,6 +144,59 @@ const MEASURES = `
                                          '03-Standard','04-Planned'))::int AS prio_unset`;
 
 /**
+ * The global filter, expressed against core.v_detail.
+ *
+ * NOT buildFilterClause. That builder writes clauses for the FACT tables —
+ * `company_code`, `plant`, `purch_org`, `document_date` — and this page reads
+ * the detail VIEW, whose columns are named differently and which does not carry
+ * spend category or size band at all. Handing it this view produced
+ * `dcompany_code` and a 500 for every filter that touched company, plant,
+ * purchasing org or month; the clause is empty when no filter is set, which is
+ * how that survived review.
+ *
+ * Every column and the month basis below are the ones core.v_detail's own
+ * detail-table filter uses (detail.ts), deliberately: the cards are counted so
+ * that clicking one opens the rows behind it, and a card filtered on a
+ * different basis from the table it opens would break exactly the guarantee
+ * this module was rewritten to keep.
+ *
+ * What the view cannot express is REPORTED, never dropped quietly — a page
+ * that showed unfiltered totals under an active filter would be worse than one
+ * that says which part of the filter it could not apply.
+ */
+function detailFilterClause(
+  f: GlobalFilter,
+  params: unknown[],
+): { sql: string; ignored: string[] } {
+  const parts: string[] = [];
+  const add = (expr: string, vals: string[] | undefined): void => {
+    if (!vals || vals.length === 0) return;
+    params.push(vals);
+    parts.push(`${expr} = ANY($${params.length})`);
+  };
+
+  add('d.company', f.companyCode);
+  add('d.plant', f.plant);
+  add('d.purch_org', f.purchOrg);
+  // The detail table's own basis: a line that never reached an order still has
+  // a requisition date, and this page is mostly such lines.
+  add("to_char(COALESCE(d.po_date, d.req_date), 'YYYY-MM')", f.monthKey);
+
+  const ignored: string[] = [];
+  // No material code and no size band on the view, so these cannot be derived
+  // here at all. Named in the response rather than ignored in silence.
+  if ((f.spendCategory?.length ?? 0) > 0) ignored.push('spend category');
+  if ((f.sizeBand?.length ?? 0) > 0) ignored.push('PO size band');
+  // Both mean "delivered vs not", and every stage this page counts is already
+  // not delivered: honouring them would either change nothing or empty the
+  // page, and neither is what the reader asked for.
+  if (f.delivered !== undefined) ignored.push('open/closed');
+  if (f.scope !== undefined) ignored.push('scope toggle');
+
+  return { sql: parts.length === 0 ? '' : ` AND ${parts.join(' AND ')}`, ignored };
+}
+
+/**
  * Version, scope, the page's global filter, and the page's own definition of
  * "open" — all on core.v_detail.
  *
@@ -149,19 +210,19 @@ function buildWhere(
   versionId: number,
   scope: readonly ScopeEntry[],
   filter: GlobalFilter,
-): { sql: string; params: unknown[] } {
+): { sql: string; params: unknown[]; ignored: string[] } {
   const params: unknown[] = [versionId];
   const s = scopeSql(mintScopedQuery('openitems', scope), 'd', params);
   // v_detail carries both grains in one row set, so the PO-line dimensions are
   // the ones to filter on.
-  const f = buildFilterClause(filter, 'po_line', 'd', params.length + 1);
-  params.push(...f.params);
+  const f = detailFilterClause(filter, params);
   params.push(OPEN_STAGES.map((x) => x.status));
   return {
     sql: `d.dataset_version_id = $1 AND ${s}${f.sql}
           AND NOT d.pr_deleted
           AND d.status = ANY($${params.length})`,
     params,
+    ignored: f.ignored,
   };
 }
 
@@ -244,5 +305,6 @@ export async function openItemsSummary(
     totalOpen: stages.reduce((a, s) => a + s.count, 0),
     totalPastSla: stages.reduce((a, s) => a + s.pastSla, 0),
     detailFilter: { status: ALL_STAGE_STATUSES },
+    filterIgnored: w.ignored,
   };
 }

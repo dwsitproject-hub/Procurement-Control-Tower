@@ -48,12 +48,26 @@ interface DetailResponse {
 }
 
 type MultiKey =
-  | 'status' | 'matCat' | 'matGroup' | 'plant' | 'company'
+  | 'status' | 'matCat' | 'spendCategory' | 'matGroup' | 'plant' | 'company'
   | 'purchOrg' | 'purchGroup' | 'priority';
+
+/**
+ * Every multi-value filter this table seeds from `initial`, in ONE place.
+ *
+ * It used to be a literal list inside the state initialiser, and spendCategory
+ * was never added to it: a page that pre-filtered by category handed one in,
+ * the table dropped it, and the row count under the table disagreed with the
+ * number that had been clicked - the one thing the seeding exists to prevent.
+ */
+const MULTI_KEYS: MultiKey[] = [
+  'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company',
+  'purchOrg', 'purchGroup', 'priority',
+];
 
 const FILTER_LABELS: Record<MultiKey, string> = {
   status: 'Status',
-  matCat: 'Category',
+  matCat: 'Category (legacy)',
+  spendCategory: 'Spend category',
   matGroup: 'Mat Group',
   plant: 'Plant',
   company: 'Company',
@@ -87,7 +101,7 @@ export function DetailTable({
   const [debounced, setDebounced] = useState(init['q'] ?? '');
   const [filters, setFilters] = useState<Partial<Record<MultiKey, string[]>>>(() => {
     const f: Partial<Record<MultiKey, string[]>> = {};
-    for (const k of ['status', 'matCat', 'plant', 'company', 'purchOrg', 'purchGroup', 'priority'] as MultiKey[]) {
+    for (const k of MULTI_KEYS) {
       const v = listOf(k);
       if (v && v.length > 0) f[k] = v;
     }
@@ -101,6 +115,15 @@ export function DetailTable({
    * the number that was clicked.
    */
   const [ageBand, setAgeBand] = useState(init['ageBand'] ?? '');
+  /**
+   * The post-delivery state, from an Open Items money card.
+   *
+   * Single-valued like ageBand and for the same reason: the card that sent it
+   * counted one state, and the two states are exclusive steps of one sequence.
+   * Absent entirely until 23 Sep 2026, so those cards opened a table showing
+   * every row in the dataset.
+   */
+  const [moneyState, setMoneyState] = useState(init['moneyState'] ?? '');
   const [excludeSto, setExcludeSto] = useState(init['excludeSto'] === 'true');
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [onlyOpen, setOnlyOpen] = useState(init['onlyOpen'] === 'true');
@@ -147,6 +170,7 @@ export function DetailTable({
     }
     if (debounced.trim() !== '') q.set('q', debounced.trim());
     if (ageBand) q.set('ageBand', ageBand);
+    if (moneyState) q.set('moneyState', moneyState);
     if (excludeSto) q.set('excludeSto', 'true');
     if (includeDeleted) q.set('includeDeleted', 'true');
     if (onlyOpen) q.set('onlyOpen', 'true');
@@ -155,7 +179,7 @@ export function DetailTable({
       q.set('dir', sort.dir);
     }
     return q.toString();
-  }, [filters, debounced, ageBand, excludeSto, includeDeleted, onlyOpen, sort]);
+  }, [filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort]);
 
   const queryString = useMemo(
     () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
@@ -165,7 +189,7 @@ export function DetailTable({
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
     setPage(0);
-  }, [filters, debounced, ageBand, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -285,6 +309,7 @@ export function DetailTable({
     Object.values(filters).reduce((n, v) => n + (v?.length ?? 0), 0) +
     (debounced.trim() ? 1 : 0) +
     (ageBand ? 1 : 0) +
+    (moneyState ? 1 : 0) +
     (excludeSto ? 1 : 0) +
     (includeDeleted ? 1 : 0) +
     (onlyOpen ? 1 : 0);
@@ -365,6 +390,17 @@ export function DetailTable({
           <p className="note dt-agechip">
             Age filter: <strong>{ageBand === 'past-sla' ? 'over 15 days' : `${ageBand} days`}</strong>{' '}
             <button className="dt-btn" onClick={() => setAgeBand('')}>clear</button>
+          </p>
+        )}
+
+        {moneyState && (
+          <p className="note dt-agechip">
+            State: <strong>
+              {moneyState === 'deliveredNotInvoiced'
+                ? 'delivered, not invoiced'
+                : 'invoiced in Coupa, not paid'}
+            </strong>{' '}
+            <button className="dt-btn" onClick={() => setMoneyState('')}>clear</button>
           </p>
         )}
 

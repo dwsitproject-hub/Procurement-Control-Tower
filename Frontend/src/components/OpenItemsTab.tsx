@@ -43,8 +43,17 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  */
 
 /** Age bands, in the order the aging chart already uses. */
-const BAND_LABELS = ['0-15 d', '16-30 d', '31-90 d', 'over 90 d'];
-const BAND_COLORS = ['var(--accent)', 'var(--warn)', 'var(--orange)', 'var(--crit)'];
+/**
+ * Six colours, youngest to oldest (23 Sep 2026).
+ *
+ * The LABELS and KEYS are no longer here: they arrive in the summary, from the
+ * one definition in @pct/rules that the SQL is also generated from. A page that
+ * kept its own copy would eventually draw a bar labelled one way and filtered
+ * another.
+ */
+const BAND_COLORS = [
+  'var(--good)', 'var(--accent)', 'var(--warn)', 'var(--orange)', 'var(--crit)', 'var(--oi-late)',
+];
 /**
  * The filter value for each band, positionally aligned with the labels above.
  *
@@ -52,20 +61,19 @@ const BAND_COLORS = ['var(--accent)', 'var(--warn)', 'var(--orange)', 'var(--cri
  * in the same order as the labels is what makes clicking the third segment open
  * the third band rather than something adjacent to it.
  */
-const BAND_KEYS = ['0-15', '16-30', '31-90', '>90'];
 
 interface StageRow {
   key: string; name: string; sub: string; count: number;
-  bands: [number, number, number, number];
-  pastSla: number; oldest: number | null;
+  bands: number[];
+  pastSla: number; overLate: number; oldest: number | null;
   emergency: number; urgent: number; standard: number;
   prioUnset: number; standardLabels: string[];
   /** The detail filter that reproduces this card's own population. */
   detailFilter: Record<string, string>;
 }
 interface CategoryRow {
-  desk: string; label: string; open: number; over90: number;
-  oldest: number | null; bands: [number, number, number, number];
+  desk: string; label: string; open: number; overLate: number;
+  oldest: number | null; bands: number[];
   detailFilter: Record<string, string>;
 }
 interface MoneyCard {
@@ -77,7 +85,8 @@ interface MoneyCards {
   coupaCoverage: { unpaidInvoices: number; matchedInvoices: number } | null;
 }
 interface Summary {
-  asOfDate: string; pastSlaDays: number;
+  asOfDate: string; pastSlaDays: number; lateDays: number;
+  bands: { key: string; label: string }[];
   stages: StageRow[]; categories: CategoryRow[]; money: MoneyCards;
   totalOpen: number; totalPastSla: number;
   /** The filter for every open line this page counts. */
@@ -113,32 +122,33 @@ function ageColor(days: number): string {
   return days > 90 ? 'var(--crit)' : days > 30 ? 'var(--orange)' : days > 15 ? 'var(--warn)' : 'var(--accent)';
 }
 
-function AgeMixBar({ bands, total, onBand }: {
+function AgeMixBar({ bands, total, labels, onBand }: {
   bands: readonly number[];
   total: number;
   /** When given, each segment opens that band's rows. */
+  labels: string[];
   onBand?: (i: number, n: number) => void;
 }) {
   if (total <= 0) return <div className="oi-mix oi-mix--empty" />;
   return (
     <div className="oi-mix" role={onBand ? 'group' : 'img'}
-      aria-label={bands.map((n, i) => `${BAND_LABELS[i]}: ${n}`).join(', ')}>
+      aria-label={bands.map((n, i) => `${labels[i]}: ${n}`).join(', ')}>
       {bands.map((n, i) => (n > 0 ? (
         onBand ? (
           <button
-            key={BAND_LABELS[i]}
+            key={labels[i]}
             type="button"
             className="oi-mix-seg"
             style={{ width: `${(n / total) * 100}%`, background: BAND_COLORS[i] }}
-            title={`${BAND_LABELS[i]}: ${formatNumber(n)} lines — click for the rows`}
-            aria-label={`${BAND_LABELS[i]}: ${formatNumber(n)} lines`}
+            title={`${labels[i]}: ${formatNumber(n)} lines — click for the rows`}
+            aria-label={`${labels[i]}: ${formatNumber(n)} lines`}
             onClick={() => onBand(i, n)}
           />
         ) : (
           <span
-            key={BAND_LABELS[i]}
+            key={labels[i]}
             style={{ width: `${(n / total) * 100}%`, background: BAND_COLORS[i] }}
-            title={`${BAND_LABELS[i]}: ${formatNumber(n)} lines`}
+            title={`${labels[i]}: ${formatNumber(n)} lines`}
           />
         )
       ) : null))}
@@ -178,7 +188,7 @@ export function OpenItemsTab({
    * instead of approximating it.
    */
   const [focus, setFocus] = useState<
-    { label: string; init: Record<string, string>; exact?: boolean } | null
+    { id: string; label: string; init: Record<string, string>; exact?: boolean } | null
   >(null);
 
   /**
@@ -194,8 +204,24 @@ export function OpenItemsTab({
   const catQuery = desk ? `spendCategory=${encodeURIComponent(desk)}` : '';
   const pageQuery = [filterQuery, catQuery].filter(Boolean).join('&');
 
-  const openRows = (label: string, init: Record<string, string>, exact = false) => {
-    setFocus({ label, init, ...(exact ? { exact } : {}) });
+  /**
+   * `id` identifies the CARD, so the one that was clicked can be marked while
+   * its rows are on screen - a filtered table two screens below an unmarked
+   * card reads as though nothing was clicked.
+   *
+   * The chosen category is merged into every filter here rather than at each
+   * call site: the page is narrowed to it, so a click that opened every
+   * category would show more rows than the card counted.
+   */
+  const openRows = (
+    label: string, init: Record<string, string>, exact = false, id = label,
+  ) => {
+    setFocus({
+      id,
+      label,
+      init: { ...init, ...(desk ? { spendCategory: desk } : {}) },
+      ...(exact ? { exact } : {}),
+    });
     // A filter applied to a table two screens below the click is invisible, and
     // reads as nothing having happened. Defer a frame so the table has
     // re-rendered under its new key before we scroll to it.
@@ -230,7 +256,7 @@ export function OpenItemsTab({
         // The category is part of the page's state, not the token's, so it is
         // merged in here - otherwise clicking a card while a category is chosen
         // would open the table on every category.
-        openRows(label, { ...h.params, ...(desk ? { spendCategory: desk } : {}) }, true);
+        openRows(label, h.params, true, token);
         return;
       }
     } catch {
@@ -355,8 +381,8 @@ export function OpenItemsTab({
         */}
         {lens === 'buyer' && deskRow ? (
           <p className="oi-says">
-            <strong>{formatNumber(deskRow.over90)}</strong> of your {formatNumber(deskRow.open)} open
-            lines have passed 90 days, and the oldest has been waiting{' '}
+            <strong>{formatNumber(deskRow.overLate)}</strong> of your {formatNumber(deskRow.open)} open
+            lines have passed {sum.lateDays} days, and the oldest has been waiting{' '}
             <strong>{deskRow.oldest === null ? '—' : `${formatNumber(deskRow.oldest)} days`}</strong>.
           </p>
         ) : (
@@ -365,7 +391,8 @@ export function OpenItemsTab({
             {sum.pastSlaDays} days old.
             {bottleneck && bottleneck.count > 0 && (
               <> The backlog sits mostly in one stage: <strong>{formatNumber(bottleneck.count)}</strong>{' '}
-                in <strong>{bottleneck.name}</strong>, {formatNumber(bottleneck.bands[3])} of which passed 90 days.</>
+                in <strong>{bottleneck.name}</strong>, {formatNumber(bottleneck.overLate)} of which
+                passed {sum.lateDays} days.</>
             )}
           </p>
         )}
@@ -440,8 +467,14 @@ export function OpenItemsTab({
         <div className={showPipelineFull ? 'oi-pipe' : 'oi-pipe oi-pipe--compact'}>
           {sum.stages.map((s) => {
             const isBottleneck = bottleneck?.key === s.key && s.pastSla > 0;
+            // Marked while its rows are the ones on screen. A filtered table two
+            // screens below an unmarked card reads as if nothing was clicked.
+            const isOn = focus?.id.startsWith(`stage:${s.key}`) ?? false;
             return (
-              <div key={s.key} className={`oi-stage${isBottleneck ? ' oi-stage--hot' : ''}`}>
+              <div
+                key={s.key}
+                className={`oi-stage${isBottleneck ? ' oi-stage--hot' : ''}${isOn ? ' oi-stage--on' : ''}`}
+              >
                 <div className="oi-stage-h">
                   <span className="oi-stage-name">{s.name}</span>
                   {isBottleneck && <span className="oi-tag">Bottleneck</span>}
@@ -452,7 +485,7 @@ export function OpenItemsTab({
                     className="oi-num"
                     disabled={s.count === 0}
                     title={`Show the ${formatNumber(s.count)} ${s.name} lines in the table below`}
-                    onClick={() => openRows(s.name, s.detailFilter)}
+                    onClick={() => openRows(s.name, s.detailFilter, false, `stage:${s.key}`)}
                   >
                     {formatNumber(s.count)}
                   </button>
@@ -466,9 +499,12 @@ export function OpenItemsTab({
                     <AgeMixBar
                       bands={s.bands}
                       total={s.count}
+                      labels={sum.bands.map((b) => b.label)}
                       onBand={(i) => openRows(
-                        `${s.name} · ${BAND_LABELS[i]}`,
-                        { ...s.detailFilter, ageBand: BAND_KEYS[i]! },
+                        `${s.name} · ${sum.bands[i]!.label}`,
+                        { ...s.detailFilter, ageBand: sum.bands[i]!.key },
+                        false,
+                        `stage:${s.key}:band:${sum.bands[i]!.key}`,
                       )}
                     />
                     <p className="oi-stage-foot">
@@ -481,6 +517,8 @@ export function OpenItemsTab({
                         onClick={() => openRows(
                           `${s.name} · past ${sum.pastSlaDays} d`,
                           { ...s.detailFilter, ageBand: 'past-sla' },
+                          false,
+                          `stage:${s.key}:pastsla`,
                         )}
                       >
                         {formatNumber(s.pastSla)} past {sum.pastSlaDays} d
@@ -597,86 +635,89 @@ export function OpenItemsTab({
                   <span className="oi-hyg-l">{kpi.get(id)?.title ?? id}</span>
                 </div>
               ))}
-          </div>
-        </div>
-      )}
 
-      {/* ── after delivery: money still in flight ──────────────────── */}
-      <div className="panel">
-        <h3 className="pr-tbl-h">
-          After delivery{' '}
-          <span className="muted">— money owed on work already received</span>
-        </h3>
-        <p className="note" style={{ marginTop: 0 }}>
-          Not part of the pipeline above, on purpose: every stage there is work that has NOT been
-          delivered, and these two are what happens after it has. Counted over the same filter and
-          the same dataset, so the two blocks describe one population at two different points.
-        </p>
-        <div className="oi-money">
-          <div className="oi-money-card">
-            <button
-              type="button"
-              className="oi-num"
-              title="Show the order lines with goods received and no invoice"
-              disabled={sum.money.deliveredNotInvoiced.lines === 0}
-              onClick={() => openRows('delivered, not invoiced',
-                sum.money.deliveredNotInvoiced.detailFilter)}
+          {/*
+            The two post-delivery cards, in the pipeline's own row and its own
+            card format (23 Sep 2026). They are still NOT stages - every stage
+            above is undelivered work and these two are what happens after -
+            so they carry a rule and a different sub-line rather than an age mix
+            they have no data for. Sitting them apart in their own panel made
+            them read as a footnote; sitting them here makes the row read as
+            what it is, the whole life of an order line left to right.
+          */}
+          {([
+            {
+              id: 'dni',
+              name: 'PO delivered, not invoiced',
+              card: sum.money.deliveredNotInvoiced,
+              sub: `${formatKpi(sum.money.deliveredNotInvoiced.valueIdr, 'idr')} still to invoice`,
+              note: 'Nothing left to deliver, something left to invoice \u2014 the GR/IR gap, from the SAP export itself.',
+              title: 'Show the order lines with goods received and no invoice',
+            },
+            {
+              id: 'inp',
+              name: 'PO invoiced, not paid',
+              card: sum.money.invoicedNotPaid,
+              sub: `${formatKpi(sum.money.invoicedNotPaid.valueIdr, 'idr')} of order value`,
+              note: null,
+              title: 'Show the order lines Coupa reports as invoiced and unpaid',
+            },
+          ] as const).map((m) => (
+            <div
+              key={m.id}
+              className={`oi-stage oi-stage--after${focus?.id === `money:${m.id}` ? ' oi-stage--on' : ''}`}
             >
-              {formatNumber(sum.money.deliveredNotInvoiced.lines)}
-            </button>
-            <div className="oi-money-name">PO delivered, not invoiced</div>
-            <div className="oi-money-sub">
-              {formatKpi(sum.money.deliveredNotInvoiced.valueIdr, 'idr')} still to invoice
-            </div>
-            <div className="oi-money-note">
-              Nothing left to deliver, something left to invoice — the GR/IR gap, from the SAP
-              export itself.
-            </div>
-          </div>
-
-          <div className="oi-money-card">
-            <button
-              type="button"
-              className="oi-num"
-              title="Show the order lines Coupa reports as invoiced and unpaid"
-              disabled={sum.money.invoicedNotPaid.lines === 0}
-              onClick={() => openRows('invoiced in Coupa, not paid',
-                sum.money.invoicedNotPaid.detailFilter)}
-            >
-              {formatNumber(sum.money.invoicedNotPaid.lines)}
-            </button>
-            <div className="oi-money-name">PO invoiced, not paid</div>
-            <div className="oi-money-sub">
-              {formatKpi(sum.money.invoicedNotPaid.valueIdr, 'idr')} of order value
-            </div>
-            {/* The caveat belongs ON the card. The SAP export carries no payment
-                status at all, so this figure comes from Coupa - a live store
-                that is not pinned by the dataset version, reaching only the
-                orders Coupa knows AND carries a SAP cross-reference for. A
-                reader who quotes it as "our unpaid debt" would be wrong by
-                whatever the coverage line says. */}
-            <div className="oi-money-note">
-              From Coupa, not the SAP export, which carries no payment status.
-              {sum.money.coupaCoverage && (
+              <div className="oi-stage-h">
+                <span className="oi-stage-name">{m.name}</span>
+                <span className="oi-tag oi-tag--after">after delivery</span>
+              </div>
+              <p className="oi-stage-n">
+                <button
+                  type="button"
+                  className="oi-num"
+                  title={m.title}
+                  disabled={m.card.lines === 0}
+                  onClick={() => openRows(m.name, m.card.detailFilter, false, `money:${m.id}`)}
+                >
+                  {formatNumber(m.card.lines)}
+                </button>
+              </p>
+              {showPipelineFull && (
                 <>
-                  {' '}Coupa has{' '}
-                  <strong>{formatNumber(sum.money.coupaCoverage.unpaidInvoices)}</strong> unpaid
-                  invoices; <strong>{formatNumber(sum.money.coupaCoverage.matchedInvoices)}</strong>
-                  {' '}of them reach an order line in this dataset. This card counts only those,
-                  and it can change between two loads of the same dataset.
+                  <p className="oi-stage-sub">{m.sub}</p>
+                  {/* The caveat belongs ON the card. The SAP export carries no
+                      payment status at all, so the second figure comes from
+                      Coupa - a live store the dataset version does not pin,
+                      reaching only the orders Coupa knows AND carries a SAP
+                      cross-reference for. A reader who quotes it as "our unpaid
+                      debt" would be wrong by whatever the coverage line says. */}
+                  <p className="oi-stage-note">
+                    {m.note ?? 'From Coupa, not the SAP export, which carries no payment status.'}
+                    {m.id === 'inp' && sum.money.coupaCoverage && (
+                      <>
+                        {' '}Coupa has{' '}
+                        <strong>{formatNumber(sum.money.coupaCoverage.unpaidInvoices)}</strong>{' '}
+                        unpaid invoices;{' '}
+                        <strong>{formatNumber(sum.money.coupaCoverage.matchedInvoices)}</strong>{' '}
+                        reach an order line here. This counts only those, and it can change between
+                        two loads of the same dataset.
+                      </>
+                    )}
+                  </p>
                 </>
               )}
             </div>
+          ))}
           </div>
         </div>
-      </div>
+      )}
 
       {/* ── backlog by material category ────────── */}
       {showDesks && (
         <div className="panel">
           <h3 className="pr-tbl-h">
             Backlog by material category{' '}
-            <span className="muted">— sorted by lines over 90 days</span>
+            <span className="muted">— sorted by lines over {sum.lateDays} days</span>
           </h3>
           <p className="note" style={{ marginTop: 0 }}>
             Grouped by what is being bought rather than by who files it. Requisition and order
@@ -687,7 +728,12 @@ export function OpenItemsTab({
               <thead>
                 <tr>
                   <th>Material category</th><th>Age mix</th>
-                  <th className="num">Open</th><th className="num">&gt; 90 d</th><th className="num">Oldest</th>
+                  {/* num, like the cells beneath them: a left-aligned heading
+                      over right-aligned figures leaves the label floating away
+                      from its own column. */}
+                  <th className="num">Open</th>
+                  <th className="num">&gt; {sum.lateDays} d</th>
+                  <th className="num">Oldest</th>
                 </tr>
               </thead>
               <tbody>
@@ -700,9 +746,12 @@ export function OpenItemsTab({
                       <AgeMixBar
                         bands={d.bands}
                         total={d.open}
+                        labels={sum.bands.map((b) => b.label)}
                         onBand={Object.keys(d.detailFilter).length === 0 ? undefined : (i) => openRows(
-                          `${d.desk} · ${BAND_LABELS[i]}`,
-                          { ...d.detailFilter, ageBand: BAND_KEYS[i]! },
+                          `${d.desk} · ${sum.bands[i]!.label}`,
+                          { ...d.detailFilter, ageBand: sum.bands[i]!.key },
+                          false,
+                          `cat:${d.desk}:band:${sum.bands[i]!.key}`,
                         )}
                       />
                     </td>
@@ -712,7 +761,7 @@ export function OpenItemsTab({
                         className="oi-num oi-num--sm"
                         title={`Show the ${formatNumber(d.open)} open lines in ${d.desk}`}
                         disabled={Object.keys(d.detailFilter).length === 0}
-                        onClick={() => openRows(d.desk, d.detailFilter)}
+                        onClick={() => openRows(d.desk, d.detailFilter, false, `cat:${d.desk}`)}
                       >
                         {formatNumber(d.open)}
                       </button>
@@ -721,15 +770,17 @@ export function OpenItemsTab({
                       <button
                         type="button"
                         className="oi-num oi-num--sm"
-                        style={{ color: d.over90 > 0 ? 'var(--crit)' : undefined }}
-                        title={`Show the ${formatNumber(d.over90)} lines over 90 days in ${d.desk}`}
-                        disabled={d.over90 === 0 || Object.keys(d.detailFilter).length === 0}
+                        style={{ color: d.overLate > 0 ? 'var(--crit)' : undefined }}
+                        title={`Show the ${formatNumber(d.overLate)} lines over ${sum.lateDays} days in ${d.desk}`}
+                        disabled={d.overLate === 0 || Object.keys(d.detailFilter).length === 0}
                         onClick={() => openRows(
-                          `${d.desk} · over 90 d`,
-                          { ...d.detailFilter, ageBand: '>90' },
+                          `${d.desk} · over ${sum.lateDays} d`,
+                          { ...d.detailFilter, ageBand: '>150' },
+                          false,
+                          `cat:${d.desk}:late`,
                         )}
                       >
-                        {formatNumber(d.over90)}
+                        {formatNumber(d.overLate)}
                       </button>
                     </td>
                     <td className="num" style={{ color: d.oldest === null ? undefined : ageColor(d.oldest) }}>

@@ -1033,8 +1033,24 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 
 /* The pipeline. Five across on a wide screen, and never fewer than two — a
    single-column pipeline is a list, and the point is the comparison. */
-.oi-pipe { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .6rem; }
-.oi-pipe--compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+/* SEVEN cards: the five open stages plus the two post-delivery ones, which
+   joined the row on 23 Sep 2026 so it reads as the whole life of an order line
+   from left to right. auto-fit rather than a fixed seven, because seven fixed
+   columns on a laptop gives each card less width than its own heading. */
+.oi-pipe {
+  display: grid; gap: .6rem;
+  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+}
+.oi-pipe--compact { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+/* The card whose rows are in the table below. Without it a filtered table two
+   screens down reads as though the click did nothing. */
+.oi-stage--on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.oi-stage--after { border-style: dashed; }
+.oi-tag--after { background: var(--muted); }
+.oi-stage-note { margin: .35rem 0 0; font-size: .66rem; color: var(--muted); line-height: 1.45; }
 /* 2px, and a darker line than the app's default rule.
    Requested 17 Sep 2026: at 1px against a white panel on a white ground the
    five cards read as one block of text, and the eye has to parse the headings
@@ -1066,31 +1082,15 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 /* Card edges. Two tokens rather than a hard-coded grey, so the dark theme gets
    a border that reads as an edge there too — #E2E8F0 on a dark panel is a glow,
    not an outline. */
-:root { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; }
+:root { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; --oi-late: #7F1D1D; }
 /* Both dark paths, the way the rest of this file does it: the media query for
    "system dark", and the explicit override so the theme toggle wins. A border
    tuned for a white panel reads as a glow on a dark one. */
 @media (prefers-color-scheme: dark) {
-  :root { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; }
+  :root { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; --oi-late: #B91C1C; }
 }
-:root[data-theme="dark"] { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; }
-:root[data-theme="light"] { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; }
-
-/* The two post-delivery cards. Same 2px edge as the stage cards so they read
-   as cards of the same page, but only two across and wider: each carries a
-   provenance note, and the second one's note is the reason the figure can be
-   read at all. */
-.oi-money { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
-@media (max-width: 720px) { .oi-money { grid-template-columns: 1fr; } }
-.oi-money-card {
-  border: 2px solid var(--oi-edge); border-radius: 10px; padding: .65rem .75rem;
-  background: var(--panel); min-width: 0;
-}
-.oi-money-card:hover { border-color: var(--oi-edge-hi); }
-.oi-money-card .oi-num { font-size: 1.45rem; font-weight: 800; color: var(--ink); }
-.oi-money-name { font-size: .78rem; font-weight: 700; color: var(--navy); margin-top: .1rem; }
-.oi-money-sub { font-size: .72rem; color: var(--muted); margin-top: .15rem; }
-.oi-money-note { font-size: .68rem; color: var(--muted); margin-top: .4rem; line-height: 1.45; }
+:root[data-theme="dark"] { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; --oi-late: #B91C1C; }
+:root[data-theme="light"] { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; --oi-late: #7F1D1D; }
 
 /* Every figure on a card is a button. It has to look like the number it
    replaced — a real button chrome would turn each card into a form — so the

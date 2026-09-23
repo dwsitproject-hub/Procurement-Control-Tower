@@ -177,10 +177,25 @@ export function OpenItemsTab({
    * states, so the table's row count matches the number that was clicked
    * instead of approximating it.
    */
-  const [focus, setFocus] = useState<{ label: string; init: Record<string, string> } | null>(null);
+  const [focus, setFocus] = useState<
+    { label: string; init: Record<string, string>; exact?: boolean } | null
+  >(null);
 
-  const openRows = (label: string, init: Record<string, string>) => {
-    setFocus({ label, init });
+  /**
+   * The chosen category, as a filter fragment.
+   *
+   * Requested 23 Sep 2026: choosing a category must narrow EVERY figure on the
+   * page, not just the sentence at the top. It is expressed as a filter rather
+   * than applied by hand per figure, so the stage cards, the watchlist, the
+   * hygiene row, the after-delivery cards, the charts and the table below all
+   * narrow through the one mechanism the rest of the app already uses - and a
+   * figure that cannot honour it says so instead of quietly staying wide.
+   */
+  const catQuery = desk ? `spendCategory=${encodeURIComponent(desk)}` : '';
+  const pageQuery = [filterQuery, catQuery].filter(Boolean).join('&');
+
+  const openRows = (label: string, init: Record<string, string>, exact = false) => {
+    setFocus({ label, init, ...(exact ? { exact } : {}) });
     // A filter applied to a table two screens below the click is invisible, and
     // reads as nothing having happened. Defer a frame so the table has
     // re-rendered under its new key before we scroll to it.
@@ -189,20 +204,80 @@ export function OpenItemsTab({
     });
   };
 
+  /**
+   * A figure whose population the server states as a DRILL TOKEN.
+   *
+   * The KPI cards and the charts carry a token, not a set of filters, so they
+   * cannot seed the table directly. The drill endpoint already translates a
+   * token's predicate into detail-table parameters and reports what it could
+   * not translate (detailHandoff), which is the same machinery v1's "Open in
+   * Detail tab" used.
+   *
+   * So: an EXACT handoff opens the table below, which is what the reader asked
+   * for. An approximate one falls back to the drill panel, which returns the
+   * rows the figure was computed from with the parity the sweep checks. An
+   * average or a rate has no row set to hand off at all, and lands there too.
+   * Silently opening the table on an approximate handoff would put a number
+   * next to the figure that does not match it.
+   */
+  const openRowsFromToken = async (token: string, label: string): Promise<void> => {
+    try {
+      const d = await api.get<{
+        detailHandoff?: { params: Record<string, string>; unmapped: string[] } | null;
+      }>(`/api/v1/drill/${token}?limit=1`);
+      const h = d.detailHandoff;
+      if (h && h.unmapped.length === 0 && Object.keys(h.params).length > 0) {
+        // The category is part of the page's state, not the token's, so it is
+        // merged in here - otherwise clicking a card while a category is chosen
+        // would open the table on every category.
+        openRows(label, { ...h.params, ...(desk ? { spendCategory: desk } : {}) }, true);
+        return;
+      }
+    } catch {
+      // fall through to the drill panel
+    }
+    onDrill(token, label);
+  };
+
   useEffect(() => {
     let dead = false;
     setErr(null);
-    api.get<Summary>(`/api/v1/openitems/summary${filterQuery ? `?${filterQuery}` : ''}`)
+    api.get<Summary>(`/api/v1/openitems/summary${pageQuery ? `?${pageQuery}` : ''}`)
       .then((d) => { if (!dead) setSum(d); })
       .catch((e: Error) => { if (!dead) { setSum(null); setErr(e.message); } });
     return () => { dead = true; };
-  }, [filterQuery]);
+  }, [pageQuery]);
+
+  /**
+   * The page's KPI cards, recomputed under the chosen category.
+   *
+   * The parent fetches these under the GLOBAL filter, which is right until a
+   * category is chosen here - then the watchlist and hygiene rows would be the
+   * only figures on screen still describing the whole dataset. The ids come
+   * from the prop rather than a second hard-coded list, so this cannot drift
+   * from what the page actually renders.
+   *
+   * A KPI with no live recomputation path reports itself unavailable under the
+   * filter, which is the existing behaviour of that endpoint and the right one:
+   * a dash beats a number that silently ignores the narrowing.
+   */
+  const [catKpis, setCatKpis] = useState<Kpi[] | null>(null);
+  const kpiIds = useMemo(() => (kpis ?? []).map((k) => k.kpiId).join(','), [kpis]);
+
+  useEffect(() => {
+    if (!catQuery || kpiIds === '') { setCatKpis(null); return undefined; }
+    let dead = false;
+    api.get<{ kpis: Kpi[] }>(`/api/v1/kpi?ids=${encodeURIComponent(kpiIds)}&${pageQuery}`)
+      .then((d) => { if (!dead) setCatKpis(d.kpis); })
+      .catch(() => { if (!dead) setCatKpis(null); });
+    return () => { dead = true; };
+  }, [catQuery, kpiIds, pageQuery]);
 
   const kpi = useMemo(() => {
     const m = new Map<string, Kpi>();
-    for (const k of kpis ?? []) m.set(k.kpiId, k);
+    for (const k of catKpis ?? kpis ?? []) m.set(k.kpiId, k);
     return m;
-  }, [kpis]);
+  }, [kpis, catKpis]);
   const kval = (id: string): string => {
     const k = kpi.get(id);
     return k && k.status === 'ok' && k.value !== null ? formatKpi(k.value, k.unit) : '—';
@@ -245,9 +320,14 @@ export function OpenItemsTab({
         <div className="oi-head-row">
           <div>
             <p className="oi-asof">Data as of {asOfDate ?? '—'}</p>
+            {/* One figure, from the server, under whatever filter is set. It
+                used to read the chosen category's row out of the category table
+                while the rest of the page stayed wide; now the category is part
+                of the query, so the page total IS the category's total and
+                there is nothing to reconcile. */}
             <p className="oi-total">
-              {formatNumber(lens === 'buyer' && deskRow ? deskRow.open : sum.totalOpen)}{' '}
-              <span>open lines{lens === 'buyer' && deskRow ? ` in ${deskRow.desk}` : ''}</span>
+              {formatNumber(sum.totalOpen)}{' '}
+              <span>open lines{desk ? ` in ${desk}` : ''}</span>
             </p>
           </div>
           <span className="spacer" />
@@ -290,7 +370,13 @@ export function OpenItemsTab({
           </p>
         )}
 
-        {lens === 'buyer' && (
+        {/*
+          Shown in EVERY lens since 23 Sep 2026, because it now narrows every
+          figure on the page. A filter that changes all the numbers while its
+          control is hidden on another lens is the worst of both: the reader
+          cannot see why the totals moved, and cannot clear it.
+        */}
+        {(
           <p className="note oi-desk-pick">
             Material category:{' '}
             <select
@@ -303,9 +389,20 @@ export function OpenItemsTab({
               ))}
             </select>{' '}
             {desk
-              ? <>Showing <strong>{desk}</strong> only. This is remembered on this browser.</>
-              : <>Pick a category to filter this page. There is no link from a login to a buyer in
-                 the dataset today, so the page asks rather than guesses.</>}
+              ? (
+                <>
+                  Every figure on this page — cards, charts and the table below — is{' '}
+                  <strong>{desk}</strong> only.{' '}
+                  <button className="dt-btn" onClick={() => { setDesk(''); store(DESK_KEY, ''); }}>
+                    show all categories
+                  </button>{' '}
+                  The choice is remembered on this browser.
+                </>
+              )
+              : lens === 'buyer'
+                ? <>Pick a category to narrow the whole page. There is no link from a login to a
+                   buyer in the dataset today, so the page asks rather than guesses.</>
+                : <>Optional. Picking one narrows every figure on this page.</>}
           </p>
         )}
       </div>
@@ -460,7 +557,7 @@ export function OpenItemsTab({
                         type="button"
                         className="oi-num"
                         title={`Show the rows behind ${k.title}`}
-                        onClick={() => onDrill(k.drillToken!, k.title)}
+                        onClick={() => { void openRowsFromToken(k.drillToken!, k.title); }}
                       >
                         {kval(w.id)}
                       </button>
@@ -489,7 +586,9 @@ export function OpenItemsTab({
                         type="button"
                         className="oi-num oi-num--sm"
                         title={`Show the rows behind ${kpi.get(id)!.title}`}
-                        onClick={() => onDrill(kpi.get(id)!.drillToken!, kpi.get(id)!.title)}
+                        onClick={() => {
+                          void openRowsFromToken(kpi.get(id)!.drillToken!, kpi.get(id)!.title);
+                        }}
                       >
                         {kval(id)}
                       </button>
@@ -663,14 +762,28 @@ export function OpenItemsTab({
               {['aging_severity_by_stage', 'aging_bands', 'open_by_priority',
                 'unapproved_by_category', 'unreleased_aging_buckets'].map((c) => (
                 <Suspense key={c} fallback={<div className="panel" style={{ minHeight: 180 }}><div className="spinner" /></div>}>
-                  <ChartPanel chartId={c} onDrill={onDrill} filterQuery={filterQuery} currency={currency} />
+                  {/* pageQuery, not filterQuery: the chart narrows with the
+                      chosen category like everything else. onDrill routes
+                      through the handoff, so a bar click lands in the table
+                      below when its predicate can be expressed there. */}
+                  <ChartPanel
+                    chartId={c}
+                    onDrill={(t, l) => { void openRowsFromToken(t, l); }}
+                    filterQuery={pageQuery}
+                    currency={currency}
+                  />
                 </Suspense>
               ))}
             </div>
             {/* Management alone gets the direction question. */}
             {lens === 'mgmt' && (
               <Suspense fallback={<div className="panel" style={{ minHeight: 180 }}><div className="spinner" /></div>}>
-                <ChartPanel chartId="open_backlog_by_month" onDrill={onDrill} filterQuery={filterQuery} currency={currency} />
+                <ChartPanel
+                  chartId="open_backlog_by_month"
+                  onDrill={(t, l) => { void openRowsFromToken(t, l); }}
+                  filterQuery={pageQuery}
+                  currency={currency}
+                />
               </Suspense>
             )}
           </>
@@ -705,7 +818,10 @@ export function OpenItemsTab({
             */
             initial={
               focus
-                ? { ...sum.detailFilter, ...focus.init }
+                // An exact handoff is the figure's OWN population, which is not
+                // always the five open stages - imposing them on top would open
+                // a table whose count is smaller than the number clicked.
+                ? (focus.exact ? focus.init : { ...sum.detailFilter, ...focus.init })
                 : lens === 'buyer' && desk
                   // spendCategory, not purchGroup. The picker changed dimension
                   // on 22 Sep and this seed did not, so choosing a category

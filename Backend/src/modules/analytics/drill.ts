@@ -18,7 +18,7 @@ import { query, queryOne } from '../../db/client.js';
 import {
   intersectScopes, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
-import { spendCategoryWithPlantSql } from '@pct/rules';
+import { prSpendCategoryMatchSql, spendCategoryWithPlantSql } from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
 
 const env = loadEnv();
@@ -535,7 +535,15 @@ const FILTERS: Record<string, Compiler> = {
   //
   // GR postings carry neither, and buildFilterClause throws for that grain, so
   // no drill on it can arrive here carrying one.
-  spendCategory: (v, a, ps, grain) => poLineScoped(grain, a, `spend_category = ${p(ps, String(v))}`),
+  // The aggregate side's twin (globalfilter.ts): a requisition matches through
+  // its linked order, or through its own material when it has no order. The
+  // sweep compares the two, so they move together or not at all.
+  spendCategory: (v, a, ps, grain) => {
+    const val = p(ps, String(v));
+    return grain === 'pr_item'
+      ? prSpendCategoryMatchSql(`${a}.`, `ARRAY[${val}]`)
+      : `${a}.spend_category = ${val}`;
+  },
   /**
    * The same spend category, applied to the row ITSELF rather than through its
    * purchase orders.
@@ -556,8 +564,12 @@ const FILTERS: Record<string, Compiler> = {
       : `${a}.spend_category`;
     return `${expr} = ${p(ps, String(v))}`;
   },
-  spendCategoryIn: (v, a, ps, grain) =>
-    poLineScoped(grain, a, `spend_category = ANY(${p(ps, (v as unknown[]).map(String))})`),
+  spendCategoryIn: (v, a, ps, grain) => {
+    const arr = p(ps, (v as unknown[]).map(String));
+    return grain === 'pr_item'
+      ? prSpendCategoryMatchSql(`${a}.`, arr)
+      : `${a}.spend_category = ANY(${arr})`;
+  },
   sizeBand: (v, a, ps, grain) => poLineScoped(grain, a, `size_band = ${p(ps, String(v))}`),
   sizeBandIn: (v, a, ps, grain) =>
     poLineScoped(grain, a, `size_band = ANY(${p(ps, (v as unknown[]).map(String))})`),
@@ -744,13 +756,17 @@ function detailHandoffFor(filters: Record<string, unknown>): DrillPage['detailHa
       case 'plantIn': params['plant'] = (v as unknown[]).map(String).join(','); break;
       case 'purchOrg': params['purchOrg'] = String(v); break;
       case 'purchOrgIn': params['purchOrg'] = (v as unknown[]).map(String).join(','); break;
-      // spendCategory, sizeBand and delivered are DELIBERATELY absent, so they
-      // fall to the default below and are reported as unmapped. The detail view
-      // carries no spend_category or size_band column, so a param here would be
-      // accepted by the URL and then ignored by the query — the handoff would
-      // silently widen to the whole category while the UI claimed it was exact.
-      // Naming them unmapped makes the approximation visible, which is the
-      // behaviour this switch was built for.
+      // spendCategory became mappable on 22 Sep 2026: migration 030 put
+      // spend_category on core.v_detail and detail.ts gained the filter, so the
+      // handoff is now exact rather than a param the query would ignore.
+      case 'spendCategory': params['spendCategory'] = String(v); break;
+      case 'spendCategoryIn': params['spendCategory'] = (v as unknown[]).map(String).join(','); break;
+      // sizeBand and delivered ARE still deliberately absent, so they fall to
+      // the default below and are reported as unmapped. The detail view carries
+      // no size_band column, so a param here would be accepted by the URL and
+      // then ignored by the query — the handoff would silently widen while the
+      // UI claimed it was exact. Naming them unmapped makes the approximation
+      // visible, which is the behaviour this switch was built for.
       case 'purchGroup': params['purchGroup'] = String(v); break;
       case 'companyCode': params['company'] = String(v); break;
       case 'companyCodeIn': params['company'] = (v as unknown[]).map(String).join(','); break;

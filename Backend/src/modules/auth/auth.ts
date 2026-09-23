@@ -65,6 +65,18 @@ export async function loadPrincipal(userId: string): Promise<Principal | null> {
  * any user changing their own; verifies the current password first, then clears
  * the must-change flag. Sessions are left alone: the caller stays signed in.
  */
+/**
+ * Hash a local password. The ONE place the argon2id parameters live for code
+ * written from here on; the seeder and the User Access reset still carry
+ * their own copies of the same four numbers.
+ */
+export async function hashLocalPassword(pw: string): Promise<string> {
+  return argon2.hash(pw, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
+}
+
+/** The product's minimum, shared by the forced change, the admin reset and the CLI. */
+export const MIN_PASSWORD_LENGTH = 12;
+
 export async function changeLocalPassword(
   userId: string,
   currentPassword: string,
@@ -84,9 +96,7 @@ export async function changeLocalPassword(
   if (!(await argon2.verify(cred.password_hash, currentPassword))) {
     throw new AuthError('invalid-credentials', 'The current password is incorrect.');
   }
-  const hash = await argon2.hash(newPassword, {
-    type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1,
-  });
+  const hash = await hashLocalPassword(newPassword);
   await exec(
     `UPDATE app.local_credential SET password_hash = $2, password_set_at = now(),
             failed_attempts = 0, locked_until = NULL

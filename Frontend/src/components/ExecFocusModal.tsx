@@ -118,7 +118,7 @@ export function ExecFocusModal({
           <span className="spacer" />
           {lifecycleToggle && (
             <div className="gf-scope" role="group" aria-label="Lifecycle">
-              {([['', 'All'], ['open', 'Open'], ['closed', 'Closed']] as const).map(([v, l]) => (
+              {([['', 'All'], ['open', 'Not yet delivered'], ['closed', 'Delivered']] as const).map(([v, l]) => (
                 <button
                   key={v || 'all'}
                   type="button"

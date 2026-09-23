@@ -457,10 +457,11 @@ export function OpenItemsTab({
             pages said "open lines" of two different populations, and the gap is
             large enough - 495 of 717 on one category - to read as a defect. */}
         <p className="note">
-          <strong>Open here starts at the REQUISITION.</strong> It will not match the Executive
-          Summary&apos;s open value, which counts order lines only: requisitions with no purchase
-          order are counted here and cannot appear there, stock transfers are included here and
-          excluded there, and <em>Partially Delivered</em> is counted in neither.
+          <strong>An open item is any line in one of these stages</strong>, from the unapproved
+          requisition to the partly delivered order — the same definition the sidebar count, the
+          scope toggle and every drill use. The Executive Summary&apos;s delivered / not-yet-delivered
+          split is order <em>value</em>, a different question, and does not count requisitions
+          that have no order yet.
         </p>
         {/* An active filter this page cannot express. Said here, beside the
             figures it would have narrowed, rather than left for the reader to
@@ -481,7 +482,16 @@ export function OpenItemsTab({
           second block that would drift into a second design. They differ by a
           tag and a money figure, which is what actually differs about them.
         */}
-        <div className={showPipelineFull ? 'oi-pipe' : 'oi-pipe oi-pipe--compact'}>
+        {/*
+          One row, however many cards: the column count is the CARD count, set
+          here rather than guessed in CSS. auto-fit chose the count from a
+          minimum width, which put five across and wrapped the rest out of the
+          row they belong to. Narrow screens still wrap - see .oi-pipe.
+        */}
+        <div
+          className={showPipelineFull ? 'oi-pipe' : 'oi-pipe oi-pipe--compact'}
+          style={{ ['--oi-cards' as string]: String(sum.stages.length + 2) }}
+        >
           {([...sum.stages, sum.money.deliveredNotInvoiced, sum.money.invoicedNotPaid]
           ).map((s) => {
             const after = 'valueIdr' in s;

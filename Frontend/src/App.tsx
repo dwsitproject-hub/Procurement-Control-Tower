@@ -289,6 +289,17 @@ export default function App() {
   const [gf, setGf] = useState<GlobalFilterState>(EMPTY_FILTER);
   const [dataset, setDataset] = useState<DatasetCurrent | null>(null);
   const [kpis, setKpis] = useState<Kpi[]>([]);
+  /**
+   * The Open Items total, from the Open Items page's own endpoint.
+   *
+   * The badge used to add three KPIs together - pr_not_approved + pr_no_po +
+   * open_items - on the fact tables, while the page it links to counts its
+   * stages on the detail view. Two computations of one figure, and they
+   * disagreed by 20 on the reference dataset with the page one click away.
+   * Reading the page's number is the only way the badge and the page it names
+   * cannot differ.
+   */
+  const [openTotal, setOpenTotal] = useState<number | null>(null);
   const [drill, setDrill] = useState<{ token: string; label: string } | null>(null);
   const [detailInit, setDetailInit] = useState<{ params: Record<string, string>; label: string } | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -443,6 +454,16 @@ export default function App() {
     };
   }, [me, dataset, cacheKey, gfQuery, neededKey]);
 
+  useEffect(() => {
+    if (!me || !dataset || dataset.datasetVersionId === null) return undefined;
+    let cancelled = false;
+    api
+      .get<{ totalOpen: number }>(`/api/v1/openitems/summary${gfQuery ? `?${gfQuery}` : ''}`)
+      .then((d) => { if (!cancelled) setOpenTotal(d.totalOpen); })
+      .catch(() => { if (!cancelled) setOpenTotal(null); });
+    return () => { cancelled = true; };
+  }, [me, dataset, gfQuery]);
+
   // A page opened from a URL the user has no access to must not render blank.
   const allowedTabs = useMemo(
     () => NAV_GROUPS.flatMap((g) => g.items)
@@ -583,13 +604,7 @@ export default function App() {
             <div key={g.section}>
               <div className="nsec">{g.section}</div>
               {items.map((t) => {
-                const openBadge =
-                  t.id === 'openitems'
-                    ? ['pr_not_approved', 'pr_no_po', 'open_items'].reduce((acc, id) => {
-                        const k = kpis.find((x) => x.kpiId === id);
-                        return k?.value !== null && k?.value !== undefined ? acc + Number(k.value) : acc;
-                      }, 0)
-                    : 0;
+                const openBadge = t.id === 'openitems' ? (openTotal ?? 0) : 0;
                 return (
                   // An anchor, not a button: the address bar now reflects the
                   // page, so ctrl/cmd/middle-click should open it in a new tab

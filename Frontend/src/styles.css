@@ -1039,9 +1039,15 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
    columns on a laptop gives each card less width than its own heading. */
 .oi-pipe {
   display: grid; gap: .6rem;
-  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  /* --oi-cards is set by the page to the number of cards, so the row holds
+     them all: open stages plus the two after delivery. */
+  grid-template-columns: repeat(var(--oi-cards, 8), minmax(0, 1fr));
 }
-.oi-pipe--compact { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+/* Below this, eight columns leave each card narrower than its own heading;
+   wrapping is the lesser harm there. */
+@media (max-width: 1100px) {
+  .oi-pipe { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
 /* The card whose rows are in the table below. Without it a filtered table two
    screens down reads as though the click did nothing. */
 .oi-stage--on {

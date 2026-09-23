@@ -46,7 +46,7 @@ import {
   AGE_BANDS, AGE_LATE_DAYS, ageBandPredicateSql, ageLatePredicateSql,
 } from '@pct/rules';
 import { MONEY_STATE_SQL } from './detail.js';
-import type { GlobalFilter } from './globalfilter.js';
+import { OPEN_STATUSES, type GlobalFilter } from './globalfilter.js';
 
 /** The age boundary this page reads "past SLA" at. See the header. */
 export const PAST_SLA_DAYS = 15;
@@ -58,13 +58,38 @@ export const PAST_SLA_DAYS = 15;
  * row, so the statuses are disjoint by construction and the page can say so
  * without qualification.
  */
-export const OPEN_STAGES = [
-  { key: 'pr_not_approved', name: 'PR not approved', sub: 'Waiting on requisition release', status: 'Unapproved PR' },
-  { key: 'pr_no_po', name: 'PR approved, no PO', sub: 'Released but no order raised', status: 'PR Approved-No PO' },
-  { key: 'po_pending_approval', name: 'PO pending approval', sub: 'Order awaiting release', status: 'PO-Not Approved' },
-  { key: 'po_hold', name: 'PO on hold', sub: 'Blocked by buyer or requester', status: 'HOLD PO' },
-  { key: 'po_not_delivered', name: 'PO not delivered', sub: 'Ordered, no goods receipt', status: 'PO-No GR' },
-] as const;
+/**
+ * What each open status is called on a card, and what it means.
+ *
+ * The STAGES THEMSELVES are not listed here - they are derived from
+ * OPEN_STATUSES below, which is the product's one definition of an open item,
+ * already used by the scope toggle and the drill's `open` filter. This page
+ * carried its own five-stage list until 23 Sep 2026 and it was missing
+ * 'Partially Delivered', so the page's total, the sidebar badge and the
+ * Executive Summary's open figure were three different populations wearing one
+ * word. Deriving the list means a status added to the product's definition
+ * cannot be quietly absent from this page.
+ *
+ * A status with no entry here fails loudly at startup rather than rendering a
+ * card labelled with a raw status string.
+ */
+const STAGE_META: Record<string, { key: string; name: string; sub: string }> = {
+  'Unapproved PR': { key: 'pr_not_approved', name: 'PR not approved', sub: 'Waiting on requisition release' },
+  'PR Approved-No PO': { key: 'pr_no_po', name: 'PR approved, no PO', sub: 'Released but no order raised' },
+  'PO-Not Approved': { key: 'po_pending_approval', name: 'PO pending approval', sub: 'Order awaiting release' },
+  'HOLD PO': { key: 'po_hold', name: 'PO on hold', sub: 'Blocked by buyer or requester' },
+  'PO-No GR': { key: 'po_not_delivered', name: 'PO not delivered', sub: 'Ordered, no goods receipt' },
+  // Added with the derivation. A partly received order still has an
+  // outstanding remainder, which is why the product's definition has always
+  // counted it and why leaving it out understated this page.
+  'Partially Delivered': { key: 'po_partial', name: 'PO partly delivered', sub: 'Some received, remainder outstanding' },
+};
+
+export const OPEN_STAGES = OPEN_STATUSES.map((status) => {
+  const meta = STAGE_META[status];
+  if (!meta) throw new Error(`Open Items has no card for open status: ${status}`);
+  return { ...meta, status };
+});
 
 /** Every stage status, for the filter that reproduces the whole pipeline. */
 const ALL_STAGE_STATUSES = OPEN_STAGES.map((s) => s.status).join(',');

@@ -148,7 +148,7 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
   const barFigure = (r: { total: number; lines: number;
     c: { value: number | null } | null; o: { value: number | null } | null }): string =>
     `${money(r.total)} net order value`
-    + ` = ${money(r.c?.value ?? 0)} closed + ${money(r.o?.value ?? 0)} open`
+    + ` = ${money(r.c?.value ?? 0)} delivered + ${money(r.o?.value ?? 0)} not yet delivered`
     + `, ${formatNumber(r.lines)} PO lines (all states)`;
 
   // PO-LINE COUNTS, beside the money. Value alone hides the shape of the work:
@@ -201,8 +201,8 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
   return (
     <div className="xs-bars">
       <div className="xs-legend">
-        <span><i className="xs-key xs-closed" /> Closed <span className="muted">(delivered)</span></span>
-        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
+        <span><i className="xs-key xs-closed" /> Delivered</span>
+        <span><i className="xs-key xs-open" /> Not yet delivered</span>
       </div>
       {rows.map((r, i) => {
         const share = grand > 0 ? (r.total / grand) * 100 : 0;
@@ -222,7 +222,7 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
               onFocus(
                 `${r.label} — ${what}`,
                 `${money(pt.value)} · ${formatNumber(pt.rowCount)} PO lines`,
-                `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
+                `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Not yet delivered' ? 'open' : 'closed'}`,
                 // The WHOLE bar, not the clicked segment: the panel strips the
                 // lifecycle and opens on All, so a caption naming only the open
                 // half would describe rows the cards below do not count.
@@ -247,7 +247,7 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
               onFocus(
                 `${r.label} — ${what}`,
                 `${formatNumber(pt.value ?? 0)} PO lines`,
-                `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Open' ? 'open' : 'closed'}`,
+                `spendCategory=${encodeURIComponent(r.key)}&lifecycle=${what === 'Not yet delivered' ? 'open' : 'closed'}`,
                 barFigure(r),
               );
             }}
@@ -263,16 +263,16 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
                     reads from the axis outward and the open tail is what is still
                     to come. The legend above is in the same order — a legend that
                     disagrees with the stack teaches the reader to misread it. */}
-                {seg(r.c, 'xs-closed', 'Closed')}
-                {seg(r.o, 'xs-open', 'Open')}
+                {seg(r.c, 'xs-closed', 'Delivered')}
+                {seg(r.o, 'xs-open', 'Not yet delivered')}
               </span>
               {/* PO LINES, on their own scale. Sharing the money scale would
                   flatten every count to a sliver — the two measures differ by
                   orders of magnitude, which is the comparison worth seeing. */}
               {maxLines > 0 && (
                 <span className="xs-bar-track xs-bar-track-lines" title={rowTip(r)}>
-                  {segLines(r.cl, 'xs-closed', 'Closed')}
-                  {segLines(r.ol, 'xs-open', 'Open')}
+                  {segLines(r.cl, 'xs-closed', 'Delivered')}
+                  {segLines(r.ol, 'xs-open', 'Not yet delivered')}
                 </span>
               )}
             </span>
@@ -282,9 +282,9 @@ function RankedBars({ data, onFocus, emphasiseTop, currency }: {
                   the proportions and the row showed only the sum, so neither
                   gave the closed figure as a number you could quote. */}
               <span className="xs-bar-split">
-                <span className="xs-sp-closed">{money(r.c?.value ?? 0)}</span> closed
+                <span className="xs-sp-closed">{money(r.c?.value ?? 0)}</span> delivered
                 {' · '}
-                <span className="xs-sp-open">{money(r.o?.value ?? 0)}</span> open
+                <span className="xs-sp-open">{money(r.o?.value ?? 0)}</span> not yet delivered
                 {maxLines > 0 && (
                   <>
                     <br />
@@ -579,7 +579,7 @@ function BandPairs({ data, onFocus }: {
       onClick={() => onFocus(
         `${band} — ${label}`,
         `${(pt.value ?? 0).toFixed(1)}% · ${formatNumber(pt.rowCount)} PO lines`,
-        `sizeBand=${encodeURIComponent(bandKey)}&lifecycle=${label === 'Open' ? 'open' : 'closed'}`,
+        `sizeBand=${encodeURIComponent(bandKey)}&lifecycle=${label === 'Not yet delivered' ? 'open' : 'closed'}`,
       )}
     />
   ) : null);
@@ -587,8 +587,8 @@ function BandPairs({ data, onFocus }: {
   return (
     <div className="xs-bands">
       <div className="xs-legend">
-        <span><i className="xs-key xs-closed" /> Closed <span className="muted">(delivered)</span></span>
-        <span><i className="xs-key xs-open" /> Open <span className="muted">(not delivered)</span></span>
+        <span><i className="xs-key xs-closed" /> Delivered</span>
+        <span><i className="xs-key xs-open" /> Not yet delivered</span>
       </div>
       {buckets.map((b) => {
         const vTot = (at(ov, b.key)?.value ?? 0) + (at(cv, b.key)?.value ?? 0);
@@ -611,8 +611,8 @@ function BandPairs({ data, onFocus }: {
             <span className="xs-band-bars">
               <span className="xs-band-line">
                 <span className="xs-band-track" title={tip}>
-                  {seg(at(cv, b.key), 'xs-closed', 'Closed', b.label, b.key, tip)}
-                  {seg(at(ov, b.key), 'xs-open', 'Open', b.label, b.key, tip)}
+                  {seg(at(cv, b.key), 'xs-closed', 'Delivered', b.label, b.key, tip)}
+                  {seg(at(ov, b.key), 'xs-open', 'Not yet delivered', b.label, b.key, tip)}
                 </span>
                 <span className="xs-band-num">
                   {pct(vTot)} of value
@@ -625,8 +625,8 @@ function BandPairs({ data, onFocus }: {
               </span>
               <span className="xs-band-line">
                 <span className="xs-band-track" title={tip}>
-                  {seg(at(cl, b.key), 'xs-closed', 'Closed', b.label, b.key, tip)}
-                  {seg(at(ol, b.key), 'xs-open', 'Open', b.label, b.key, tip)}
+                  {seg(at(cl, b.key), 'xs-closed', 'Delivered', b.label, b.key, tip)}
+                  {seg(at(ol, b.key), 'xs-open', 'Not yet delivered', b.label, b.key, tip)}
                 </span>
                 <span className="xs-band-num">
                   {pct(lTot)} of lines
@@ -998,9 +998,9 @@ export function ExecSummaryTab({
         // "… — delivered in Jan 2026" from the monthly stack. Both lose the
         // lifecycle word and keep the slice they actually describe.
         title: title
-          .replace(/\s+—\s+(Open|Closed)$/, '')
+          .replace(/\s+—\s+(Not yet delivered|Delivered)$/, '')
           .replace(/\s+—\s+delivered in\s+/, ' — '),
-        subtitle: 'Open and closed together — use the toggle to narrow',
+        subtitle: 'Delivered and not yet delivered together — use the toggle to narrow',
         slice: slice.replace(/&?lifecycle=(open|closed)/g, ''),
         /*
          * Committed value and line count FIRST, before the Overview's own list.
@@ -1435,12 +1435,17 @@ export function ExecSummaryTab({
                   in the order of its size, so the comparison can be made rather
                   than merely attempted.
                 */}
+                {/*
+                  23 Sep 2026: this panel said Open/Closed and Open Items said open, of
+                  two different populations, and a reader found 276 here against 717
+                  there for one category. The word now belongs to one page. This one
+                  splits ORDER VALUE by delivery, which is a different question, and is
+                  labelled as that.
+                */}
                 <p className="note">
-                  <strong>Open here means an ORDER not yet delivered.</strong> It will not match
-                  Open Items, which counts work in progress from the requisition onward:
-                  requisitions with no purchase order are absent here entirely (they have no
-                  order line to value), <em>Partially Delivered</em> counts as open here and as
-                  neither there, and stock transfers are excluded here and included there.
+                  Order value, split by delivery. <strong>Not the same as open items</strong> —
+                  those start at the requisition, so a requisition with no purchase order yet is
+                  an open item on the Open Items page and has no value to show here.
                 </p>
                 {/*
                   A mapping failure is loud rather than silent. When most of the value

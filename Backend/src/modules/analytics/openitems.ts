@@ -42,6 +42,7 @@ import { query } from '../../db/client.js';
 import {
   DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+import { MONEY_STATE_SQL } from './detail.js';
 import type { GlobalFilter } from './globalfilter.js';
 
 /** The age boundary this page reads "past SLA" at. See the header. */
@@ -95,7 +96,8 @@ export interface StageRow {
   detailFilter: Record<string, string>;
 }
 
-export interface DeskRow {
+export interface CategoryRow {
+  /** The material category, or '(none)'. */
   desk: string;
   label: string;
   open: number;
@@ -105,11 +107,50 @@ export interface DeskRow {
   detailFilter: Record<string, string>;
 }
 
+/**
+ * The two states AFTER delivery, requested 22 Sep 2026.
+ *
+ * Deliberately not stages. Every stage on this page is work that has not been
+ * delivered, and these two are money owed on work that HAS: adding them to the
+ * pipeline would break the one property the pipeline has, that an open line
+ * sits in exactly one stage and the stages sum to the total. They are counted
+ * over the same version, scope and filter, and over a different status
+ * population, which is why they are a separate block rather than two more
+ * entries in `stages`.
+ */
+export interface MoneyCard {
+  lines: number;
+  /** Rupiah, or null when no row in the card carries a converted value. */
+  valueIdr: number | null;
+  detailFilter: Record<string, string>;
+}
+
+export interface CoupaCoverage {
+  /** Unpaid, non-void, non-draft invoices in the Coupa store right now. */
+  unpaidInvoices: number;
+  /** How many of those reach a PO line in THIS dataset. */
+  matchedInvoices: number;
+}
+
+export interface MoneyCards {
+  deliveredNotInvoiced: MoneyCard;
+  invoicedNotPaid: MoneyCard;
+  /**
+   * Present only when Coupa is reachable, and the reason the second card can
+   * be read honestly: it says how much of the Coupa story the SAP dataset can
+   * see. A card showing 53 lines when 573 invoice lines are unpaid is not
+   * wrong, but it is not the whole debt either, and the page has to say which
+   * it is.
+   */
+  coupaCoverage: CoupaCoverage | null;
+}
+
 export interface OpenItemsSummary {
   asOfDate: string;
   pastSlaDays: number;
   stages: StageRow[];
-  desks: DeskRow[];
+  categories: CategoryRow[];
+  money: MoneyCards;
   totalOpen: number;
   totalPastSla: number;
   /** The filter for "every open line this page counts". */
@@ -212,6 +253,13 @@ function buildWhere(
   versionId: number,
   scope: readonly ScopeEntry[],
   filter: GlobalFilter,
+  /**
+   * false for the post-delivery cards, which count DELIVERED lines - the exact
+   * rows the five stages exclude. Everything else about the population is
+   * identical, which is the point of the flag: one place decides what "in
+   * scope for this page" means.
+   */
+  openStagesOnly = true,
 ): { sql: string; params: unknown[]; ignored: string[] } {
   const params: unknown[] = [versionId];
   // The VIEW's column names, as in detail.ts - see ScopeColumns.
@@ -219,11 +267,15 @@ function buildWhere(
   // v_detail carries both grains in one row set, so the PO-line dimensions are
   // the ones to filter on.
   const f = detailFilterClause(filter, params);
-  params.push(OPEN_STAGES.map((x) => x.status));
+  let stage = '';
+  if (openStagesOnly) {
+    params.push(OPEN_STAGES.map((x) => x.status));
+    stage = `
+          AND d.status = ANY($${params.length})`;
+  }
   return {
     sql: `d.dataset_version_id = $1 AND ${s}${f.sql}
-          AND NOT d.pr_deleted
-          AND d.status = ANY($${params.length})`,
+          AND NOT d.pr_deleted${stage}`,
     params,
     ignored: f.ignored,
   };
@@ -269,42 +321,107 @@ export async function openItemsSummary(
     };
   });
 
-  // ── desks ────────────────────────────────────────────────────────────
+  // ── material categories ──────────────────────────────────────────────
   //
-  // Purchasing group, decided 16 Sep 2026 over buyer name: it is on the view,
-  // dim_purch_group gives it a description, and it carries no personal data —
-  // the facts mark created_by and requisitioner as restricted.
+  // Purchasing group until 22 Sep 2026, changed on request. It is what a buyer
+  // recognises their own work by - a desk code says who files it, a category
+  // says what it is - and it needs no dimension join for a readable label.
+  //
+  // matCat, not the Executive Summary's spend category: this page counts
+  // core.v_detail and that view carries no material code, so a spend category
+  // cannot be derived on it at all. matCat is on the view AND is a filter the
+  // detail table already knows, which is what keeps a click on a row opening
+  // exactly the rows it counted.
   const dw = buildWhere(versionId, scope, filter);
-  const desks = await query<Record<string, unknown>>(
-    `SELECT COALESCE(NULLIF(d.purch_group, ''), '(none)') AS desk,
-            COALESCE(NULLIF(g.description, ''), NULLIF(d.purch_group, ''),
-                     '(no purchasing group)') AS label,
+  const categories = await query<Record<string, unknown>>(
+    `SELECT COALESCE(NULLIF(d.mat_cat, ''), '(none)') AS desk,
+            COALESCE(NULLIF(d.mat_cat, ''), '(no material category)') AS label,
             ${MEASURES}
        FROM core.v_detail d
-       LEFT JOIN core.dim_purch_group g ON g.code = d.purch_group
       WHERE ${dw.sql}
       GROUP BY 1, 2
       ORDER BY b3 DESC, n DESC`,
     dw.params,
   );
 
+  // ── after delivery: money still in flight ────────────────────────────
+  //
+  // openStagesOnly=false: these count delivered lines, which every stage above
+  // excludes by construction.
+  const mw = buildWhere(versionId, scope, filter, false);
+  const [money] = await query<Record<string, unknown>>(
+    `SELECT count(*) FILTER (WHERE ${MONEY_STATE_SQL['deliveredNotInvoiced']})::int AS dni_lines,
+            sum(d.still_invoice_val_idr)
+              FILTER (WHERE ${MONEY_STATE_SQL['deliveredNotInvoiced']}) AS dni_idr,
+            count(*) FILTER (WHERE ${MONEY_STATE_SQL['invoicedNotPaid']})::int AS inp_lines,
+            sum(d.po_value_idr)
+              FILTER (WHERE ${MONEY_STATE_SQL['invoicedNotPaid']}) AS inp_idr
+       FROM core.v_detail d
+      WHERE ${mw.sql}`,
+    mw.params,
+  );
+
+  /*
+   * How much of Coupa's unpaid debt this dataset can see.
+   *
+   * Asked of the Coupa store directly, without the page's filter: the point is
+   * the SIZE OF THE GAP between what Coupa knows and what the SAP facts can be
+   * joined to, and narrowing it by plant would describe a smaller gap than the
+   * one that exists. Null when the store is absent or unreadable - a missing
+   * coverage note is better than a fabricated one.
+   */
+  let coupaCoverage: CoupaCoverage | null = null;
+  try {
+    const [cov] = await query<Record<string, unknown>>(
+      `SELECT count(*)::int AS unpaid,
+              count(*) FILTER (WHERE EXISTS (
+                SELECT 1 FROM ops.coupa_invoice_line il
+                  JOIN ops.coupa_po_line cpl ON cpl.order_line_id = il.order_line_id
+                  JOIN core.fact_po_line p ON p.dataset_version_id = $1
+                       AND p.po_no = cpl.sap_po_no AND p.po_item = cpl.sap_po_item
+                 WHERE il.invoice_id = i.id))::int AS matched
+         FROM ops.v_coupa_invoice i
+        WHERE NOT i.paid AND i.status NOT IN ('voided', 'draft')`,
+      [versionId],
+    );
+    if (cov) {
+      coupaCoverage = {
+        unpaidInvoices: Number(cov['unpaid'] ?? 0),
+        matchedInvoices: Number(cov['matched'] ?? 0),
+      };
+    }
+  } catch {
+    coupaCoverage = null;
+  }
+
+  const card = (lines: unknown, idr: unknown, state: string): MoneyCard => ({
+    lines: Number(lines ?? 0),
+    valueIdr: idr === null || idr === undefined ? null : Number(idr),
+    detailFilter: { moneyState: state },
+  });
+
   return {
     asOfDate,
     pastSlaDays: PAST_SLA_DAYS,
     stages,
-    desks: desks.map((r) => ({
+    categories: categories.map((r) => ({
       desk: String(r['desk']),
       label: String(r['label']),
       open: Number(r['n']),
       over90: Number(r['b3']),
       oldest: r['oldest'] === null ? null : Number(r['oldest']),
       bands: [Number(r['b0']), Number(r['b1']), Number(r['b2']), Number(r['b3'])],
-      // '(none)' is a display label, not a value the filter can match, so a
-      // desk with no purchasing group is reported and left unclickable.
+      // '(none)' is a display label, not a value the filter can match, so a row
+      // with no material category is reported and left unclickable.
       detailFilter: (r['desk'] === '(none)'
         ? {}
-        : { status: ALL_STAGE_STATUSES, purchGroup: String(r['desk']) }) as Record<string, string>,
+        : { status: ALL_STAGE_STATUSES, matCat: String(r['desk']) }) as Record<string, string>,
     })),
+    money: {
+      deliveredNotInvoiced: card(money?.['dni_lines'], money?.['dni_idr'], 'deliveredNotInvoiced'),
+      invoicedNotPaid: card(money?.['inp_lines'], money?.['inp_idr'], 'invoicedNotPaid'),
+      coupaCoverage,
+    },
     totalOpen: stages.reduce((a, s) => a + s.count, 0),
     totalPastSla: stages.reduce((a, s) => a + s.pastSla, 0),
     detailFilter: { status: ALL_STAGE_STATUSES },

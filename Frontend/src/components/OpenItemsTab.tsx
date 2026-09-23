@@ -23,13 +23,22 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  *  band is 15 days. The page reads "past SLA" at 15 days and SAYS SO, rather
  *  than printing a 3-day figure the banded data cannot support.
  *
- *  Desk key. Purchasing group, not buyer name — it is on both facts, has a
- *  description in dim_purch_group, and carries no personal data, which
- *  created_by and requisitioner are explicitly marked as.
+ *  Grouping key. MATERIAL CATEGORY since 22 Sep 2026, purchasing group before
+ *  that. It is what a buyer recognises their own work by - a desk code says
+ *  who files the work, a category says what it is - and it carries no personal
+ *  data either, which created_by and requisitioner are explicitly marked as.
+ *  It is matCat rather than the Executive Summary's spend category because
+ *  core.v_detail has no material code, so a spend category cannot be derived
+ *  on the view this page counts.
  *
  *  Buyer view. There is no join from a login to a buyer today
- *  (core.dim_sap_user holds no email), so the Buyer lens asks which desk once
- *  and remembers the answer, instead of guessing an identity mapping.
+ *  (core.dim_sap_user holds no email), so the Buyer lens asks which category
+ *  once and remembers the answer, instead of guessing an identity mapping.
+ *
+ *  After delivery. Two cards count money owed on work already delivered. They
+ *  are NOT stages: every stage here is undelivered work, and folding these in
+ *  would break the property that an open line sits in exactly one stage and
+ *  the stages sum to the total.
  */
 
 /** Age bands, in the order the aging chart already uses. */
@@ -53,14 +62,22 @@ interface StageRow {
   /** The detail filter that reproduces this card's own population. */
   detailFilter: Record<string, string>;
 }
-interface DeskRow {
+interface CategoryRow {
   desk: string; label: string; open: number; over90: number;
   oldest: number | null; bands: [number, number, number, number];
   detailFilter: Record<string, string>;
 }
+interface MoneyCard {
+  lines: number; valueIdr: number | null; detailFilter: Record<string, string>;
+}
+interface MoneyCards {
+  deliveredNotInvoiced: MoneyCard;
+  invoicedNotPaid: MoneyCard;
+  coupaCoverage: { unpaidInvoices: number; matchedInvoices: number } | null;
+}
 interface Summary {
   asOfDate: string; pastSlaDays: number;
-  stages: StageRow[]; desks: DeskRow[];
+  stages: StageRow[]; categories: CategoryRow[]; money: MoneyCards;
   totalOpen: number; totalPastSla: number;
   /** The filter for every open line this page counts. */
   detailFilter: Record<string, string>;
@@ -76,7 +93,10 @@ const LENSES: { id: Lens; label: string; blurb: string }[] = [
 ];
 
 const LENS_KEY = 'pct_openitems_lens';
-const DESK_KEY = 'pct_openitems_desk';
+// Renamed with the grouping. A remembered purchasing group is not a material
+// category, and reusing the key would have selected nothing while looking like
+// a saved preference.
+const DESK_KEY = 'pct_openitems_category';
 
 /** localStorage, defensively: a private window or blocked site data must not
     take the page down with it. */
@@ -202,7 +222,7 @@ export function OpenItemsTab({
     );
   }, [sum]);
 
-  const deskRow = sum?.desks.find((d) => d.desk === desk) ?? null;
+  const deskRow = sum?.categories.find((d) => d.desk === desk) ?? null;
   const pctPast = sum && sum.totalOpen > 0 ? Math.round((sum.totalPastSla / sum.totalOpen) * 100) : 0;
 
   if (err) {
@@ -226,7 +246,7 @@ export function OpenItemsTab({
             <p className="oi-asof">Data as of {asOfDate ?? '—'}</p>
             <p className="oi-total">
               {formatNumber(lens === 'buyer' && deskRow ? deskRow.open : sum.totalOpen)}{' '}
-              <span>open lines{lens === 'buyer' && deskRow ? ` on ${deskRow.desk}` : ''}</span>
+              <span>open lines{lens === 'buyer' && deskRow ? ` in ${deskRow.desk}` : ''}</span>
             </p>
           </div>
           <span className="spacer" />
@@ -271,20 +291,20 @@ export function OpenItemsTab({
 
         {lens === 'buyer' && (
           <p className="note oi-desk-pick">
-            Desk:{' '}
+            Material category:{' '}
             <select
               value={desk}
               onChange={(e) => { setDesk(e.target.value); store(DESK_KEY, e.target.value); }}
             >
-              <option value="">— choose your desk —</option>
-              {sum.desks.map((d) => (
-                <option key={d.desk} value={d.desk}>{d.desk} · {d.label}</option>
+              <option value="">— choose your category —</option>
+              {sum.categories.map((d) => (
+                <option key={d.desk} value={d.desk}>{d.desk}</option>
               ))}
             </select>{' '}
             {desk
               ? <>Showing <strong>{desk}</strong> only. This is remembered on this browser.</>
-              : <>Pick a desk to filter this page. There is no link from a login to a buyer in the
-                 dataset today, so the page asks rather than guesses.</>}
+              : <>Pick a category to filter this page. There is no link from a login to a buyer in
+                 the dataset today, so the page asks rather than guesses.</>}
           </p>
         )}
       </div>
@@ -481,31 +501,100 @@ export function OpenItemsTab({
         </div>
       )}
 
-      {/* ── backlog by desk ────────────────────────────────────────── */}
+      {/* ── after delivery: money still in flight ──────────────────── */}
+      <div className="panel">
+        <h3 className="pr-tbl-h">
+          After delivery{' '}
+          <span className="muted">— money owed on work already received</span>
+        </h3>
+        <p className="note" style={{ marginTop: 0 }}>
+          Not part of the pipeline above, on purpose: every stage there is work that has NOT been
+          delivered, and these two are what happens after it has. Counted over the same filter and
+          the same dataset, so the two blocks describe one population at two different points.
+        </p>
+        <div className="oi-money">
+          <div className="oi-money-card">
+            <button
+              type="button"
+              className="oi-num"
+              title="Show the order lines with goods received and no invoice"
+              disabled={sum.money.deliveredNotInvoiced.lines === 0}
+              onClick={() => openRows('delivered, not invoiced',
+                sum.money.deliveredNotInvoiced.detailFilter)}
+            >
+              {formatNumber(sum.money.deliveredNotInvoiced.lines)}
+            </button>
+            <div className="oi-money-name">PO delivered, not invoiced</div>
+            <div className="oi-money-sub">
+              {formatKpi(sum.money.deliveredNotInvoiced.valueIdr, 'idr')} still to invoice
+            </div>
+            <div className="oi-money-note">
+              Nothing left to deliver, something left to invoice — the GR/IR gap, from the SAP
+              export itself.
+            </div>
+          </div>
+
+          <div className="oi-money-card">
+            <button
+              type="button"
+              className="oi-num"
+              title="Show the order lines Coupa reports as invoiced and unpaid"
+              disabled={sum.money.invoicedNotPaid.lines === 0}
+              onClick={() => openRows('invoiced in Coupa, not paid',
+                sum.money.invoicedNotPaid.detailFilter)}
+            >
+              {formatNumber(sum.money.invoicedNotPaid.lines)}
+            </button>
+            <div className="oi-money-name">PO invoiced, not paid</div>
+            <div className="oi-money-sub">
+              {formatKpi(sum.money.invoicedNotPaid.valueIdr, 'idr')} of order value
+            </div>
+            {/* The caveat belongs ON the card. The SAP export carries no payment
+                status at all, so this figure comes from Coupa - a live store
+                that is not pinned by the dataset version, reaching only the
+                orders Coupa knows AND carries a SAP cross-reference for. A
+                reader who quotes it as "our unpaid debt" would be wrong by
+                whatever the coverage line says. */}
+            <div className="oi-money-note">
+              From Coupa, not the SAP export, which carries no payment status.
+              {sum.money.coupaCoverage && (
+                <>
+                  {' '}Coupa has{' '}
+                  <strong>{formatNumber(sum.money.coupaCoverage.unpaidInvoices)}</strong> unpaid
+                  invoices; <strong>{formatNumber(sum.money.coupaCoverage.matchedInvoices)}</strong>
+                  {' '}of them reach an order line in this dataset. This card counts only those,
+                  and it can change between two loads of the same dataset.
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── backlog by material category ────────── */}
       {showDesks && (
         <div className="panel">
           <h3 className="pr-tbl-h">
-            Backlog by purchasing group{' '}
+            Backlog by material category{' '}
             <span className="muted">— sorted by lines over 90 days</span>
           </h3>
           <p className="note" style={{ marginTop: 0 }}>
-            Grouped by purchasing group rather than by buyer: it is the desk the work belongs to,
-            and it carries no personal data. Requisition and order stages are counted together,
-            because a desk&apos;s open work is both.
+            Grouped by what is being bought rather than by who files it. Requisition and order
+            stages are counted together, because a category&apos;s open work is both.
           </p>
           <div className="table-wrap">
             <table className="data dd-tbl oi-desks">
               <thead>
                 <tr>
-                  <th>Desk</th><th>Age mix</th>
+                  <th>Material category</th><th>Age mix</th>
                   <th className="num">Open</th><th className="num">&gt; 90 d</th><th className="num">Oldest</th>
                 </tr>
               </thead>
               <tbody>
-                {sum.desks.map((d) => (
+                {sum.categories.map((d) => (
                   <tr key={d.desk}>
                     <th scope="row">
-                      <strong>{d.desk}</strong> <span className="muted">{d.label}</span>
+                      <strong>{d.label}</strong>
                     </th>
                     <td className="oi-desk-mix">
                       <AgeMixBar
@@ -521,7 +610,7 @@ export function OpenItemsTab({
                       <button
                         type="button"
                         className="oi-num oi-num--sm"
-                        title={`Show the ${formatNumber(d.open)} open lines on ${d.desk}`}
+                        title={`Show the ${formatNumber(d.open)} open lines in ${d.desk}`}
                         disabled={Object.keys(d.detailFilter).length === 0}
                         onClick={() => openRows(d.desk, d.detailFilter)}
                       >
@@ -533,7 +622,7 @@ export function OpenItemsTab({
                         type="button"
                         className="oi-num oi-num--sm"
                         style={{ color: d.over90 > 0 ? 'var(--crit)' : undefined }}
-                        title={`Show the ${formatNumber(d.over90)} lines over 90 days on ${d.desk}`}
+                        title={`Show the ${formatNumber(d.over90)} lines over 90 days in ${d.desk}`}
                         disabled={d.over90 === 0 || Object.keys(d.detailFilter).length === 0}
                         onClick={() => openRows(
                           `${d.desk} · over 90 d`,

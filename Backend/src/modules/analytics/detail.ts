@@ -79,6 +79,13 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'currencyCode',    label: 'Ccy',                    sql: 'currency_code',       type: 'string', default: false, sortable: true },
   { key: 'netOrderValue',   label: 'PO Value',               sql: 'net_order_value',     type: 'money',  default: false, sortable: true },
   { key: 'netOrderValueUsd',label: 'PO Value USD',           sql: 'net_order_value_usd', type: 'money',  currency: 'USD', default: false, sortable: true },
+  // 029. The order's value in rupiah, converted by the TRANSFORM at the
+  // document's own period rate - not multiplied here and not in the browser,
+  // so this column and every IDR figure on a KPI card apply the same rate.
+  // Null where the line has no order yet, and null where the currency could not
+  // be resolved: an unconverted value is left empty rather than shown raw, which
+  // would read as rupiah.
+  { key: 'poValueIdr',      label: 'PO Value IDR',           sql: 'po_value_idr',        type: 'money',  currency: 'IDR', default: false, sortable: true },
   { key: 'prValueIdr',      label: 'PR Value IDR',           sql: 'pr_value_idr',        type: 'money',  currency: 'IDR', default: false, sortable: true },
   { key: 'purchOrg',        label: 'Purch Org',              sql: 'purch_org',           type: 'string', default: false, sortable: true },
   { key: 'purchGroup',      label: 'Purch Grp',              sql: 'purch_group',         type: 'string', default: false, sortable: true },
@@ -113,6 +120,15 @@ export interface DetailFilters {
    * table will not return the number that was clicked.
    */
   ageBand?: string;
+  /**
+   * One of MONEY_STATE_SQL's keys, or undefined.
+   *
+   * A whitelist rather than free SQL, and one field rather than two booleans:
+   * the two states are mutually exclusive steps of the same sequence, and
+   * asking for both would return nothing while looking like it should return
+   * more.
+   */
+  moneyState?: string;
   excludeSto?: boolean;
   includeDeleted?: boolean;
   onlyOpen?: boolean;
@@ -129,7 +145,7 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'q', 'ageBand', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
 
@@ -140,6 +156,57 @@ export const DETAIL_QUERY_PARAMS = [
  * clicking "2,722 past 15 d" would open a table with a different number in the
  * corner, and there would be no way for a reader to tell which was right.
  */
+/**
+ * Goods received, invoice not yet posted - the GR/IR gap, on the order line.
+ *
+ * The same pair the grir_value KPI and the drill's `grirOpen` filter use:
+ * nothing left to deliver, something left to invoice. Written against the view
+ * here because the Open Items cards count the view.
+ */
+const DELIVERED_NOT_INVOICED =
+  'COALESCE(d.still_deliver_qty, 0) = 0 AND COALESCE(d.still_invoice_val, 0) > 0';
+
+/**
+ * Invoiced in Coupa and not yet paid.
+ *
+ * ── Why this one reaches outside the dataset ───────────────────────────────
+ *
+ * The SAP export carries no invoice document and no payment status at all - it
+ * knows what is left to invoice and nothing about what happens afterwards. The
+ * only payment data in this system is Coupa's, so this predicate crosses into
+ * ops.* to answer a question the facts cannot.
+ *
+ * Three consequences a reader has to be told about, and the page says all three:
+ *
+ *   ops.* is a LIVE upsert store, not a versioned one. This figure can change
+ *   between two loads of the same published dataset, which is true of nothing
+ *   else on the page;
+ *
+ *   coverage is limited to orders Coupa knows about AND carries a SAP
+ *   cross-reference for. Coupa's own `po_number` is its internal number - 0 of
+ *   641 invoice lines matched an SAP PO number directly - so the bridge goes
+ *   through coupa_po_line.sap_po_no/sap_po_item, which is the field the payload
+ *   contract actually populates;
+ *
+ *   ops.v_coupa_invoice, not the raw table: it drops invoices whose linked
+ *   lines are all in excluded purchasing groups, so this agrees with the
+ *   Invoicing and Payment page rather than quietly counting more.
+ *
+ * 'voided' and 'draft' are excluded because neither is a debt.
+ */
+const INVOICED_NOT_PAID = `EXISTS (
+  SELECT 1 FROM ops.coupa_invoice_line il
+    JOIN ops.coupa_po_line cpl ON cpl.order_line_id = il.order_line_id
+    JOIN ops.v_coupa_invoice i ON i.id = il.invoice_id
+   WHERE cpl.sap_po_no = d.po_no AND cpl.sap_po_item = d.po_item
+     AND NOT i.paid AND i.status NOT IN ('voided', 'draft'))`;
+
+/** Exported so the Open Items cards count exactly what the table will show. */
+export const MONEY_STATE_SQL: Record<string, string> = {
+  deliveredNotInvoiced: DELIVERED_NOT_INVOICED,
+  invoicedNotPaid: INVOICED_NOT_PAID,
+};
+
 const AGE_BANDS: Record<string, string> = {
   '0-15': 'd.age_days <= 15',
   '16-30': 'd.age_days > 15 AND d.age_days <= 30',
@@ -150,6 +217,10 @@ const AGE_BANDS: Record<string, string> = {
 
 export function isAgeBand(v: string): boolean {
   return Object.prototype.hasOwnProperty.call(AGE_BANDS, v);
+}
+
+export function isMoneyState(v: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MONEY_STATE_SQL, v);
 }
 
 /**
@@ -186,6 +257,7 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     monthKey: list('monthKey'),
     search: q['q'] === undefined ? undefined : String(q['q']),
     ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
+    moneyState: q['moneyState'] === undefined ? undefined : String(q['moneyState']),
     excludeSto: flag('excludeSto'),
     includeDeleted: flag('includeDeleted'),
     onlyOpen: flag('onlyOpen'),
@@ -230,6 +302,14 @@ export function describeDetailFilters(
   if ((filters.search ?? '').trim() !== '') out.push(['Search', filters.search!.trim()]);
   if (filters.ageBand) {
     out.push(['Age', filters.ageBand === 'past-sla' ? 'over 15 days' : `${filters.ageBand} days`]);
+  }
+  if (filters.moneyState === 'deliveredNotInvoiced') {
+    out.push(['State', 'delivered, not invoiced']);
+  }
+  if (filters.moneyState === 'invoicedNotPaid') {
+    // Named as Coupa's, in the export's own filter list, because the rows came
+    // from a store the dataset version does not pin.
+    out.push(['State', 'invoiced in Coupa, not paid']);
   }
 
   // Toggles are listed only when ON, except "include deleted", which is stated
@@ -337,6 +417,9 @@ function buildDetailWhere(
   // unknown band is ignored rather than widening the query silently.
   if (filters.ageBand && AGE_BANDS[filters.ageBand]) {
     where.push(`(${AGE_BANDS[filters.ageBand]})`);
+  }
+  if (filters.moneyState && MONEY_STATE_SQL[filters.moneyState]) {
+    where.push(`(${MONEY_STATE_SQL[filters.moneyState]})`);
   }
 
   const search = (filters.search ?? '').trim();

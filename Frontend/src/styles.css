@@ -1076,6 +1076,22 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 :root[data-theme="dark"] { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; }
 :root[data-theme="light"] { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; }
 
+/* The two post-delivery cards. Same 2px edge as the stage cards so they read
+   as cards of the same page, but only two across and wider: each carries a
+   provenance note, and the second one's note is the reason the figure can be
+   read at all. */
+.oi-money { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+@media (max-width: 720px) { .oi-money { grid-template-columns: 1fr; } }
+.oi-money-card {
+  border: 2px solid var(--oi-edge); border-radius: 10px; padding: .65rem .75rem;
+  background: var(--panel); min-width: 0;
+}
+.oi-money-card:hover { border-color: var(--oi-edge-hi); }
+.oi-money-card .oi-num { font-size: 1.45rem; font-weight: 800; color: var(--ink); }
+.oi-money-name { font-size: .78rem; font-weight: 700; color: var(--navy); margin-top: .1rem; }
+.oi-money-sub { font-size: .72rem; color: var(--muted); margin-top: .15rem; }
+.oi-money-note { font-size: .68rem; color: var(--muted); margin-top: .4rem; line-height: 1.45; }
+
 /* Every figure on a card is a button. It has to look like the number it
    replaced — a real button chrome would turn each card into a form — so the
    affordance is an underline on hover and a focus ring for the keyboard. */

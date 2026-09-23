@@ -1093,6 +1093,18 @@ export async function runTransform(
     [versionId],
   );
 
+  // The same stamp on the REQUISITION side (031). A requisition has a category
+  // of its own - through its material - and filtering by the derived expression
+  // cost about a second a query, so it is stored here exactly as the order side
+  // above is. Same generator, so a requisition and the order raised against it
+  // resolve identically wherever they both appear.
+  await client.query(
+    `UPDATE core.fact_pr_item f
+        SET spend_category = ${spendCategoryWithPlantSql('f.material_code', 'f.material_group', 'f.plant')}
+      WHERE f.dataset_version_id = $1`,
+    [versionId],
+  );
+
   // Coverage check. Not a blocker — a low mapping rate is a data question, not a
   // reason to refuse a dataset whose figures are otherwise correct — but it is
   // loud, because "everything is unmapped" is indistinguishable from "the page

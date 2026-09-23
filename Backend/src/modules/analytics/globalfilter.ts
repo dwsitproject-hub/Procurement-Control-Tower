@@ -10,6 +10,8 @@
  * and an unfiltered one can never be computed by two different pieces of SQL.
  */
 
+import { prSpendCategoryMatchSql } from '@pct/rules';
+
 export interface GlobalFilter {
   companyCode?: string[];
   plant?: string[];
@@ -115,9 +117,14 @@ export function buildFilterClause(
   /**
    * The Executive Summary dimensions live on the PO line. On the PR grain they
    * are resolved through the linked PO lines — the same device `scope` already
-   * uses below, and for the same reason: a requisition has no spend category or
-   * order value of its own, but "requisitions that became METHANOL orders" is a
-   * meaningful and answerable question.
+   * uses below, and for the same reason: a requisition has no order value of
+   * its own, but "requisitions that became METHANOL orders" is a meaningful and
+   * answerable question.
+   *
+   * SPEND CATEGORY no longer uses this device; see below. A requisition does
+   * have a category of its own, through its material, and dropping the ones
+   * that never reached an order made 42% of an open backlog disappear from
+   * every requisition-grain figure.
    *
    * On the GR grain they throw, so the caller reports the figure as unfilterable
    * rather than quietly returning an unfiltered number.
@@ -142,7 +149,18 @@ export function buildFilterClause(
   if (f.spendCategory && f.spendCategory.length > 0) {
     params.push(f.spendCategory);
     const i = n;
-    poScoped((t) => `${t}spend_category = ANY($${i})`);
+    if (kind === 'gr_posting') {
+      throw new Error('Executive Summary filters do not apply to GR postings');
+    }
+    if (kind === 'pr_item') {
+      // The order's category, falling back to the requisition's own material -
+      // the definition core.v_detail.spend_category carries, written once in
+      // @pct/rules and called by the drill compiler too.
+      const outer = alias !== '' ? alias : 'core.fact_pr_item.';
+      parts.push(prSpendCategoryMatchSql(outer, `$${i}`));
+    } else {
+      parts.push(`${alias}spend_category = ANY($${i})`);
+    }
     n += 1;
   }
 

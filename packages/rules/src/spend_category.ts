@@ -124,6 +124,43 @@ export function spendCategorySourceSql(codeCol: string, groupCol: string): strin
  * operational: substr() returns '' there, which is not '9', and inventing a
  * project classification from an absent plant would be worse than the default.
  */
+/**
+ * Does THIS requisition belong to one of these spend categories?
+ *
+ * Written 23 Sep 2026. The global filter resolved a requisition's category
+ * through its linked purchase orders alone - "requisitions that became SERVICES
+ * orders" - which is a real question, and the wrong one for a page about work
+ * that has NOT been ordered yet. On the reference dataset 802 of 1,902 open
+ * SERVICES lines, 42%, carry no purchase order at all, so every requisition-
+ * grain figure filtered that way dropped them silently while the stage pipeline
+ * beside it counted them.
+ *
+ * So: matched through a linked order, OR - when there is no order at all -
+ * through the requisition's own material. Not simply "its own material": a
+ * requisition whose order was placed against a different category belongs where
+ * the money went, which is what the linked-order branch says and what the
+ * Executive Summary means by the word.
+ *
+ * This is the same definition core.v_detail.spend_category carries (migration
+ * 030): the order's category, falling back to the requisition's own. A filter
+ * that disagreed with the column it filters would be a trap.
+ *
+ * `prefix` must be a qualified table prefix ending in a dot - the subquery
+ * correlates on it, and an unqualified column would bind to the INNER table and
+ * quietly match every row.
+ */
+export function prSpendCategoryMatchSql(prefix: string, arrayExpr: string): string {
+  // The STORED column (031), not the derivation. Deriving it here cost 930 ms
+  // per filtered query - 5.7 s once Postgres JIT-compiled the expression - and
+  // a filtered page runs seventy of them.
+  const own = `${prefix}spend_category`;
+  const linked = (t: string) => `SELECT 1 FROM core.fact_po_line ${t}
+      WHERE ${t}.dataset_version_id = ${prefix}dataset_version_id
+        AND ${t}.pr_no = ${prefix}pr_no AND ${t}.pr_item = ${prefix}pr_item`;
+  return `(EXISTS (${linked('_sc')} AND _sc.spend_category = ANY(${arrayExpr}))
+           OR (NOT EXISTS (${linked('_sc2')}) AND (${own}) = ANY(${arrayExpr})))`;
+}
+
 export function spendCategoryWithPlantSql(
   codeCol: string,
   groupCol: string,

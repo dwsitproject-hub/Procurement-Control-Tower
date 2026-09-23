@@ -47,6 +47,7 @@ import {
 } from '@pct/rules';
 import { insertMany, query } from '../../db/client.js';
 import { PLANT_AREA } from './area_map.js';
+import { applyDimOverrides, applyFxOverrides } from '../master/edit.js';
 import type { RuleSnapshot } from '../admin/rules.js';
 
 // ─────────────────────────────────────────────────────────────────── typing
@@ -1066,6 +1067,17 @@ export async function runTransform(
   // wipe reference data loaded by an earlier bundle of ten.
   await upsertReferenceData(client, batchId);
 
+  // Administrator edits to master data (032), re-imposed HERE: after every SAP
+  // write to the dimensions above, and before anything below reads them to
+  // stamp a figure. Earlier and this run's SAP values would win over the edit;
+  // later and the spend-category stamp below would use the SAP category. Most
+  // of these tables are rewritten by every sync, which is the whole reason
+  // edits are stored as overrides rather than written in place.
+  const overrides = await applyDimOverrides(client);
+  if (overrides.failed > 0) {
+    console.warn(`master overrides: ${overrides.applied} applied, ${overrides.failed} could not be`);
+  }
+
   // ── Executive Summary attributes (020) ──
   // Stamped onto the fact, not joined at read time, for the reason stated in the
   // migration: a chart point and its drill predicate must filter the same
@@ -1444,7 +1456,11 @@ async function buildFx(
     console.warn('fx_rate_source unavailable, excel-only FX:', err instanceof Error ? err.message : err);
   }
 
-  const rates = buildFxTable(raw);
+  // Manual rates (032) replace what SAP or Coupa supplied for that currency and
+  // month. Applied to the rate table as it is BUILT, never to a published
+  // core.fx_rate: a published version is immutable, so a manual rate is valued
+  // from this recompute on.
+  const rates = await applyFxOverrides(buildFxTable(raw));
   return { table: new FxTable(rates), rates, yearResolved: anchor.ambiguous ? null : year, sourceCounts };
 }
 

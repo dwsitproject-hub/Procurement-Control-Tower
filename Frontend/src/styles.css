@@ -1156,3 +1156,35 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 @media (max-width: 720px) {
   .oi-pipe, .oi-pipe--compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* ── Master data editing (032) ─────────────────────────────────────────────
+   Admin only. The dialog is narrower than a drill modal: it holds a handful of
+   fields, and a form stretched to 1200px puts the label a screen away from its
+   input. */
+.me-modal { width: min(640px, 100%); }
+.me-grid { display: grid; gap: .7rem; margin-top: .6rem; }
+.me-field { display: flex; flex-direction: column; gap: .25rem; }
+.me-label { font-size: .78rem; font-weight: 600; color: var(--heading); }
+.me-field input, .me-field select { width: 100%; }
+/* When a change reaches the figures, stated on the field that causes it. */
+.me-effect { font-size: .7rem; color: var(--warn); }
+.me-ro { margin-top: .9rem; padding: .55rem .7rem; border: 1px dashed var(--border); border-radius: 6px; }
+.me-ro ul, .me-hidden ul { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .74rem; color: var(--muted); }
+.me-ro-h { margin: 0; font-size: .74rem; font-weight: 700; color: var(--heading); }
+.me-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+.me-bar { display: flex; align-items: center; gap: .7rem; margin: .3rem 0 .4rem; font-size: .76rem; }
+.me-act-h { width: 1%; }
+.me-act { white-space: nowrap; }
+.me-act .dt-btn { padding: .15rem .45rem; font-size: .72rem; margin-right: .25rem; }
+.me-row-marked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.me-badge {
+  margin-left: .4rem; padding: .02rem .3rem; border-radius: 3px;
+  font-size: .6rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: #fff;
+}
+.me-badge--edited { background: var(--accent); }
+.me-badge--added { background: var(--good); }
+.me-hidden { margin-top: .7rem; }
+.dt-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dt-btn-primary:hover { filter: brightness(1.08); }
+.dt-btn-danger { color: var(--crit); }
+.dt-btn-danger:hover { border-color: var(--crit); }

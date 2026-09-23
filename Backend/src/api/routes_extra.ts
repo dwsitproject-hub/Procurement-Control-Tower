@@ -7,10 +7,13 @@
  */
 
 import type { Router } from 'express';
-import { PAGE_ACCESS, PAGE_KEYS } from '@pct/contracts';
+import { ROLE_RANK, PAGE_ACCESS, PAGE_KEYS } from '@pct/contracts';
 import argon2 from 'argon2';
 import { queryOne, query } from '../db/client.js';
 import { recordAudit } from '../modules/audit/audit.js';
+import {
+  addRow, editRow, EditError, editSpecFor, hideRow, overridesFor, pendingFxOverrides, revertRow,
+} from '../modules/master/edit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
 import { sessionFingerprint } from '../modules/auth/session.js';
 import {
@@ -87,7 +90,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     res.json({ datasetVersionId: v.id, pages: await masterIndex(v.id) });
   }));
 
-  r.get('/api/v1/master/:id', role('viewer', async (req, res) => {
+  r.get('/api/v1/master/:id', role('viewer', async (req, res, ctx) => {
     const v = await version();
     const query = req.query as Record<string, unknown>;
     const q = String(query['q'] ?? '');
@@ -100,8 +103,62 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // checked against the page's own columns for the same reason.
     const page = await loadMasterPage(String(req.params.id), v.id, q, sort);
     if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
+
+    // Only an Admin is told what is editable, and the marks on overridden rows.
+    // Everyone else sees exactly the page they saw before 032: the edit
+    // controls are not merely hidden in the browser, the page never learns of
+    // them.
+    const isAdmin = Math.max(
+      ...(ctx.principal.roles as string[]).map((r2) => ROLE_RANK[r2 as keyof typeof ROLE_RANK] ?? 0), 0,
+    ) >= ROLE_RANK.admin;
+    if (isAdmin) {
+      for (const t of page.tables as unknown as Array<Record<string, unknown>>) {
+        const spec = editSpecFor(String(t['relation']));
+        if (!spec) continue;
+        t['edit'] = {
+          keys: spec.keys, fields: spec.fields, readOnly: spec.readOnly,
+          allowAdd: spec.allowAdd, allowDelete: spec.allowDelete, note: spec.note, fx: spec.fx === true,
+        };
+        t['marks'] = await overridesFor(spec.relation);
+        if (spec.fx) t['pendingFx'] = await pendingFxOverrides();
+      }
+    }
     res.json({ datasetVersionId: v.id, ...page });
   }));
+
+  /*
+   * Master data edits (032). Admin only, and every one audited: reference data
+   * decides what a code is CALLED on every page, and for a few fields what it
+   * is COUNTED as, so who changed it and when has to be answerable.
+   *
+   * The relation in the body is matched against the registry in
+   * modules/master/edit.ts and never reaches SQL on its own; the values are
+   * coerced to each column's declared type there.
+   */
+  const masterEdit = (
+    verb: string,
+    fn: (relation: string, input: Record<string, unknown>, actor: string) => Promise<void>,
+  ) => role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as { relation?: unknown; values?: unknown };
+    const relation = String(b.relation ?? '');
+    const values = (b.values && typeof b.values === 'object' ? b.values : {}) as Record<string, unknown>;
+    try {
+      await fn(relation, values, ctx.principal.email);
+    } catch (e) {
+      if (e instanceof EditError) throw new HttpProblem(400, 'invalid-edit', e.message);
+      throw e;
+    }
+    await recordAudit({
+      action: `master.${verb}`, actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome: 'success', detail: { relation, values }, ip: req.ip,
+    });
+    res.json({ ok: true });
+  });
+
+  r.post('/api/v1/admin/master/rows', masterEdit('add', addRow));
+  r.patch('/api/v1/admin/master/rows', masterEdit('edit', editRow));
+  r.post('/api/v1/admin/master/rows/hide', masterEdit('hide', hideRow));
+  r.post('/api/v1/admin/master/rows/revert', masterEdit('revert', revertRow));
 
   // ── W3: entity views ─────────────────────────────────────────────────────
 

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { formatNumber } from '../lib/format';
+import {
+  MasterEditDialog, rowKey, sameKey, type EditBlock, type RowMark,
+} from './MasterEdit';
 
 /**
  * Master data — one sub-page per reference table (31 Aug 2026).
@@ -29,6 +32,11 @@ interface MasterTable {
   versionScoped: boolean;
   sortKey: string | null;
   sortDir: 'asc' | 'desc';
+  /** Present only for an Admin - the server does not describe edits to anyone else. */
+  edit?: EditBlock;
+  marks?: RowMark[];
+  /** FX: manual rates waiting for the next recompute. */
+  pendingFx?: number;
 }
 
 interface MasterPage {
@@ -64,6 +72,31 @@ export function MasterTab({ section, onSection }: {
    * expects: the other tables should not reshuffle.
    */
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
+  /** The row being edited: null row means ADD; the whole value null means closed. */
+  const [editing, setEditing] = useState<{ table: MasterTable; row: Record<string, unknown> | null } | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  /** Bumped after any write, so the page reloads with the change applied. */
+  const [nonce, setNonce] = useState(0);
+
+  /**
+   * Hide or revert, confirmed. Both are reversible, and the confirmation says
+   * so - an administrator hesitating over "delete" should know it can be undone.
+   */
+  const act = async (
+    t: MasterTable, verb: 'hide' | 'revert', values: Record<string, unknown>, what: string,
+  ): Promise<void> => {
+    const msg = verb === 'hide'
+      ? `Hide ${what}? It disappears from every page, and the SAP sync will not bring it back. You can restore it from this page.`
+      : `Revert ${what}? The row goes back to exactly what SAP had.`;
+    if (!window.confirm(msg)) return;
+    setActionErr(null);
+    try {
+      await api.post(`/api/v1/admin/master/rows/${verb}`, { relation: t.relation, values });
+      setNonce((n) => n + 1);
+    } catch (e) {
+      setActionErr(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   useEffect(() => {
     api.get<{ pages: IndexEntry[] }>('/api/v1/master')
@@ -102,7 +135,7 @@ export function MasterTab({ section, onSection }: {
       .catch((e: Error) => { if (!dead) setErr(e.message); })
       .finally(() => { if (!dead) setBusy(false); });
     return () => { dead = true; };
-  }, [active, applied, sort]);
+  }, [active, applied, sort, nonce]);
 
   useEffect(() => load(), [load]);
 
@@ -180,6 +213,26 @@ export function MasterTab({ section, onSection }: {
               {t.total !== t.totalUnfiltered ? ` of ${formatNumber(t.totalUnfiltered)}` : ''} row(s)
             </span>
           </h3>
+          {t.edit && (
+            <div className="me-bar">
+              {t.edit.allowAdd && (
+                <button type="button" className="dt-btn dt-btn-primary"
+                  onClick={() => setEditing({ table: t, row: null })}>
+                  + Add
+                </button>
+              )}
+              <span className="muted">
+                Admin: edits are kept over later SAP values, and every edited or hidden row can be reverted.
+              </span>
+            </div>
+          )}
+          {t.edit?.fx && (t.pendingFx ?? 0) > 0 && (
+            <p className="note">
+              <span className="bs sa">{t.pendingFx} manual rate{t.pendingFx === 1 ? '' : 's'}</span>{' '}
+              waiting for the next Recompute. The rates below are what this published dataset was
+              valued at, and they do not change.
+            </p>
+          )}
           <p className="note">
             {t.note}{' '}
             <span className="muted">
@@ -234,32 +287,97 @@ export function MasterTab({ section, onSection }: {
                         </button>
                       </th>
                     );
-                  })}</tr>
+                  })}
+                  {t.edit && <th className="me-act-h">Actions</th>}
+                  </tr>
                 </thead>
                 <tbody>
-                  {t.rows.map((row, i) => (
+                  {t.rows.map((row, i) => {
                     // Index key: these rows have no single stable identifier
                     // across nine different masters, and the list is replaced
                     // wholesale on every search rather than reordered.
-                    <tr key={i} className={i % 2 ? 're' : undefined}>
-                      {t.columns.map((c) => (
-                        <td
-                          key={c.key}
-                          style={c.numeric
-                            ? { textAlign: 'right', fontVariantNumeric: 'tabular-nums' }
-                            : undefined}
-                        >
-                          {fmt(row[c.key], c)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                    const key = t.edit ? rowKey(t.edit, row) : {};
+                    const mark = t.marks?.find((m) => m.state !== 'hidden' && sameKey(m.key, key));
+                    return (
+                      <tr key={i} className={`${i % 2 ? 're' : ''}${mark ? ' me-row-marked' : ''}`}>
+                        {t.columns.map((c, ci) => (
+                          <td
+                            key={c.key}
+                            style={c.numeric
+                              ? { textAlign: 'right', fontVariantNumeric: 'tabular-nums' }
+                              : undefined}
+                          >
+                            {fmt(row[c.key], c)}
+                            {ci === 0 && mark && (
+                              <span className={`me-badge me-badge--${mark.state}`}
+                                title={`${mark.state === 'added' ? 'Added' : 'Edited'} by ${mark.by} on ${mark.at.slice(0, 16)}`}>
+                                {mark.state}
+                              </span>
+                            )}
+                          </td>
+                        ))}
+                        {t.edit && (
+                          <td className="me-act">
+                            <button type="button" className="dt-btn" onClick={() => setEditing({ table: t, row })}>Edit</button>
+                            {mark?.state === 'edited' && (
+                              <button type="button" className="dt-btn"
+                                onClick={() => { void act(t, 'revert', key, 'this row'); }}>
+                                Revert
+                              </button>
+                            )}
+                            {t.edit.allowDelete && (
+                              <button type="button" className="dt-btn dt-btn-danger"
+                                onClick={() => { void act(t, 'hide', key, 'this row'); }}>
+                                {mark?.state === 'added' ? 'Delete' : 'Hide'}
+                              </button>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
+
+          {/* Hidden rows, listed so they can be restored. A tombstone the
+              reader cannot see is a row that is simply gone, and "reversible"
+              would be a promise the page could not keep. */}
+          {(t.marks ?? []).some((m) => m.state === 'hidden') && (
+            <div className="me-hidden">
+              <p className="me-ro-h">Hidden rows</p>
+              <ul>
+                {t.marks!.filter((m) => m.state === 'hidden').map((m) => (
+                  <li key={JSON.stringify(m.key)}>
+                    <code>{Object.values(m.key).join(' / ')}</code>{' '}
+                    <span className="muted">hidden by {m.by}, {m.at.slice(0, 16)}</span>{' '}
+                    <button type="button" className="dt-btn"
+                      onClick={() => { void act(t, 'revert', m.key, Object.values(m.key).join(' / ')); }}>
+                      Restore
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       ))}
+
+      {actionErr && (
+        <div className="panel"><p className="note"><span className="bs spdel">error</span> {actionErr}</p></div>
+      )}
+
+      {editing && editing.table.edit && (
+        <MasterEditDialog
+          relation={editing.table.relation}
+          tableName={editing.table.name}
+          edit={editing.table.edit}
+          row={editing.row}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); setNonce((n) => n + 1); }}
+        />
+      )}
     </>
   );
 }

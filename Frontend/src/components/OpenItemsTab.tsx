@@ -453,6 +453,15 @@ export function OpenItemsTab({
           approval policy is 3 days, which the banded data cannot express — so this is the closest
           honest line, and it is labelled rather than presented as the policy figure.
         </p>
+        {/* The twin of the note on the Executive Summary's category panel. Both
+            pages said "open lines" of two different populations, and the gap is
+            large enough - 495 of 717 on one category - to read as a defect. */}
+        <p className="note">
+          <strong>Open here starts at the REQUISITION.</strong> It will not match the Executive
+          Summary&apos;s open value, which counts order lines only: requisitions with no purchase
+          order are counted here and cannot appear there, stock transfers are included here and
+          excluded there, and <em>Partially Delivered</em> is counted in neither.
+        </p>
         {/* An active filter this page cannot express. Said here, beside the
             figures it would have narrowed, rather than left for the reader to
             infer from a total that looks too big. */}

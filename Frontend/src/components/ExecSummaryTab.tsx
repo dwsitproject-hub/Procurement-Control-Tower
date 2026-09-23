@@ -1428,6 +1428,21 @@ export function ExecSummaryTab({
                   every share above it.
                 </p>
                 {/*
+                  Added 23 Sep 2026, after a reader compared a category's open line
+                  count here with the same category on Open Items and found 276
+                  against 717. Neither was wrong; both panels said "open" and
+                  "lines" and neither said of WHAT. The difference is stated here,
+                  in the order of its size, so the comparison can be made rather
+                  than merely attempted.
+                */}
+                <p className="note">
+                  <strong>Open here means an ORDER not yet delivered.</strong> It will not match
+                  Open Items, which counts work in progress from the requisition onward:
+                  requisitions with no purchase order are absent here entirely (they have no
+                  order line to value), <em>Partially Delivered</em> counts as open here and as
+                  neither there, and stock transfers are excluded here and included there.
+                </p>
+                {/*
                   A mapping failure is loud rather than silent. When most of the value
                   cannot be attributed to a business category, the page says so instead
                   of presenting '(unmapped)' as though it were a category the business

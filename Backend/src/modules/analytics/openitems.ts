@@ -124,11 +124,20 @@ export interface CategoryRow {
  * population, which is why they are a separate block rather than two more
  * entries in `stages`.
  */
-export interface MoneyCard {
-  lines: number;
+/**
+ * A post-delivery card.
+ *
+ * It extends StageRow rather than defining its own shape (23 Sep 2026): the two
+ * sit in the pipeline's row and must read as cards of the same design, and the
+ * surest way to keep two cards looking alike is for one component to draw both
+ * from one type. What differs is stated - `valueIdr`, and `note` for the
+ * provenance line - not re-invented.
+ */
+export interface MoneyCard extends StageRow {
   /** Rupiah, or null when no row in the card carries a converted value. */
   valueIdr: number | null;
-  detailFilter: Record<string, string>;
+  /** Where the figure comes from, when that is not the SAP export. */
+  note: string | null;
 }
 
 export interface CoupaCoverage {
@@ -363,16 +372,22 @@ export async function openItemsSummary(
   //
   // openStagesOnly=false: these count delivered lines, which every stage above
   // excludes by construction.
+  //
+  // MEASURES, the same expression the stage cards use, so the age mix, the
+  // past-SLA figure, the oldest line and the priority split are computed for
+  // these two exactly as they are for the five above - one definition, seven
+  // cards.
   const mw = buildWhere(versionId, scope, filter, false);
-  const [money] = await query<Record<string, unknown>>(
-    `SELECT count(*) FILTER (WHERE ${MONEY_STATE_SQL['deliveredNotInvoiced']})::int AS dni_lines,
-            sum(d.still_invoice_val_idr)
-              FILTER (WHERE ${MONEY_STATE_SQL['deliveredNotInvoiced']}) AS dni_idr,
-            count(*) FILTER (WHERE ${MONEY_STATE_SQL['invoicedNotPaid']})::int AS inp_lines,
-            sum(d.po_value_idr)
-              FILTER (WHERE ${MONEY_STATE_SQL['invoicedNotPaid']}) AS inp_idr
+  const moneyRows = await query<Record<string, unknown>>(
+    `SELECT 'deliveredNotInvoiced' AS k, ${MEASURES},
+            sum(d.still_invoice_val_idr) AS value_idr
        FROM core.v_detail d
-      WHERE ${mw.sql}`,
+      WHERE ${mw.sql} AND ${MONEY_STATE_SQL['deliveredNotInvoiced']}
+      UNION ALL
+     SELECT 'invoicedNotPaid' AS k, ${MEASURES},
+            sum(d.po_value_idr) AS value_idr
+       FROM core.v_detail d
+      WHERE ${mw.sql} AND ${MONEY_STATE_SQL['invoicedNotPaid']}`,
     mw.params,
   );
 
@@ -409,11 +424,48 @@ export async function openItemsSummary(
     coupaCoverage = null;
   }
 
-  const card = (lines: unknown, idr: unknown, state: string): MoneyCard => ({
-    lines: Number(lines ?? 0),
-    valueIdr: idr === null || idr === undefined ? null : Number(idr),
-    detailFilter: { moneyState: state },
-  });
+  const AFTER: Record<string, { name: string; sub: string; note: string | null }> = {
+    deliveredNotInvoiced: {
+      name: 'PO delivered, not invoiced',
+      sub: 'Received, invoice not posted',
+      note: null,
+    },
+    invoicedNotPaid: {
+      name: 'PO invoiced, not paid',
+      sub: 'Invoiced, payment outstanding',
+      // The caveat travels WITH the figure. The SAP export carries no payment
+      // status at all, so this one comes from Coupa - a live store the dataset
+      // version does not pin, reaching only the orders Coupa knows and carries
+      // a SAP cross-reference for.
+      note: 'From Coupa, not the SAP export, which carries no payment status.',
+    },
+  };
+
+  const byMoneyKey = new Map(moneyRows.map((r) => [String(r['k']), r]));
+  const moneyCard = (key: string): MoneyCard => {
+    const r = byMoneyKey.get(key);
+    const n = (c: string): number => Number(r?.[c] ?? 0);
+    const meta = AFTER[key]!;
+    return {
+      key,
+      name: meta.name,
+      sub: meta.sub,
+      count: n('n'),
+      bands: AGE_BANDS.map((_b, i) => n(`b${i}`)),
+      pastSla: n('past_sla'),
+      overLate: n('over_late'),
+      oldest: r && r['oldest'] !== null && r['oldest'] !== undefined ? Number(r['oldest']) : null,
+      emergency: n('emergency'),
+      urgent: n('urgent'),
+      standard: n('standard'),
+      prioUnset: n('prio_unset'),
+      standardLabels: STANDARD_LABELS,
+      detailFilter: { moneyState: key },
+      valueIdr: r?.['value_idr'] === null || r?.['value_idr'] === undefined
+        ? null : Number(r['value_idr']),
+      note: meta.note,
+    };
+  };
 
   return {
     asOfDate,
@@ -435,8 +487,8 @@ export async function openItemsSummary(
         : { status: ALL_STAGE_STATUSES, spendCategory: String(r['desk']) }) as Record<string, string>,
     })),
     money: {
-      deliveredNotInvoiced: card(money?.['dni_lines'], money?.['dni_idr'], 'deliveredNotInvoiced'),
-      invoicedNotPaid: card(money?.['inp_lines'], money?.['inp_idr'], 'invoicedNotPaid'),
+      deliveredNotInvoiced: moneyCard('deliveredNotInvoiced'),
+      invoicedNotPaid: moneyCard('invoicedNotPaid'),
       coupaCoverage,
     },
     totalOpen: stages.reduce((a, s) => a + s.count, 0),

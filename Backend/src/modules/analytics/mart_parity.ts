@@ -1078,6 +1078,30 @@ function poBracketSql(
 }
 
 export const PARITY_CHARTS: ChartSpec[] = [
+  /**
+   * v1's 'Open items by aging band', on the shared six bands.
+   *
+   * Inline in mart.ts until 23 Sep 2026, where it carried its own cut -
+   * 0-30/31-60/61-90/91-180/180+ - which matched no other aging figure on the
+   * page: two charts side by side, both called aging bands, neither
+   * comparable. Here it uses the one definition and gains live filtering.
+   */
+  {
+    chartId: 'aging_bands', seriesKey: 'lines', seriesLabel: 'Open PO lines', unit: 'count',
+    sql: `SELECT ${ageBandCaseSql('aging_days')} AS bucket_key,
+                 ${ageBandCaseSql('aging_days')} AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('open', true,
+                     'ageBand', ${ageBandCaseSql('aging_days')})) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 /*F*/
+             AND aging_days IS NOT NULL
+             AND status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')
+           GROUP BY 1, 2, ${ageBandOrderSql('aging_days')}
+           ORDER BY ${ageBandOrderSql('aging_days')}`,
+  },
+
   {
     chartId: 'pr_by_month', seriesKey: 'carried_in',
     filterKind: 'pr_item', filterAlias: 'pri.',

@@ -76,8 +76,9 @@ interface CategoryRow {
   oldest: number | null; bands: number[];
   detailFilter: Record<string, string>;
 }
-interface MoneyCard {
-  lines: number; valueIdr: number | null; detailFilter: Record<string, string>;
+interface MoneyCard extends StageRow {
+  valueIdr: number | null;
+  note: string | null;
 }
 interface MoneyCards {
   deliveredNotInvoiced: MoneyCard;
@@ -464,8 +465,17 @@ export function OpenItemsTab({
           </p>
         )}
 
+        {/*
+          SEVEN cards from ONE list. The two post-delivery cards arrive from the
+          server in the stage row's own shape - same measures, same age bands,
+          same priority split - so they are drawn by this map rather than by a
+          second block that would drift into a second design. They differ by a
+          tag and a money figure, which is what actually differs about them.
+        */}
         <div className={showPipelineFull ? 'oi-pipe' : 'oi-pipe oi-pipe--compact'}>
-          {sum.stages.map((s) => {
+          {([...sum.stages, sum.money.deliveredNotInvoiced, sum.money.invoicedNotPaid]
+          ).map((s) => {
+            const after = 'valueIdr' in s;
             const isBottleneck = bottleneck?.key === s.key && s.pastSla > 0;
             // Marked while its rows are the ones on screen. A filtered table two
             // screens below an unmarked card reads as if nothing was clicked.
@@ -473,11 +483,12 @@ export function OpenItemsTab({
             return (
               <div
                 key={s.key}
-                className={`oi-stage${isBottleneck ? ' oi-stage--hot' : ''}${isOn ? ' oi-stage--on' : ''}`}
+                className={`oi-stage${isBottleneck ? ' oi-stage--hot' : ''}${isOn ? ' oi-stage--on' : ''}${after ? ' oi-stage--after' : ''}`}
               >
                 <div className="oi-stage-h">
                   <span className="oi-stage-name">{s.name}</span>
                   {isBottleneck && <span className="oi-tag">Bottleneck</span>}
+                  {after && <span className="oi-tag oi-tag--after">after delivery</span>}
                 </div>
                 <p className="oi-stage-n">
                   <button
@@ -489,13 +500,35 @@ export function OpenItemsTab({
                   >
                     {formatNumber(s.count)}
                   </button>
+                  {/* The five stages print a share of open. The two after
+                      delivery are not open lines, so the same slot carries the
+                      money instead - same position, same weight, a measure that
+                      is true of them. */}
                   <span className="muted">
-                    {sum.totalOpen > 0 ? ` ${Math.round((s.count / sum.totalOpen) * 100)}% of open` : ''}
+                    {after
+                      ? ` ${formatKpi((s as MoneyCard).valueIdr, 'idr')}`
+                      : sum.totalOpen > 0
+                        ? ` ${Math.round((s.count / sum.totalOpen) * 100)}% of open`
+                        : ''}
                   </span>
                 </p>
                 {showPipelineFull && (
                   <>
                     <p className="oi-stage-sub">{s.sub}</p>
+                    {after && (s as MoneyCard).note && (
+                      <p className="oi-stage-note">
+                        {(s as MoneyCard).note}
+                        {s.key === 'invoicedNotPaid' && sum.money.coupaCoverage && (
+                          <>
+                            {' '}Coupa has{' '}
+                            <strong>{formatNumber(sum.money.coupaCoverage.unpaidInvoices)}</strong>{' '}
+                            unpaid invoices;{' '}
+                            <strong>{formatNumber(sum.money.coupaCoverage.matchedInvoices)}</strong>{' '}
+                            reach an order line here.
+                          </>
+                        )}
+                      </p>
+                    )}
                     <AgeMixBar
                       bands={s.bands}
                       total={s.count}
@@ -564,6 +597,7 @@ export function OpenItemsTab({
               </div>
             );
           })}
+
         </div>
       </div>
 
@@ -636,78 +670,6 @@ export function OpenItemsTab({
                 </div>
               ))}
 
-          {/*
-            The two post-delivery cards, in the pipeline's own row and its own
-            card format (23 Sep 2026). They are still NOT stages - every stage
-            above is undelivered work and these two are what happens after -
-            so they carry a rule and a different sub-line rather than an age mix
-            they have no data for. Sitting them apart in their own panel made
-            them read as a footnote; sitting them here makes the row read as
-            what it is, the whole life of an order line left to right.
-          */}
-          {([
-            {
-              id: 'dni',
-              name: 'PO delivered, not invoiced',
-              card: sum.money.deliveredNotInvoiced,
-              sub: `${formatKpi(sum.money.deliveredNotInvoiced.valueIdr, 'idr')} still to invoice`,
-              note: 'Nothing left to deliver, something left to invoice \u2014 the GR/IR gap, from the SAP export itself.',
-              title: 'Show the order lines with goods received and no invoice',
-            },
-            {
-              id: 'inp',
-              name: 'PO invoiced, not paid',
-              card: sum.money.invoicedNotPaid,
-              sub: `${formatKpi(sum.money.invoicedNotPaid.valueIdr, 'idr')} of order value`,
-              note: null,
-              title: 'Show the order lines Coupa reports as invoiced and unpaid',
-            },
-          ] as const).map((m) => (
-            <div
-              key={m.id}
-              className={`oi-stage oi-stage--after${focus?.id === `money:${m.id}` ? ' oi-stage--on' : ''}`}
-            >
-              <div className="oi-stage-h">
-                <span className="oi-stage-name">{m.name}</span>
-                <span className="oi-tag oi-tag--after">after delivery</span>
-              </div>
-              <p className="oi-stage-n">
-                <button
-                  type="button"
-                  className="oi-num"
-                  title={m.title}
-                  disabled={m.card.lines === 0}
-                  onClick={() => openRows(m.name, m.card.detailFilter, false, `money:${m.id}`)}
-                >
-                  {formatNumber(m.card.lines)}
-                </button>
-              </p>
-              {showPipelineFull && (
-                <>
-                  <p className="oi-stage-sub">{m.sub}</p>
-                  {/* The caveat belongs ON the card. The SAP export carries no
-                      payment status at all, so the second figure comes from
-                      Coupa - a live store the dataset version does not pin,
-                      reaching only the orders Coupa knows AND carries a SAP
-                      cross-reference for. A reader who quotes it as "our unpaid
-                      debt" would be wrong by whatever the coverage line says. */}
-                  <p className="oi-stage-note">
-                    {m.note ?? 'From Coupa, not the SAP export, which carries no payment status.'}
-                    {m.id === 'inp' && sum.money.coupaCoverage && (
-                      <>
-                        {' '}Coupa has{' '}
-                        <strong>{formatNumber(sum.money.coupaCoverage.unpaidInvoices)}</strong>{' '}
-                        unpaid invoices;{' '}
-                        <strong>{formatNumber(sum.money.coupaCoverage.matchedInvoices)}</strong>{' '}
-                        reach an order line here. This counts only those, and it can change between
-                        two loads of the same dataset.
-                      </>
-                    )}
-                  </p>
-                </>
-              )}
-            </div>
-          ))}
           </div>
         </div>
       )}
@@ -731,9 +693,9 @@ export function OpenItemsTab({
                   {/* num, like the cells beneath them: a left-aligned heading
                       over right-aligned figures leaves the label floating away
                       from its own column. */}
-                  <th className="num">Open</th>
-                  <th className="num">&gt; {sum.lateDays} d</th>
-                  <th className="num">Oldest</th>
+                  <th className="oi-c">Open</th>
+                  <th className="oi-c">&gt; {sum.lateDays} d</th>
+                  <th className="oi-c">Oldest</th>
                 </tr>
               </thead>
               <tbody>
@@ -755,7 +717,7 @@ export function OpenItemsTab({
                         )}
                       />
                     </td>
-                    <td className="num">
+                    <td className="oi-c">
                       <button
                         type="button"
                         className="oi-num oi-num--sm"
@@ -766,7 +728,7 @@ export function OpenItemsTab({
                         {formatNumber(d.open)}
                       </button>
                     </td>
-                    <td className="num">
+                    <td className="oi-c">
                       <button
                         type="button"
                         className="oi-num oi-num--sm"
@@ -783,7 +745,7 @@ export function OpenItemsTab({
                         {formatNumber(d.overLate)}
                       </button>
                     </td>
-                    <td className="num" style={{ color: d.oldest === null ? undefined : ageColor(d.oldest) }}>
+                    <td className="oi-c" style={{ color: d.oldest === null ? undefined : ageColor(d.oldest) }}>
                       {d.oldest === null ? '—' : `${formatNumber(d.oldest)} d`}
                     </td>
                   </tr>

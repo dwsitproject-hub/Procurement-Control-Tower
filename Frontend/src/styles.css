@@ -1051,6 +1051,11 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 .oi-stage--after { border-style: dashed; }
 .oi-tag--after { background: var(--muted); }
 .oi-stage-note { margin: .35rem 0 0; font-size: .66rem; color: var(--muted); line-height: 1.45; }
+/* The backlog table's three figure columns, heading and cells together.
+   Requested 23 Sep 2026: the headings sat left of right-aligned figures, so
+   each label floated away from the column it names. Centring BOTH keeps them
+   over their own numbers at every column width. */
+.oi-desks th.oi-c, .oi-desks td.oi-c { text-align: center; }
 /* 2px, and a darker line than the app's default rule.
    Requested 17 Sep 2026: at 1px against a white panel on a white ground the
    five cards read as one block of text, and the eye has to parse the headings

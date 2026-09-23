@@ -600,28 +600,11 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
   }
 
   // aging bands on open lines
-  {
-    const r = await client.query<{ band: string; n: number }>(
-      `SELECT CASE WHEN aging_days <= 30 THEN '0-30'
-                   WHEN aging_days <= 60 THEN '31-60'
-                   WHEN aging_days <= 90 THEN '61-90'
-                   WHEN aging_days <= 180 THEN '91-180'
-                   ELSE '180+' END AS band,
-              count(*)::int AS n
-         FROM core.fact_po_line
-        WHERE dataset_version_id = $1 AND aging_days IS NOT NULL
-          AND status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')
-        GROUP BY 1`,
-      [versionId],
-    );
-    const order = ['0-30', '31-60', '61-90', '91-180', '180+'];
-    const byBand = new Map(r.rows.map((x) => [x.band, x.n]));
-    order.forEach((band, i) =>
-      push('aging_bands', 'lines', 'Open PO lines', band, `${band} days`, i + 1,
-        byBand.get(band) ?? 0, byBand.get(band) ?? 0, 'count',
-        { grain: 'po_line', filters: { agingBand: band, open: true } }),
-    );
-  }
+  // aging_bands moved to PARITY_CHARTS on 23 Sep 2026, with the shared six
+  // bands. As an inline builder it had its own cut (0-30/31-60/61-90/91-180/
+  // 180+) that matched no other aging figure on the page, and could never be
+  // recomputed under a filter.
+
 
   // top vendors by spend
   {

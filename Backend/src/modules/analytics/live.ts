@@ -236,19 +236,32 @@ async function computeLiveChartFor(
   spec: {
     chartId: string; seriesKey: string; seriesLabel: string; unit: string; sql: string;
     filterAlias?: string;
+    filterKind?: FactKind;
   },
   versionId: number,
   chartId: string,
   filter: GlobalFilter,
 ): Promise<LiveChart | null> {
 
-  // Chart specs embed their own grain in the drill jsonb; infer from the SQL's
-  // driving table instead, which is unambiguous.
-  const kind: FactKind = spec.sql.includes('fact_pr_item') && !spec.sql.includes('fact_po_line')
-    ? 'pr_item'
-    : spec.sql.includes('fact_gr_posting')
-      ? 'gr_posting'
-      : 'po_line';
+  /*
+   * The grain the global filter applies at.
+   *
+   * Inferred from the SQL's table names, which is right for the great majority
+   * of specs and WRONG for any PR-grain spec that merely mentions the order
+   * table - a subquery resolving each requisition's purchase order, say. Such a
+   * spec was read as po_line and the filter then wrote `spend_category` against
+   * fact_pr_item, which has no such column: three charts answered HTTP 500 for
+   * every request carrying an Executive Summary dimension.
+   *
+   * So a spec may now STATE its grain, and the inference remains the default.
+   * Stated beats inferred wherever the two can disagree.
+   */
+  const kind: FactKind = spec.filterKind
+    ?? (spec.sql.includes('fact_pr_item') && !spec.sql.includes('fact_po_line')
+      ? 'pr_item'
+      : spec.sql.includes('fact_gr_posting')
+        ? 'gr_posting'
+        : 'po_line');
   // Per-series alias first: a chart can have one single-table series and one
   // joined series, and only the series itself knows which it is.
   const alias = spec.filterAlias ?? JOINED_ALIAS[chartId]?.alias ?? '';

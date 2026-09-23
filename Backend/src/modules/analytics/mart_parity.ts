@@ -875,6 +875,12 @@ interface ChartSpec {
    * the mismatch was invisible.
    */
   filterAlias?: string;
+  /**
+   * The grain the global filter applies at, when the SQL's tables would say
+   * otherwise. A PR-grain spec that resolves each requisition's order in a
+   * subquery mentions fact_po_line and would be inferred as po_line.
+   */
+  filterKind?: 'pr_item' | 'po_line' | 'gr_posting';
 }
 
 /**
@@ -1061,22 +1067,26 @@ function poBracketSql(
 export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'pr_by_month', seriesKey: 'carried_in',
+    filterKind: 'pr_item', filterAlias: 'pri.',
     seriesLabel: 'Brought forward (still open)', unit: 'count',
     sql: prFlowSeries('carried_in',
       `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk`),
   },
   {
     chartId: 'pr_by_month', seriesKey: 'new_pr',
+    filterKind: 'pr_item', filterAlias: 'pri.',
     seriesLabel: 'Newly raised', unit: 'count',
     sql: prFlowSeries('new', `pr.rm = s.mk`),
   },
   {
     chartId: 'pr_by_month', seriesKey: 'to_po',
+    filterKind: 'pr_item', filterAlias: 'pri.',
     seriesLabel: 'Became PO', unit: 'count',
     sql: prFlowSeries('to_po', `NOT pr.is_deleted AND pr.pm = s.mk`),
   },
   {
     chartId: 'pr_by_month', seriesKey: 'cancelled',
+    filterKind: 'pr_item', filterAlias: 'pri.',
     seriesLabel: 'Cancelled (by month raised)', unit: 'count',
     sql: prFlowSeries('cancelled', `pr.is_deleted AND pr.rm = s.mk`),
   },
@@ -1415,6 +1425,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
    */
   {
     chartId: 'exec_pr_outstanding', seriesKey: 'items', seriesLabel: 'Outstanding PR items', unit: 'count',
+    filterKind: 'pr_item',
     sql: `WITH pr AS (
             SELECT p.dataset_version_id, p.pr_no, p.pr_item,
                    p.requisition_date::date AS req
@@ -2158,6 +2169,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
+    filterAlias: 'pri.',
     sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
                  ${PR_SPEND_CAT} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
@@ -2172,7 +2184,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
   // valuation rides in the bar labels and tooltips, in both currencies so the
   // display toggle picks the right one (user ask 5 Aug 2026).
   {
-    chartId: 'items_by_category', seriesKey: 'label_amount', seriesLabel: 'Value (USD)', unit: 'usd',
+    chartId: 'items_by_category', seriesKey: 'label_amount',
+    filterAlias: 'pri.', seriesLabel: 'Value (USD)', unit: 'usd',
     sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
                  ${PR_SPEND_CAT} AS bucket_label,
                  sum(pri.total_value_usd)::numeric AS value, count(*)::int AS row_count,
@@ -2184,7 +2197,8 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2 ORDER BY count(*) DESC`,
   },
   {
-    chartId: 'items_by_category', seriesKey: 'label_amount_idr', seriesLabel: 'Value (IDR)', unit: 'idr',
+    chartId: 'items_by_category', seriesKey: 'label_amount_idr',
+    filterAlias: 'pri.', seriesLabel: 'Value (IDR)', unit: 'idr',
     sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
                  ${PR_SPEND_CAT} AS bucket_label,
                  sum(pri.total_value_idr)::numeric AS value, count(*)::int AS row_count,

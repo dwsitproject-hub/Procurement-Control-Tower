@@ -11,6 +11,7 @@
  *  - a null renders as an em dash, never 0
  */
 
+import { AGE_BANDS as SHARED_AGE_BANDS, ageBandPredicateSql } from '@pct/rules';
 import { query, queryOne } from '../../db/client.js';
 import {
   DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
@@ -215,6 +216,14 @@ export const MONEY_STATE_SQL: Record<string, string> = {
 };
 
 const AGE_BANDS: Record<string, string> = {
+  // The six bands, generated from @pct/rules over this view's own age column.
+  ...Object.fromEntries(SHARED_AGE_BANDS.map(
+    (b) => [b.key, ageBandPredicateSql('d.age_days', b.key)],
+  )),
+  // The four that preceded them, kept so a saved view or a link from before
+  // 23 Sep 2026 still opens the rows it names. '16-30' and '31-90' are NOT the
+  // same cut as the new '8-30' and '31-60' — they are left as they were rather
+  // than quietly re-pointed at a different population.
   '0-15': 'd.age_days <= 15',
   '16-30': 'd.age_days > 15 AND d.age_days <= 30',
   '31-90': 'd.age_days > 30 AND d.age_days <= 90',

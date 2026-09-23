@@ -42,6 +42,9 @@ import { query } from '../../db/client.js';
 import {
   DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+import {
+  AGE_BANDS, AGE_LATE_DAYS, ageBandPredicateSql, ageLatePredicateSql,
+} from '@pct/rules';
 import { MONEY_STATE_SQL } from './detail.js';
 import type { GlobalFilter } from './globalfilter.js';
 
@@ -74,10 +77,12 @@ export interface StageRow {
   name: string;
   sub: string;
   count: number;
-  /** 0-15, 16-30, 31-90, over 90 — the bands the aging chart already uses. */
-  bands: [number, number, number, number];
-  /** Lines past PAST_SLA_DAYS. bands[1] + bands[2] + bands[3]. */
+  /** One count per band of AGE_BANDS, in its order. */
+  bands: number[];
+  /** Lines past PAST_SLA_DAYS, counted directly rather than summed. */
   pastSla: number;
+  /** Lines past AGE_LATE_DAYS - what the page calls badly late. */
+  overLate: number;
   oldest: number | null;
   emergency: number;
   urgent: number;
@@ -101,9 +106,10 @@ export interface CategoryRow {
   desk: string;
   label: string;
   open: number;
-  over90: number;
+  /** Lines past AGE_LATE_DAYS. The table sorts on it. */
+  overLate: number;
   oldest: number | null;
-  bands: [number, number, number, number];
+  bands: number[];
   detailFilter: Record<string, string>;
 }
 
@@ -148,6 +154,10 @@ export interface MoneyCards {
 export interface OpenItemsSummary {
   asOfDate: string;
   pastSlaDays: number;
+  /** The boundary the page calls badly late. */
+  lateDays: number;
+  /** The bands, in order, so the page labels them from the server's own list. */
+  bands: { key: string; label: string }[];
   stages: StageRow[];
   categories: CategoryRow[];
   money: MoneyCards;
@@ -174,10 +184,13 @@ export interface OpenItemsSummary {
  */
 const MEASURES = `
   count(*)::int                                                           AS n,
-  count(*) FILTER (WHERE d.age_days <= 15)::int                           AS b0,
-  count(*) FILTER (WHERE d.age_days > 15  AND d.age_days <= 30)::int      AS b1,
-  count(*) FILTER (WHERE d.age_days > 30  AND d.age_days <= 90)::int      AS b2,
-  count(*) FILTER (WHERE d.age_days > 90)::int                            AS b3,
+${AGE_BANDS.map((b, i) => `  count(*) FILTER (WHERE ${ageBandPredicateSql('d.age_days', b.key)})::int AS b${i},`).join('\n')}
+  -- Past SLA is computed on its own now, not summed from the bands. The six
+  -- bands (23 Sep 2026) have no boundary at 15 days, so the old trick of
+  -- reading everything past the first band stopped meaning "past the approval
+  -- line" and started meaning "older than a week".
+  count(*) FILTER (WHERE d.age_days > ${PAST_SLA_DAYS})::int               AS past_sla,
+  count(*) FILTER (WHERE ${ageLatePredicateSql('d.age_days')})::int        AS over_late,
   max(d.age_days)::int                                                    AS oldest,
   count(*) FILTER (WHERE d.p_cat = '01-Emergency')::int                   AS emergency,
   count(*) FILTER (WHERE d.p_cat = '02-Urgent')::int                      AS urgent,
@@ -300,16 +313,15 @@ export async function openItemsSummary(
   const stages: StageRow[] = OPEN_STAGES.map((s) => {
     const r = byStatus.get(s.status);
     const n = (k: string): number => Number(r?.[k] ?? 0);
-    const bands: [number, number, number, number] = [n('b0'), n('b1'), n('b2'), n('b3')];
+    const bands = AGE_BANDS.map((_b, i) => n(`b${i}`));
     return {
       key: s.key,
       name: s.name,
       sub: s.sub,
       count: n('n'),
       bands,
-      // Everything outside the first band. The band boundary IS the SLA line
-      // this page reads at, so the two can never drift apart.
-      pastSla: bands[1] + bands[2] + bands[3],
+      pastSla: n('past_sla'),
+      overLate: n('over_late'),
       // Null, not 0, for an empty stage: the page prints a dash rather than
       // claiming something is 0 days old.
       oldest: r && r['oldest'] !== null && r['oldest'] !== undefined ? Number(r['oldest']) : null,
@@ -343,7 +355,7 @@ export async function openItemsSummary(
        FROM core.v_detail d
       WHERE ${dw.sql}
       GROUP BY 1, 2
-      ORDER BY b3 DESC, n DESC`,
+      ORDER BY over_late DESC, n DESC`,
     dw.params,
   );
 
@@ -406,14 +418,16 @@ export async function openItemsSummary(
   return {
     asOfDate,
     pastSlaDays: PAST_SLA_DAYS,
+    lateDays: AGE_LATE_DAYS,
+    bands: AGE_BANDS.map((b) => ({ key: b.key, label: b.label })),
     stages,
     categories: categories.map((r) => ({
       desk: String(r['desk']),
       label: String(r['label']),
       open: Number(r['n']),
-      over90: Number(r['b3']),
+      overLate: Number(r['over_late']),
       oldest: r['oldest'] === null ? null : Number(r['oldest']),
-      bands: [Number(r['b0']), Number(r['b1']), Number(r['b2']), Number(r['b3'])],
+      bands: AGE_BANDS.map((_b, i) => Number(r[`b${i}`] ?? 0)),
       // '(none)' is a display label, not a value the filter can match, so a row
       // with no material category is reported and left unclickable.
       detailFilter: (r['desk'] === '(none)'

@@ -18,7 +18,9 @@ import { query, queryOne } from '../../db/client.js';
 import {
   intersectScopes, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
-import { prSpendCategoryMatchSql, spendCategoryWithPlantSql } from '@pct/rules';
+import {
+  ageBandPredicateSql, prSpendCategoryMatchSql, spendCategoryWithPlantSql,
+} from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
 
 const env = loadEnv();
@@ -502,6 +504,16 @@ const FILTERS: Record<string, Compiler> = {
   hasInfoRecord: (v, a) => (v ? `${a}.info_record IS NOT NULL` : `${a}.info_record IS NULL`),
   valuedIdr: (_v, a) => `COALESCE(${a}.total_value_idr, 0) > 0`,
   // v1's four age bands (Open Items page). NULL aging never matches a band.
+  /**
+   * One of the six bands (23 Sep 2026), generated from the shared definition so
+   * a boundary cannot move in the chart and not in the rows it opens.
+   */
+  ageBand: (v, a) => `(${ageBandPredicateSql(`${a}.aging_days`, String(v))})`,
+  /**
+   * The four bands this replaced. Kept because a drill TOKEN issued before the
+   * change carries the old key, and a token outlives the page that minted it;
+   * the mart stops emitting these at the next rebuild.
+   */
   ageBand4: (v, a) => {
     const ranges: Record<string, string> = {
       '0-15': `${a}.aging_days <= 15`,

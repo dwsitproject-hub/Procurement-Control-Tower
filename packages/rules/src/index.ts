@@ -13,6 +13,7 @@ export * from './movement.js';
 export * from './sto.js';
 export * from './wbs.js';
 export * from './aging.js';
+export * from './age_bands.js';
 export * from './fx.js';
 export * from './status.js';
 export * from './gr.js';

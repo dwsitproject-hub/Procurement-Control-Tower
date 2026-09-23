@@ -228,7 +228,8 @@ function detailFilterClause(
   const ignored: string[] = [];
   // No material code and no size band on the view, so these cannot be derived
   // here at all. Named in the response rather than ignored in silence.
-  if ((f.spendCategory?.length ?? 0) > 0) ignored.push('spend category');
+  // 030 put spend_category on the view, so this one IS applied now.
+  add('d.spend_category', f.spendCategory);
   if ((f.sizeBand?.length ?? 0) > 0) ignored.push('PO size band');
   // Both mean "delivered vs not", and every stage this page counts is already
   // not delivered: honouring them would either change nothing or empty the
@@ -327,15 +328,17 @@ export async function openItemsSummary(
   // recognises their own work by - a desk code says who files it, a category
   // says what it is - and it needs no dimension join for a readable label.
   //
-  // matCat, not the Executive Summary's spend category: this page counts
-  // core.v_detail and that view carries no material code, so a spend category
-  // cannot be derived on it at all. matCat is on the view AND is a filter the
-  // detail table already knows, which is what keeps a click on a row opening
-  // exactly the rows it counted.
+  // THE EXECUTIVE SUMMARY'S category (030), not the legacy mat_cat this page
+  // shipped with on 22 Sep. Both were called "material category" and they are
+  // different dimensions; grouping by one while the Executive Summary groups by
+  // the other is how two pages come to disagree about what METHANOL is worth.
+  // It resolves through the Material Master, and a line that reached an order
+  // takes fact_po_line.spend_category itself - the same column those charts
+  // group by - so the two agree by construction rather than by review.
   const dw = buildWhere(versionId, scope, filter);
   const categories = await query<Record<string, unknown>>(
-    `SELECT COALESCE(NULLIF(d.mat_cat, ''), '(none)') AS desk,
-            COALESCE(NULLIF(d.mat_cat, ''), '(no material category)') AS label,
+    `SELECT COALESCE(NULLIF(d.spend_category, ''), '(none)') AS desk,
+            COALESCE(NULLIF(d.spend_category, ''), '(no spend category)') AS label,
             ${MEASURES}
        FROM core.v_detail d
       WHERE ${dw.sql}
@@ -415,7 +418,7 @@ export async function openItemsSummary(
       // with no material category is reported and left unclickable.
       detailFilter: (r['desk'] === '(none)'
         ? {}
-        : { status: ALL_STAGE_STATUSES, matCat: String(r['desk']) }) as Record<string, string>,
+        : { status: ALL_STAGE_STATUSES, spendCategory: String(r['desk']) }) as Record<string, string>,
     })),
     money: {
       deliveredNotInvoiced: card(money?.['dni_lines'], money?.['dni_idr'], 'deliveredNotInvoiced'),

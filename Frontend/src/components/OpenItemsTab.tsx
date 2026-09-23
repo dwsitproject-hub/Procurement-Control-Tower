@@ -23,13 +23,14 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  *  band is 15 days. The page reads "past SLA" at 15 days and SAYS SO, rather
  *  than printing a 3-day figure the banded data cannot support.
  *
- *  Grouping key. MATERIAL CATEGORY since 22 Sep 2026, purchasing group before
+ *  Grouping key. SPEND CATEGORY since 22 Sep 2026, purchasing group before
  *  that. It is what a buyer recognises their own work by - a desk code says
  *  who files the work, a category says what it is - and it carries no personal
  *  data either, which created_by and requisitioner are explicitly marked as.
- *  It is matCat rather than the Executive Summary's spend category because
- *  core.v_detail has no material code, so a spend category cannot be derived
- *  on the view this page counts.
+ *  It is the Executive Summary's category, resolved through the Material
+ *  Master (migration 030), NOT the legacy mat_cat: the two have near-identical
+ *  names and different values, and grouping by one while that page groups by
+ *  the other is how the same slice comes to carry two totals.
  *
  *  Buyer view. There is no join from a login to a buyer today
  *  (core.dim_sap_user holds no email), so the Buyer lens asks which category
@@ -706,13 +707,18 @@ export function OpenItemsTab({
               focus
                 ? { ...sum.detailFilter, ...focus.init }
                 : lens === 'buyer' && desk
-                  ? { ...sum.detailFilter, purchGroup: desk }
+                  // spendCategory, not purchGroup. The picker changed dimension
+                  // on 22 Sep and this seed did not, so choosing a category
+                  // filtered the table by a purchasing group of that name -
+                  // which matches nothing, and the table came back empty under
+                  // a banner saying it had been pre-filtered.
+                  ? { ...sum.detailFilter, spendCategory: desk }
                   : sum.detailFilter
             }
             initialLabel={
               focus
                 ? focus.label
-                : lens === 'buyer' && desk ? `Open items on ${desk}` : 'Open items only'
+                : lens === 'buyer' && desk ? `Open items in ${desk}` : 'Open items only'
             }
           />
         </div>

@@ -45,7 +45,13 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'grQtyTotal',      label: 'Total GR Qty',           sql: 'gr_qty_total',        type: 'number', default: false, sortable: true },
   { key: 'grPrPct',         label: 'GR/PR %',                sql: 'gr_pr_pct',           type: 'pct',    default: false, sortable: true },
   { key: 'matGroup',        label: 'Mat Grp',                sql: 'mat_group',           type: 'string', default: false, sortable: true },
-  { key: 'matCat',          label: 'Category',               sql: 'mat_cat',             type: 'enum',   default: true,  sortable: true },
+  { key: 'matCat',          label: 'Category (legacy)',      sql: 'mat_cat',             type: 'enum',   default: false, sortable: true },
+  // 030. The Executive Summary's category, resolved from the Material Master.
+  // It replaces mat_cat as the default column: the two are different
+  // dimensions with near-identical names, and a page showing one beside a page
+  // grouping by the other is how two numbers that should match stop matching.
+  // mat_cat stays available, renamed so nobody picks it by accident.
+  { key: 'spendCategory',   label: 'Spend Category',         sql: 'spend_category',      type: 'enum',   default: true,  sortable: true },
   { key: 'pCat',            label: 'Priority',               sql: 'p_cat',               type: 'enum',   default: false, sortable: true },
   { key: 'status',          label: 'Status',                 sql: 'status',              type: 'enum',   default: true,  sortable: true },
   { key: 'prNextApprover',  label: 'PR Next Approver',       sql: 'pr_next_approver',    type: 'string', default: false, sortable: true },
@@ -104,6 +110,7 @@ const SEARCH_COLUMNS = ['pr_no', 'po_no', 'descr', 'po_mat_desc', 'supplier', 'v
 export interface DetailFilters {
   status?: string[];
   matCat?: string[];
+  spendCategory?: string[];
   matGroup?: string[];
   plant?: string[];
   company?: string[];
@@ -144,7 +151,7 @@ export interface DetailFilters {
  * applied would be worse still -- it would look complete.
  */
 export const DETAIL_QUERY_PARAMS = [
-  'status', 'matCat', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
+  'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
   'priority', 'monthKey', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
@@ -248,6 +255,7 @@ export function parseDetailQuery(q: Record<string, unknown>): {
   const filters: DetailFilters = {
     status: list('status'),
     matCat: list('matCat'),
+    spendCategory: list('spendCategory'),
     matGroup: list('matGroup'),
     plant: list('plant'),
     company: list('company'),
@@ -289,6 +297,7 @@ export function describeDetailFilters(
     ['matCat', 'Category'],
     ['matGroup', 'Material group'],
     ['plant', 'Plant'],
+    ['spendCategory', 'Spend category'],
     ['company', 'Company'],
     ['purchOrg', 'Purchasing org'],
     ['purchGroup', 'Purchasing group'],
@@ -350,6 +359,7 @@ const FACETS: { name: keyof DetailFilters & string; col: string }[] = [
   { name: 'matCat', col: 'mat_cat' },
   { name: 'matGroup', col: 'mat_group' },
   { name: 'plant', col: 'plant' },
+  { name: 'spendCategory', col: 'spend_category' },
   { name: 'company', col: 'company' },
   { name: 'purchOrg', col: 'purch_org' },
   { name: 'purchGroup', col: 'purch_group' },

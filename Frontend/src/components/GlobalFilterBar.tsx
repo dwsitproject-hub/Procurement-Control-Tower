@@ -16,6 +16,8 @@ export interface GlobalFilterState {
   plant: string[];
   purchOrg: string[];
   monthKey: string[];
+  /** 'YYYY'. Intersects with monthKey, like any two dimensions. */
+  year: string[];
   /** v1's "Show: All | Open Only | Complete (GR)" toggle. '' means All. */
   scope: '' | 'open' | 'complete';
 }
@@ -25,6 +27,7 @@ export const EMPTY_FILTER: GlobalFilterState = {
   plant: [],
   purchOrg: [],
   monthKey: [],
+  year: [],
   scope: '',
 };
 
@@ -38,14 +41,16 @@ interface FilterOptions {
   plant: Option[];
   purchOrg: Option[];
   monthKey: Option[];
+  year?: Option[];
 }
 
-type ListDim = 'company' | 'plant' | 'purchOrg' | 'monthKey';
+type ListDim = 'company' | 'plant' | 'purchOrg' | 'year' | 'monthKey';
 
 const DIMENSIONS: { key: ListDim; label: string }[] = [
   { key: 'company', label: 'Company' },
   { key: 'plant', label: 'Plant' },
   { key: 'purchOrg', label: 'Purch Org' },
+  { key: 'year', label: 'Year' },
   { key: 'monthKey', label: 'Month' },
 ];
 
@@ -54,6 +59,7 @@ export function globalFilterQuery(f: GlobalFilterState): string {
   if (f.company.length) q.set('company', f.company.join(','));
   if (f.plant.length) q.set('plant', f.plant.join(','));
   if (f.purchOrg.length) q.set('purchOrg', f.purchOrg.join(','));
+  if (f.year.length) q.set('year', f.year.join(','));
   if (f.monthKey.length) q.set('monthKey', f.monthKey.join(','));
   if (f.scope) q.set('scope', f.scope);
   return q.toString();
@@ -61,7 +67,8 @@ export function globalFilterQuery(f: GlobalFilterState): string {
 
 export function activeFilterCount(f: GlobalFilterState): number {
   return (
-    f.company.length + f.plant.length + f.purchOrg.length + f.monthKey.length + (f.scope ? 1 : 0)
+    f.company.length + f.plant.length + f.purchOrg.length + f.year.length + f.monthKey.length
+    + (f.scope ? 1 : 0)
   );
 }
 
@@ -115,9 +122,10 @@ export function GlobalFilterBar({
     let changed = false;
     for (const d of DIMENSIONS) {
       const allowed = new Set((opts[d.key] ?? []).map((o) => o.value));
-      const kept = value[d.key].filter((v) => allowed.has(v));
-      if (kept.length !== value[d.key].length) {
-        gone.push(...value[d.key].filter((v) => !allowed.has(v)));
+      const cur = value[d.key] ?? [];
+      const kept = cur.filter((v) => allowed.has(v));
+      if (kept.length !== cur.length) {
+        gone.push(...cur.filter((v) => !allowed.has(v)));
         next[d.key] = kept;
         changed = true;
       }
@@ -155,12 +163,23 @@ export function GlobalFilterBar({
 
   if (!opts) return null;
 
+  /**
+   * Choosing years narrows the Month list to those years, and drops any month
+   * already picked outside them. Year and Month intersect, so a month outside
+   * the chosen years would match nothing - keeping it would turn every figure
+   * on the page into a dash with the reason hidden in a closed dropdown.
+   */
+  const withYears = (next: GlobalFilterState): GlobalFilterState =>
+    next.year.length === 0
+      ? next
+      : { ...next, monthKey: next.monthKey.filter((m) => next.year.includes(m.slice(0, 4))) };
+
   const toggle = (dim: ListDim, v: string) => {
     const cur = value[dim];
-    onChange({
+    onChange(withYears({
       ...value,
       [dim]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-    });
+    }));
   };
 
   const count = activeFilterCount(value);
@@ -184,12 +203,17 @@ export function GlobalFilterBar({
       </div>
 
       {DIMENSIONS.map((d) => {
-        const options = opts[d.key];
+        const options = d.key === 'monthKey' && value.year.length > 0
+          ? opts.monthKey.filter((o) => value.year.includes(o.value.slice(0, 4)))
+          : opts[d.key];
         // A dimension with one value is hidden: filtering to the only value that
         // exists changes nothing, so the control would be a dead end. Company is
         // therefore invisible on a single-entity dataset and appears the moment a
         // second company code lands.
-        if (!options || options.length <= 1) return null;
+        // Judged on the FULL list, not the year-narrowed one: a Month control
+        // that vanished because the chosen year holds a single month would take
+        // its Clear button with it.
+        if (!options || (opts[d.key] ?? []).length <= 1) return null;
         const selected = value[d.key];
         const q = (search[d.key] ?? '').trim().toLowerCase();
         // Matched on BOTH label and code, because a user knows a plant either way.
@@ -234,12 +258,12 @@ export function GlobalFilterBar({
                   */}
                   <button
                     className="gf-mini"
-                    onClick={() => onChange({
+                    onClick={() => onChange(withYears({
                       ...value,
                       [d.key]: allShownSelected
                         ? selected.filter((v) => !shownValues.includes(v))
                         : [...new Set([...selected, ...shownValues])],
-                    })}
+                    }))}
                   >
                     {allShownSelected ? 'Unselect' : 'Select'}{' '}
                     {q === '' ? 'all' : `all ${shown.length} shown`}

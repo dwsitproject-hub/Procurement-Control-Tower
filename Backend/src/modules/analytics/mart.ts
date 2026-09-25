@@ -16,6 +16,9 @@ import { insertMany } from '../../db/client.js';
 import { CHART_META } from './charts.js';
 import { wbsLabel, type RuleSnapshot } from '../admin/rules.js';
 import { buildParityMart } from './mart_parity.js';
+import {
+  buildFilterClause, isEmptyFilter, mergeIntoPredicate, type FactKind, type GlobalFilter,
+} from './globalfilter.js';
 
 type Sev = 'good' | 'neutral' | 'warning' | 'critical' | null;
 
@@ -305,43 +308,7 @@ export async function buildMart(
 
   // ──────────────────────────────────────────────────── cycle-time KPIs
 
-  // Every cycle card drills to its own evaluable lines (user ask 5 Aug 2026);
-  // the filters reproduce the exact >= 0 population the values come from.
-  const cycles: Array<[KpiId, string, string, Record<string, unknown>]> = [
-    ['cycle_pr_approval', 'release_final_date - requisition_date', 'pr',
-      { grain: 'pr_item', filters: { released: true } }],
-    ['cycle_sourcing', 'sourcing_days', 'po',
-      { grain: 'po_line', filters: { measureNonNeg: 'sourcing' } }],
-    ['cycle_po_approval', 'po_approval_days', 'po',
-      { grain: 'po_line', filters: { measureNonNeg: 'po_approval' } }],
-    ['cycle_delivery', 'delivery_days', 'po',
-      { grain: 'po_line', filters: { measureNonNeg: 'delivery' } }],
-  ];
-  for (const [kpiId, expr, src, drill] of cycles) {
-    const table = src === 'pr' ? 'core.fact_pr_item' : 'core.fact_po_line';
-    const rows = await q<{ d: number | null }>(
-      `SELECT (${expr}) AS d FROM ${table} WHERE dataset_version_id = $1 AND (${expr}) IS NOT NULL`,
-      [versionId],
-    );
-    const vals = rows.map((x) => x.d!).filter((d) => d !== null && d >= 0);
-    // Average headline (decision 3 Aug 2026, v1 parity); median in the subtitle.
-    kpis.push(cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg', drill));
-  }
-
-  {
-    const rows = await q<{ d: number | null }>(
-      `SELECT (pol.receipt_date - pri.requisition_date) AS d
-         FROM core.fact_po_line pol
-         JOIN core.fact_pr_item pri
-           ON pri.dataset_version_id = pol.dataset_version_id
-          AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
-        WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL`,
-      [versionId],
-    );
-    kpis.push(cycleKpi('cycle_e2e', rows.map((x) => x.d!).filter((d) => d !== null && d >= 0),
-      minSample, disabledKpis, 'median',
-      { grain: 'po_line', filters: { e2eEvaluable: true } }));
-  }
+  kpis.push(...await cycleKpis(q, versionId, minSample, disabledKpis, {}));
 
   // ─────────────────────────────────────────────── operational counts
 
@@ -451,6 +418,78 @@ function nullKpi(kpiId: KpiId, unit: KpiRow['unit'], reason: string, sample: num
     sampleSize: sample, unit, currencyBasis: null, severity: null, statusReason: reason,
     detail: null, drillPredicate: null,
   };
+}
+
+/** The KPIs cycleKpis() produces, so the live path knows which ids it covers. */
+export const CYCLE_KPI_IDS: readonly KpiId[] = [
+  'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery', 'cycle_e2e',
+];
+
+/**
+ * The five cycle-time KPIs, for the mart (empty filter) AND for a filtered
+ * request.
+ *
+ * They were computed inline in buildMart, so a global filter had no way to
+ * recompute them and the Executive Summary's four cycle tiles went to a dash the
+ * moment anyone touched the filter bar (reported 25 Sep 2026) - while the
+ * YTD/MTD lines under the same tiles, which read the rows directly, carried on
+ * showing filtered figures. One function now serves both paths, so the
+ * filtered figure is the unfiltered SQL with the filter added, as the parity
+ * KPIs already are.
+ */
+export async function cycleKpis(
+  q: <T extends Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]>,
+  versionId: number,
+  minSample: number,
+  disabledKpis: ReadonlySet<string>,
+  filter: GlobalFilter,
+): Promise<KpiRow[]> {
+  const out: KpiRow[] = [];
+  const drillOf = (drill: Record<string, unknown>) =>
+    isEmptyFilter(filter) ? drill : mergeIntoPredicate(drill, filter);
+
+  // Every cycle card drills to its own evaluable lines (user ask 5 Aug 2026);
+  // the filters reproduce the exact >= 0 population the values come from.
+  const cycles: Array<[KpiId, string, FactKind, Record<string, unknown>]> = [
+    ['cycle_pr_approval', 'release_final_date - requisition_date', 'pr_item',
+      { grain: 'pr_item', filters: { released: true } }],
+    ['cycle_sourcing', 'sourcing_days', 'po_line',
+      { grain: 'po_line', filters: { measureNonNeg: 'sourcing' } }],
+    ['cycle_po_approval', 'po_approval_days', 'po_line',
+      { grain: 'po_line', filters: { measureNonNeg: 'po_approval' } }],
+    ['cycle_delivery', 'delivery_days', 'po_line',
+      { grain: 'po_line', filters: { measureNonNeg: 'delivery' } }],
+  ];
+  for (const [kpiId, expr, kind, drill] of cycles) {
+    const table = kind === 'pr_item' ? 'core.fact_pr_item' : 'core.fact_po_line';
+    const clause = buildFilterClause(filter, kind, '', 2);
+    const rows = await q<{ d: number | null }>(
+      `SELECT (${expr}) AS d FROM ${table}
+        WHERE dataset_version_id = $1 AND (${expr}) IS NOT NULL${clause.sql}`,
+      [versionId, ...clause.params],
+    );
+    const vals = rows.map((x) => x.d!).filter((d) => d !== null && d >= 0);
+    // Average headline (decision 3 Aug 2026, v1 parity); median in the subtitle.
+    out.push(cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg', drillOf(drill)));
+  }
+
+  {
+    // Filtered on the order line, which is the grain the drill opens.
+    const clause = buildFilterClause(filter, 'po_line', 'pol.', 2);
+    const rows = await q<{ d: number | null }>(
+      `SELECT (pol.receipt_date - pri.requisition_date) AS d
+         FROM core.fact_po_line pol
+         JOIN core.fact_pr_item pri
+           ON pri.dataset_version_id = pol.dataset_version_id
+          AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
+        WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL${clause.sql}`,
+      [versionId, ...clause.params],
+    );
+    out.push(cycleKpi('cycle_e2e', rows.map((x) => x.d!).filter((d) => d !== null && d >= 0),
+      minSample, disabledKpis, 'median',
+      drillOf({ grain: 'po_line', filters: { e2eEvaluable: true } })));
+  }
+  return out;
 }
 
 function cycleKpi(

@@ -946,9 +946,17 @@ export default function App() {
                     CHART_FILTER_DIM[c]
                       ? (bucketKey) => {
                           const dim = CHART_FILTER_DIM[c]!;
-                          setGf((cur) =>
-                            cur[dim].includes(bucketKey) ? cur : { ...cur, [dim]: [...cur[dim], bucketKey] },
-                          );
+                          setGf((cur) => {
+                            if (cur[dim].includes(bucketKey)) return cur;
+                            const next = { ...cur, [dim]: [...cur[dim], bucketKey] };
+                            // A clicked month outside the chosen years would
+                            // intersect to nothing; widen the years to hold it.
+                            const y = bucketKey.slice(0, 4);
+                            if (dim === 'monthKey' && cur.year.length > 0 && !cur.year.includes(y)) {
+                              next.year = [...cur.year, y];
+                            }
+                            return next;
+                          });
                         }
                       : undefined
                   }

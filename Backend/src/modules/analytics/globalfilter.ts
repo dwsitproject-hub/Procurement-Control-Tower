@@ -18,6 +18,14 @@ export interface GlobalFilter {
   purchOrg?: string[];
   /** 'YYYY-MM' against the grain's primary date. */
   monthKey?: string[];
+  /**
+   * 'YYYY' against the SAME date as monthKey. Its own dimension rather than a
+   * shorthand for twelve month keys: the Month options come from order dates,
+   * so a requisition raised in a month no order was dated in would fall
+   * outside a year expanded into months. Year AND Month together intersect,
+   * like every other pair of dimensions.
+   */
+  year?: string[];
   /** v1's per-page "Show: All | Open Only | Complete (GR)" toggle (G2.2). */
   scope?: 'open' | 'complete';
 
@@ -55,6 +63,7 @@ export function isEmptyFilter(f: GlobalFilter): boolean {
     (f.plant?.length ?? 0) === 0 &&
     (f.purchOrg?.length ?? 0) === 0 &&
     (f.monthKey?.length ?? 0) === 0 &&
+    (f.year?.length ?? 0) === 0 &&
     (f.spendCategory?.length ?? 0) === 0 &&
     (f.sizeBand?.length ?? 0) === 0 &&
     f.delivered === undefined &&
@@ -111,6 +120,12 @@ export function buildFilterClause(
   if (f.monthKey && f.monthKey.length > 0) {
     params.push(f.monthKey);
     parts.push(`to_char(${alias}${MONTH_COL[kind]}, 'YYYY-MM') = ANY($${n})`);
+    n += 1;
+  }
+
+  if (f.year && f.year.length > 0) {
+    params.push(f.year);
+    parts.push(`to_char(${alias}${MONTH_COL[kind]}, 'YYYY') = ANY($${n})`);
     n += 1;
   }
 
@@ -284,6 +299,9 @@ export function mergeIntoPredicate(
   if (f.monthKey?.length) {
     filters['monthKeyIn'] = f.monthKey;
   }
+  if (f.year?.length) {
+    filters['yearIn'] = f.year;
+  }
   if (f.scope === 'open') {
     filters['scopeOpen'] = true;
   } else if (f.scope === 'complete') {
@@ -331,6 +349,9 @@ export function parseGlobalFilter(q: Record<string, unknown>): GlobalFilter {
     plant: list('plant'),
     purchOrg: list('purchOrg'),
     monthKey: list('monthKey'),
+    // Four digits only: anything else would match nothing and look like an
+    // empty year rather than a malformed link.
+    year: list('year')?.filter((y) => /^\d{4}$/.test(y)),
     scope: rawScope === 'open' || rawScope === 'complete' ? rawScope : undefined,
     spendCategory: list('spendCategory'),
     sizeBand: list('sizeBand'),
@@ -345,6 +366,7 @@ export function describeFilter(f: GlobalFilter): Record<string, unknown> {
   if (f.plant?.length) out['plant'] = f.plant;
   if (f.purchOrg?.length) out['purchOrg'] = f.purchOrg;
   if (f.monthKey?.length) out['monthKey'] = f.monthKey;
+  if (f.year?.length) out['year'] = f.year;
   if (f.scope) out['scope'] = f.scope;
   if (f.spendCategory?.length) out['spendCategory'] = f.spendCategory;
   if (f.sizeBand?.length) out['sizeBand'] = f.sizeBand;

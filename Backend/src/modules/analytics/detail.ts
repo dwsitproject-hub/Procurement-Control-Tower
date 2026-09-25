@@ -119,6 +119,8 @@ export interface DetailFilters {
   purchGroup?: string[];
   priority?: string[];
   monthKey?: string[];
+  /** 'YYYY', on the same date as monthKey. */
+  year?: string[];
   search?: string;
   /**
    * One of the four age bands, or 'past-sla' for everything beyond the first.
@@ -153,7 +155,7 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'year', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
 
@@ -272,6 +274,7 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     purchGroup: list('purchGroup'),
     priority: list('priority'),
     monthKey: list('monthKey'),
+    year: list('year')?.filter((y) => /^\d{4}$/.test(y)),
     search: q['q'] === undefined ? undefined : String(q['q']),
     ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
     moneyState: q['moneyState'] === undefined ? undefined : String(q['moneyState']),
@@ -312,6 +315,7 @@ export function describeDetailFilters(
     ['purchGroup', 'Purchasing group'],
     ['priority', 'Priority'],
     ['monthKey', 'Month'],
+    ['year', 'Year'],
   ];
   for (const [key, label] of listLabels) {
     const v = filters[key] as string[] | undefined;
@@ -419,6 +423,10 @@ function buildDetailWhere(
   if (filters.monthKey && filters.monthKey.length > 0 && omit !== 'monthKey') {
     params.push(filters.monthKey);
     where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY-MM') = ANY($${params.length})`);
+  }
+  if (filters.year && filters.year.length > 0) {
+    params.push(filters.year);
+    where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY') = ANY($${params.length})`);
   }
 
   // Toggles are NOT omitted for any facet: they narrow the population the

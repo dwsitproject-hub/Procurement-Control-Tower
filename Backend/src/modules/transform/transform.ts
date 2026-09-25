@@ -546,7 +546,7 @@ export async function runTransform(
     // rate. No rate for the period => NULL (strict, never a blended guess).
     const idrRate = fx.table.toUsd(1, 'IDR', fxDate, fxPolicy).resolution.usdPerUnit;
     const toIdr = (raw: number | null, usd: number | null): number | null => {
-      if (ccy === 'IDR') return raw;
+      if (ccy === 'IDR' || raw === 0) return raw;
       if (usd === null || idrRate === null || idrRate === 0) return null;
       return Math.round((usd / idrRate) * 100) / 100;
     };

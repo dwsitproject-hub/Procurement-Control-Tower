@@ -334,6 +334,9 @@ const FILTERS: Record<string, Compiler> = {
   purchOrgIn: (v, a, ps) => `${a}.purch_org = ANY(${p(ps, (v as unknown[]).map(String))})`,
   monthKeyIn: (v, a, ps, grain) =>
     `${monthExpr(a, grain)} = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  /** The global Year filter: 'YYYY' against the grain's primary date, as monthKeyIn is. */
+  yearIn: (v, a, ps, grain) =>
+    `left(${monthExpr(a, grain)}, 4) = ANY(${p(ps, (v as unknown[]).map(String))})`,
 
   /**
    * A lead-time chart only aggregates rows where its measure exists (a sourcing

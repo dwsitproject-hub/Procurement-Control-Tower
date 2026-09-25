@@ -271,6 +271,7 @@ function detailFilterClause(
   // The detail table's own basis: a line that never reached an order still has
   // a requisition date, and this page is mostly such lines.
   add("to_char(COALESCE(d.po_date, d.req_date), 'YYYY-MM')", f.monthKey);
+  add("to_char(COALESCE(d.po_date, d.req_date), 'YYYY')", f.year);
 
   const ignored: string[] = [];
   // No material code and no size band on the view, so these cannot be derived

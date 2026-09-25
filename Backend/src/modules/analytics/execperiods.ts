@@ -67,9 +67,20 @@ export interface TilePeriod {
 }
 
 export interface ExecTilePeriods {
-  /** 'YYYY' and 'YYYY-MM' of the dataset's as-of date. */
+  /**
+   * 'YYYY' and 'YYYY-MM' the tiles' YTD and month figures report: the
+   * dataset's as-of date, or - under a month or year filter - the last month
+   * the filter reaches (see periodAnchor).
+   */
   year: string;
   month: string;
+  /**
+   * First and last order date in the tiles' own population under the filter,
+   * or null when nothing matches. The page's scope line reads these, so it
+   * names the period the figures actually cover rather than the whole extract.
+   */
+  firstDate: string | null;
+  lastDate: string | null;
   /** Keyed by the KPI id the tile shows, so the frontend pairs them by id. */
   tiles: Record<string, TilePeriod>;
 }
@@ -87,8 +98,35 @@ export async function execTilePeriods(
   scope: readonly ScopeEntry[],
   filter: GlobalFilter,
 ): Promise<ExecTilePeriods> {
-  const year = asOfDate.slice(0, 4);
-  const month = asOfDate.slice(0, 7);
+  // ── The filtered population's date range ──────────────────────────────
+  const rParams: unknown[] = [versionId];
+  const rScope = scopeSql(mintScopedQuery('execperiods', scope), 'pol', rParams);
+  const rFilter = buildFilterClause(filter, 'po_line', 'pol.', rParams.length + 1);
+  rParams.push(...rFilter.params);
+  const [range] = await query<{ first_date: string | null; last_date: string | null }>(
+    `SELECT to_char(min(pol.document_date), 'YYYY-MM-DD') AS first_date,
+            to_char(max(pol.document_date), 'YYYY-MM-DD') AS last_date
+       FROM core.fact_po_line pol
+      WHERE pol.dataset_version_id = $1 AND ${rScope}${rFilter.sql}
+        AND NOT pol.is_sto AND NOT pol.is_deleted`,
+    rParams,
+  );
+  const firstDate = range?.first_date ?? null;
+  const lastDate = range?.last_date ?? null;
+
+  /*
+   * The period anchor. Normally the as-of date. Under a MONTH or YEAR filter
+   * it is the last month the filtered data reaches: filtered to 2025, "YTD
+   * 2026" is empty by construction and "Sep 2026" is outside the selection, so
+   * both lines would print a dash under a tile that plainly has a figure.
+   * Anchored on the selection they read "YTD 2025" and "Dec 2025" - the year
+   * and the last month of what the reader chose. Other filters (company,
+   * plant...) do not move it: they narrow WHO, not WHEN.
+   */
+  const timeFiltered = (filter.monthKey?.length ?? 0) > 0 || (filter.year?.length ?? 0) > 0;
+  const anchor = timeFiltered && lastDate !== null && lastDate < asOfDate ? lastDate : asOfDate;
+  const year = anchor.slice(0, 4);
+  const month = anchor.slice(0, 7);
 
   // ── PO grain ──────────────────────────────────────────────────────────
   const poParams: unknown[] = [versionId];
@@ -169,6 +207,8 @@ export async function execTilePeriods(
   return {
     year,
     month,
+    firstDate,
+    lastDate,
     tiles: {
       // Both currency bases travel together, like total_po_amount's own detail,
       // so the tile follows the header's currency toggle without a second call.

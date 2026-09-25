@@ -8,13 +8,15 @@
 
 import { pool } from '../../db/client.js';
 import { PARITY_KPIS, PARITY_CHARTS } from './mart_parity.js';
+import { cycleKpis } from './mart.js';
+import { loadRuleSnapshot } from '../admin/rules.js';
 import {
   buildFilterClause, injectFilter, mergeIntoPredicate, type FactKind, type GlobalFilter,
 } from './globalfilter.js';
 
 export interface LiveKpi {
   kpiId: string;
-  status: 'ok' | 'unavailable';
+  status: 'ok' | 'unavailable' | 'insufficient_sample' | 'disabled';
   value: number | null;
   numerator: number | null;
   denominator: number | null;
@@ -166,6 +168,21 @@ export async function computeLiveKpis(
       drillPredicate: mergeIntoPredicate(spec.drill, filter),
     });
   }
+
+  /*
+   * The cycle times: the mart's own function with the filter passed in. The
+   * sample floor is the rule in force, and a KPI a data caveat disabled in the
+   * mart stays disabled here - a filter narrows a population, it cannot make a
+   * caveated measure trustworthy.
+   */
+  const rules = await loadRuleSnapshot();
+  const disabled = new Set((await pool.query<{ kpi_id: string }>(
+    `SELECT kpi_id FROM mart.kpi_value WHERE dataset_version_id = $1 AND status = 'disabled'`,
+    [versionId],
+  )).rows.map((r) => r.kpi_id));
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>
+    (await pool.query<T>(sql, params)).rows;
+  out.push(...await cycleKpis(q, versionId, Number(rules['kpi.min_sample'] ?? 30), disabled, filter));
 
   return out;
 }
@@ -333,6 +350,7 @@ export async function globalFilterOptions(versionId: number): Promise<{
   plant: { value: string; label: string }[];
   purchOrg: { value: string; label: string }[];
   monthKey: { value: string; label: string }[];
+  year: { value: string; label: string }[];
 }> {
   const co = await pool.query<{ value: string; label: string }>(
     `SELECT DISTINCT pol.company_code AS value,
@@ -366,5 +384,18 @@ export async function globalFilterOptions(versionId: number): Promise<{
       WHERE dataset_version_id = $1 AND document_date IS NOT NULL ORDER BY 1`,
     [versionId],
   );
-  return { company: co.rows, plant: pl.rows, purchOrg: po.rows, monthKey: mo.rows };
+  // Years from BOTH feeds: the requisition extract reaches further back than
+  // the order extract, and a year holding only requisitions is still a year
+  // the Requisition pages can be filtered to.
+  const yr = await pool.query<{ value: string; label: string }>(
+    `SELECT DISTINCT y AS value, y AS label FROM (
+       SELECT to_char(document_date, 'YYYY') AS y FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND document_date IS NOT NULL
+       UNION
+       SELECT to_char(requisition_date, 'YYYY') FROM core.fact_pr_item
+        WHERE dataset_version_id = $1 AND requisition_date IS NOT NULL
+     ) t ORDER BY 1`,
+    [versionId],
+  );
+  return { company: co.rows, plant: pl.rows, purchOrg: po.rows, monthKey: mo.rows, year: yr.rows };
 }

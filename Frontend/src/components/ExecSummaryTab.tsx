@@ -1048,7 +1048,10 @@ export function ExecSummaryTab({
    * averages is not an average.
    */
   const [periods, setPeriods] = useState<{
-    year: string; month: string; tiles: Record<string, { ytd: number | null; mtd: number | null }>;
+    year: string; month: string;
+    /** The tiles' population's order dates under the filter (null: no rows). */
+    firstDate?: string | null; lastDate?: string | null;
+    tiles: Record<string, { ytd: number | null; mtd: number | null }>;
   } | null>(null);
   const [byCategory, setByCategory] = useState<ChartResponse | null>(null);
   const [byBand, setByBand] = useState<ChartResponse | null>(null);
@@ -1070,7 +1073,7 @@ export function ExecSummaryTab({
     setPeriods(null);
     // Its own request, deliberately NOT in the Promise.all below: a chart that
     // fails must not blank the tiles' period lines, and vice versa.
-    api.get<{ year: string; month: string;
+    api.get<{ year: string; month: string; firstDate?: string | null; lastDate?: string | null;
       tiles: Record<string, { ytd: number | null; mtd: number | null }> }>(
       `/api/v1/exec/tile-periods${q}`)
       .then((d) => { if (!dead) setPeriods(d); })
@@ -1117,9 +1120,22 @@ export function ExecSummaryTab({
    * a total and a count and for nothing else the row now carries.
    */
   const periodOf = (): { year: string; month: string } | null => {
+    // The endpoint names the period its figures are for: the as-of date, or
+    // the last month a Month/Year filter reaches (a 2025 filter reads "YTD
+    // 2025 / Dec 2025", not two dashes under "YTD 2026 / Sep 2026").
+    if (periods) return { year: periods.year, month: periods.month };
     if (!asOfDate) return null;
     return { year: asOfDate.slice(0, 4), month: asOfDate.slice(0, 7) };
   };
+
+  /**
+   * The dates the scope line states. Unfiltered, the whole extract; filtered,
+   * the first and last order the filtered figures actually contain - the
+   * sentence sits directly above those figures and must describe them.
+   */
+  const filtered = filterQuery !== '';
+  const scopeFrom = filtered && periods ? periods.firstDate ?? null : firstDate ?? null;
+  const scopeTo = filtered && periods ? periods.lastDate ?? null : asOfDate ?? null;
 
   const period = periodOf();
   /** Currency-aware series key, matching the *_idr twin convention. */
@@ -1222,7 +1238,12 @@ export function ExecSummaryTab({
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
         : formatMoney(totalUsd, 'USD'),
-      sub: 'net order value, ex STO',
+      // Said on the tile when it cannot follow the IDR toggle, rather than
+      // switching currency without a word: the strict rule refuses a rupiah
+      // total while any line in scope has no rupiah value.
+      sub: currency === 'IDR' && totalIdr === null && totalUsd !== null
+        ? 'in USD — some lines have no IDR rate'
+        : 'net order value, ex STO',
       periods: [
         { name: `YTD ${period?.year ?? ''}`, text: money(valueYtd) },
         { name: monthName, text: money(valueMtd) },
@@ -1351,7 +1372,8 @@ export function ExecSummaryTab({
                 <p className="note">
                   <span className="bs sl">scope</span>{' '}
                   Committed value on purchase orders
-                  {firstDate && asOfDate ? <> from <strong>{firstDate}</strong> to <strong>{asOfDate}</strong></> : null}
+                  {scopeFrom && scopeTo ? <> from <strong>{scopeFrom}</strong> to <strong>{scopeTo}</strong></> : null}
+                  {filtered ? <> under the active filters{!scopeFrom && periods ? <> — <strong>no orders match</strong></> : null}</> : null}
                   . Stock-transport and deleted lines are excluded throughout, so every figure on
                   this page counts the same population. Values are <strong>ordered</strong> — this
                   is commitment, not invoiced or received cash.

@@ -125,6 +125,11 @@ export class FxTable {
     policy: FxPolicy = 'period_matched',
   ): { usd: number | null; resolution: FxResolution } {
     const resolution = this.resolve(currency, documentDate, policy);
+    // Zero is zero in every currency. Without this a zero-value line with a
+    // blank currency code (PO 1012104004 on staging, 25 Sep 2026) had no USD
+    // and no IDR value, and the strict "every line converted" rule then
+    // refused the rupiah total for the whole page.
+    if (amount === 0) return { usd: 0, resolution };
     if (amount === null || resolution.usdPerUnit === null) {
       return { usd: null, resolution };
     }

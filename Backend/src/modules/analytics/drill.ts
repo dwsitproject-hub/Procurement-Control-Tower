@@ -106,7 +106,10 @@ export function openDrillToken(
 const TABLES: Record<Grain, { table: string; alias: string; order: string; id: string }> = {
   pr_item: { table: 'core.fact_pr_item', alias: 'f', order: 'f.pr_no, f.pr_item', id: "f.pr_no || '|' || f.pr_item" },
   po_line: { table: 'core.fact_po_line', alias: 'f', order: 'f.po_no, f.po_item', id: "f.po_no || '|' || f.po_item" },
-  gr_posting: { table: 'core.fact_gr_posting', alias: 'f', order: 'f.material_doc, f.material_doc_item', id: "f.material_doc || '|' || f.material_doc_item" },
+  // The year is part of a receipt's identity (034): SAP restarts material
+  // document numbers every fiscal year, so document + item alone names two
+  // different receipts once an extract spans years.
+  gr_posting: { table: 'core.fact_gr_posting', alias: 'f', order: 'f.material_doc_year, f.material_doc, f.material_doc_item', id: "f.material_doc_year || '|' || f.material_doc || '|' || f.material_doc_item" },
   pr_release: { table: 'core.fact_pr_release', alias: 'f', order: 'f.pr_no, f.pr_item, f.rel_seq', id: "f.pr_no || '|' || f.pr_item || '|' || f.rel_seq" },
   po_release: { table: 'core.fact_po_release', alias: 'f', order: 'f.po_no, f.rel_seq', id: "f.po_no || '|' || f.rel_seq" },
 };
@@ -661,8 +664,13 @@ const FILTERS: Record<string, Compiler> = {
   issuedBy: (v, a, ps) => {
     const k = String(v);
     if (k === 'Unassigned') return `(${a}.purch_group IS NULL OR ${a}.purch_group = '')`;
-    return `EXISTS (SELECT 1 FROM core.dim_purch_group _dg
-                     WHERE _dg.code = ${a}.purch_group AND _dg.is_ho = ${p(ps, k === 'HO')})`;
+    const isHo = `EXISTS (SELECT 1 FROM core.dim_purch_group _dg
+                           WHERE _dg.code = ${a}.purch_group AND _dg.is_ho)`;
+    if (k === 'HO') return isHo;
+    // UNIT is everything else, as the chart's CASE has it - including a group
+    // missing from the master (P64, P39, P63 on the 2023-2025 orders loaded
+    // 25 Sep 2026), which the old `is_ho = false` match dropped from the drill.
+    return `(${a}.purch_group IS NOT NULL AND ${a}.purch_group <> '' AND NOT ${isHo})`;
   },
   /**
    * The PO DOCUMENT this line belongs to totals into the given value bracket.

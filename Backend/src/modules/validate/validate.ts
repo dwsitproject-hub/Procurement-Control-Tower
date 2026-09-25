@@ -295,6 +295,29 @@ export function checkMetrics(m: TransformMetrics, rules: Record<string, unknown>
     });
   }
 
+  // Repeated keys in an export (25 Sep 2026). Loud, because the first row was
+  // kept and the rest discarded, and if the repeats DIFFER - a later export
+  // correcting an earlier one - the reader must know which copy the dashboard
+  // is showing. Before this, the same condition failed the whole load.
+  for (const [n, what, feed] of [
+    [m.duplicatePrItems, 'requisition item', 'pr'],
+    [m.duplicatePoLines, 'order line', 'po'],
+    [m.duplicateGrPostings, 'goods-receipt posting', 'gr'],
+  ] as const) {
+    if ((n ?? 0) > 0) {
+      out.push({
+        ruleId: 'V-X01',
+        severity: 'WARNING',
+        feed,
+        message: `${n} ${what}(s) appeared more than once in the export. The first occurrence of each was kept and the repeats were ignored - check the export if the copies could differ.`,
+        affectedRows: n,
+        measured: null,
+        disablesKpis: [],
+        drillPredicate: null,
+      });
+    }
+  }
+
   if (m.grOrphans > 0) {
     out.push({
       ruleId: 'V-R01',

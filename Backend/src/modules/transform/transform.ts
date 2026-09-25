@@ -107,6 +107,10 @@ export interface TransformMetrics {
   unratedCurrencies: string[];
   excludedPoLines: number;
   excludedPrItems: number;
+  /** Rows dropped because their key repeated in the export; the first was kept. */
+  duplicatePrItems: number;
+  duplicatePoLines: number;
+  duplicateGrPostings: number;
   /** Approval steps dropped with their excluded requisition / order. */
   excludedPrReleaseRows: number;
   excludedPoReleaseRows: number;
@@ -186,6 +190,23 @@ export async function runTransform(
     code !== null && exIntercoPrefixes.some((pre) => code.toUpperCase().startsWith(pre));
   let excludedPoLines = 0;
   let excludedPrItems = 0;
+  /**
+   * Rows whose key has already been seen in this bundle. The FIRST is kept.
+   *
+   * The release facts have always had this guard; the three main facts did not,
+   * so one repeated row in the PR, PO or GR export reached the database insert
+   * and failed the whole load on a primary-key violation - after parsing and
+   * validating had both passed, with an error that named a partition rather
+   * than a row. Two loads on 25 Sep 2026 failed that way and the dashboard
+   * stayed on the previous day's data. A repeated row is a data question worth
+   * reporting; it is not a reason to publish nothing.
+   */
+  let duplicatePrItems = 0;
+  let duplicatePoLines = 0;
+  let duplicateGrPostings = 0;
+  const seenPrItem = new Set<string>();
+  const seenPoLine = new Set<string>();
+  const seenGrPosting = new Set<string>();
   const excludedPoKeys = new Set<string>();
   const excludedPrKeys = new Set<string>();
   /**
@@ -205,6 +226,41 @@ export async function runTransform(
   const keptPrNos = new Set<string>();
   /** [kind, docNo, docItem, reason] — persisted for the Coupa store (014). */
   const excludedDocRows: unknown[][] = [];
+
+  /**
+   * Why a requisition is excluded, or null. ONE predicate, used by the
+   * requisition pass below and by the order pass that follows a requisition's
+   * exclusion through to its orders.
+   */
+  const prExclusionOf = (p: StagedRow['payload']): string | null => {
+    const prDocType = s(p.docType);
+    return prDocType !== null && exDocTypes.has(prDocType) ? `doc_type=${prDocType}`
+      : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+        : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+          : null;
+  };
+
+  /**
+   * An order leaves with its requisition (decided 25 Sep 2026: "leave out
+   * everything that started in PRO2").
+   *
+   * Each document used to be judged by its OWN purchasing organization. A
+   * requisition raised under an excluded org and ordered under one that is not
+   * - PRO2 raised, PUR1 bought, on 1,987 lines of staging's data - was dropped
+   * while its order was kept, so the order counted in committed value while its
+   * origin had been excluded, and could not be found in the detail view either.
+   *
+   * Computed BEFORE the order pass because that pass runs first. The receipts
+   * follow automatically: a receipt is skipped when its order is excluded.
+   */
+  const excludedPrReason = new Map<string, string>();
+  for (const r of prRows) {
+    const prNo = s(r.payload.prNo);
+    const prItem = i(r.payload.prItem);
+    if (prNo === null || prItem === null) continue;
+    const why = prExclusionOf(r.payload);
+    if (why !== null) excludedPrReason.set(`${prNo}|${prItem}`, why);
+  }
 
   const stoSuffix = rules['sto.doctype_suffix'] as string;
   const fxPolicy = rules['fx.policy'] as FxPolicy;
@@ -428,13 +484,19 @@ export async function runTransform(
     const poItem = i(p.poItem);
     if (poNo === null || poItem === null) continue;
     const key = `${poNo}|${poItem}`;
+    if (seenPoLine.has(key)) { duplicatePoLines += 1; continue; }
+    seenPoLine.add(key);
 
     const docType = s(p.docType);
 
-    const poExclusion = docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
+    const ownExclusion = docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
       : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
         : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
           : null;
+    // The order's own org first, then the requisition it was raised from.
+    const fromRequisition = excludedPrReason.get(`${s(p.prNo)}|${i(p.prItem)}`);
+    const poExclusion = ownExclusion
+      ?? (fromRequisition !== undefined ? `requisition ${fromRequisition}` : null);
     if (poExclusion !== null) {
       excludedPoLines += 1;
       excludedPoKeys.add(key);
@@ -669,16 +731,14 @@ export async function runTransform(
     const prItem = i(p.prItem);
     if (prNo === null || prItem === null) continue;
     const key = `${prNo}|${prItem}`;
+    if (seenPrItem.has(key)) { duplicatePrItems += 1; continue; }
+    seenPrItem.add(key);
 
     // Document type is tested here too. The PR export carries its own Document
     // Type column, and excluding a type used to drop only the PO lines while
     // every requisition of that type stayed on the PR, Open Items and
     // Governance pages — so the same setting produced two different scopes.
-    const prDocType = s(p.docType);
-    const prExclusion = prDocType !== null && exDocTypes.has(prDocType) ? `doc_type=${prDocType}`
-      : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
-        : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
-          : null;
+    const prExclusion = prExclusionOf(p);
     if (prExclusion !== null) {
       excludedPrItems += 1;
       excludedPrKeys.add(key);
@@ -777,6 +837,12 @@ export async function runTransform(
     const postingDate = s(p.postingDate);
     if (mvt === null || poNo === null || poItem === null || matDoc === null || matDocItem === null) continue;
     if (postingDate === null) continue;
+    // The YEAR is part of the key: see material_doc_year below. Without it, the
+    // same number in two fiscal years would be counted here as a duplicate and
+    // one genuine receipt silently dropped.
+    const grKey = `${postingDate.slice(0, 4)}|${matDoc}|${matDocItem}`;
+    if (seenGrPosting.has(grKey)) { duplicateGrPostings += 1; continue; }
+    seenGrPosting.add(grKey);
 
     const rule = lookupMovement(mvt);
     if (rule === null) continue; // already recorded as a BLOCKER
@@ -807,6 +873,14 @@ export async function runTransform(
       s(p.postedBy),
       r.batch_file_id,
       r.source_row,
+      // SAP numbers material documents per FISCAL YEAR (MJAHR), so a document
+      // number and item repeat across years. The first multi-year extract, on
+      // 25 Sep 2026, carried 217 of them - document 5190005034 item 1 posted
+      // both 2 Jan 2026 and 7 Jan 2025 - and the load failed on the old key.
+      // The export has no year column; the posting date's year IS the fiscal
+      // year for these calendar-year companies, and every row has one (a row
+      // without a posting date is skipped above).
+      Number(postingDate.slice(0, 4)),
     ]);
   }
 
@@ -1167,6 +1241,9 @@ export async function runTransform(
     directPoLines: linkage.directPoCount,
     danglingPrRefs: linkage.dangling.length,
     grOrphans,
+    duplicatePrItems,
+    duplicatePoLines,
+    duplicateGrPostings,
     stoLines,
     stoPos: stoPoSet.size,
     tokenPriceLinesNonSto: tokenLines,
@@ -1505,7 +1582,7 @@ const GR_COLS = [
   'dataset_version_id', 'material_doc', 'material_doc_item', 'po_no', 'po_item', 'movement_type',
   'posting_class', 'counts_as_receipt', 'posting_date', 'entry_date', 'qty_entry_raw', 'signed_qty',
   'unit_of_entry', 'amount_local', 'material_code', 'material_desc', 'plant', 'company_code',
-  'vendor_code', 'posted_by', 'source_file_id', 'source_row',
+  'vendor_code', 'posted_by', 'source_file_id', 'source_row', 'material_doc_year',
 ] as const;
 
 const PREL_COLS = [

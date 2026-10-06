@@ -373,6 +373,11 @@ table.dd-tbl th .dt-sort:hover { color: #dbe7ff; }
   border: 1px solid var(--border); border-radius: 6px; margin-bottom: .6rem; background: var(--bg);
 }
 .dt-chip { display: inline-flex; align-items: center; gap: .3rem; font-size: .78rem; white-space: nowrap; }
+/* Two groups in the chooser: SAP's columns, then Coupa's. */
+.dt-chooser { flex-direction: column; }
+.dt-chooser-group { display: flex; flex-wrap: wrap; gap: .3rem .7rem; align-items: center; }
+.dt-chooser-coupa { border-top: 1px dashed var(--border); padding-top: .45rem; }
+.dt-chooser-title { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted, #667085); margin-right: .3rem; }
 /* An exclusion that is already applied: the value is absent from the data, so
    it is listed from the saved configuration. Marked so it reads as "removed",
    not as an ordinary unticked option. */

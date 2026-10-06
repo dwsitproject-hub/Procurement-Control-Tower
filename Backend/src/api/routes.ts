@@ -1018,6 +1018,7 @@ export function buildRouter(): Router {
     const { filters, sort } = parseDetailQuery(req.query as Record<string, unknown>);
     const page = await queryDetail(
       v.id, v.asOfDate, ctx.scope, filters, sort, MAX_EXPORT_ROWS, 0, false,
+      columns.some((c) => byKey.get(c.key)?.coupa === true),
     );
 
     const wb = buildExportWorkbook(columns, page.rows, {

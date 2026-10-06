@@ -192,7 +192,7 @@ export interface DrillPage {
   grain: string;
   totalCount: number;
   note: string | null;
-  columns: { key: string; label: string; type: string; currency?: string }[];
+  columns: { key: string; label: string; type: string; currency?: string; coupa?: boolean }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
   totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;

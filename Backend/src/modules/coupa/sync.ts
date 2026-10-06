@@ -102,6 +102,12 @@ async function storeRaw(object: string, rows: Row[]): Promise<void> {
   );
 }
 
+/** A Coupa requisition id, or null for anything that is not a positive integer. */
+const reqId = (v: unknown): number | null => {
+  const x = Number(v);
+  return v !== null && v !== undefined && v !== '' && Number.isInteger(x) && x > 0 ? x : null;
+};
+
 // ── per-object projections ───────────────────────────────────────────────────
 
 async function projectQuoteRequests(rows: Row[]): Promise<number> {
@@ -109,9 +115,12 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
     'ops.coupa_sourcing_event',
     ['id','event_type','state','description','created_at','submit_time','start_time','end_time',
      'currency','commodity','plant','purch_org','purch_group','sap_pr_no','planned_savings',
-     'supplier_count','line_count','updated_at'],
+     'supplier_count','line_count','updated_at','requisition_id','event_category'],
     rows.map((r) => {
       const cf = obj(r['custom-fields']);
+      // The requisition the event was created from: the join to Coupa POs and
+      // through them to SAP (036). sourcing-ref is free text and is not one.
+      const fromReq = s(r['creatable-from-type']) === 'RequisitionHeader' ? reqId(r['creatable-from-id']) : null;
       return [
         Number(r['id']), s(r['event-type']), s(r['state']), s(r['description']),
         s(r['created-at']), s(r['submit-time']), s(r['start-time']), s(r['end-time']),
@@ -119,6 +128,7 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
         plantCode(cf['plant']), lookupRef(cf['purchasing-organization']), lookupRef(cf['purchasing-group']),
         s(cf['sourcing-ref']), n(r['planned-savings']),
         arr(r['quote-suppliers']).length, arr(r['lines']).length, s(r['updated-at']),
+        fromReq, s(cf['event-category']),
       ];
     }),
     'id',
@@ -165,6 +175,7 @@ async function projectPurchaseOrders(rows: Row[]): Promise<number> {
     const supplier = obj(r['supplier']);
     const paymentTerm = s(obj(r['payment-term'])['code']);
     const hcf = obj(r['custom-fields']);
+    const requisitionId = reqId(obj(r['requisition-header'])['id']);
     for (const l of arr(r['order-lines'])) {
       const cf = obj(l['custom-fields']);
       const sapPo = parseSapRef(cf['sap-po-no-line-no']);
@@ -180,6 +191,7 @@ async function projectPurchaseOrders(rows: Row[]): Promise<number> {
         s(supplier['number']), s(supplier['display-name']) ?? s(supplier['name']),
         paymentTerm, b(hcf['emergency-request']), s(l['match-type']),
         s(l['created-at']), s(l['updated-at']) ?? s(r['updated-at']),
+        requisitionId,
       ]);
     }
   }
@@ -188,7 +200,8 @@ async function projectPurchaseOrders(rows: Row[]): Promise<number> {
     ['order_line_id','coupa_po_id','po_number','status','line_status','sap_po_no','sap_po_item',
      'sap_pr_no','sap_pr_item','need_by_date','price','quantity','total','invoiced_total','currency',
      'uom','item_number','description','plant','purch_org','purch_group','supplier_number',
-     'supplier_name','payment_term','emergency','match_type','created_at','updated_at'],
+     'supplier_name','payment_term','emergency','match_type','created_at','updated_at',
+     'requisition_id'],
     lineRows,
     'order_line_id',
   );

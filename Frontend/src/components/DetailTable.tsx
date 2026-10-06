@@ -29,6 +29,8 @@ interface Column {
   currency?: string;
   default: boolean;
   sortable: boolean;
+  /** Read live from the Coupa store, not the published SAP version. */
+  coupa?: boolean;
 }
 
 interface Facet {
@@ -412,15 +414,23 @@ export function DetailTable({
 
         {chooserOpen && data && (
           <div className="dt-chooser">
-            {data.columns.map((c) => (
-              <label key={c.key} className="dt-chip">
-                <input
-                  type="checkbox"
-                  checked={visible?.includes(c.key) ?? false}
-                  onChange={() => toggleColumn(c.key)}
-                />
-                {c.label}
-              </label>
+            {/* SAP columns first, then Coupa's as their own group: they come
+                from a different system, live rather than from the published
+                version, and the reader should be able to see which is which. */}
+            {[false, true].map((coupa) => (
+              <div key={String(coupa)} className={coupa ? 'dt-chooser-group dt-chooser-coupa' : 'dt-chooser-group'}>
+                {coupa && <span className="dt-chooser-title">From Coupa (live)</span>}
+                {data.columns.filter((c) => Boolean(c.coupa) === coupa).map((c) => (
+                  <label key={c.key} className={coupa ? 'dt-chip dt-chip-coupa' : 'dt-chip'}>
+                    <input
+                      type="checkbox"
+                      checked={visible?.includes(c.key) ?? false}
+                      onChange={() => toggleColumn(c.key)}
+                    />
+                    {c.label}
+                  </label>
+                ))}
+              </div>
             ))}
           </div>
         )}

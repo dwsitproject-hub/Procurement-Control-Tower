@@ -20,8 +20,13 @@ import {
 export interface DetailColumn {
   key: string;
   label: string;
-  /** Column expression in core.v_detail. */
+  /**
+   * Column of core.v_detail - or, for a Coupa column, an expression over the
+   * `cp` lateral below (COUPA_JOIN).
+   */
   sql: string;
+  /** Read from Coupa's live store through COUPA_JOIN, not from the view. */
+  coupa?: boolean;
   type: 'string' | 'int' | 'number' | 'money' | 'date' | 'enum' | 'pct';
   currency?: string;
   /** Shown by default; the rest are available in the column chooser. */
@@ -101,7 +106,92 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   // the requisition, one that reached an order ages on the order. Added so the
   // Open Items stage cards' age figures can filter this table.
   { key: 'ageDays',         label: 'Age (d)',                sql: 'age_days',            type: 'int',    default: false, sortable: true },
+  // Coupa, beside SAP (requested 6 Oct 2026), so a reader can see both systems
+  // describe the same purchase. Read live from the Coupa store - which syncs
+  // every few minutes and is not versioned - through COUPA_JOIN.
+  { key: 'coupaMatch',      label: 'Coupa match',            sql: "COALESCE(cp.via, 'Not in Coupa')", coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaReqNo',      label: 'Coupa Req No',           sql: 'cp.requisition_id',   coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaPoNo',       label: 'Coupa PO No',            sql: 'cp.po_number',        coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaPoStatus',   label: 'Coupa PO Status',        sql: 'cp.po_status',        coupa: true, type: 'string', default: false, sortable: true },
+  // Coupa writes SAP's REJECTION into the SAP PO number field when SAP refuses
+  // to create the order ("Purchase order still contains faulty items", "Please
+  // entry tax term and regulation"...) - 841 lines on 408 Coupa POs in the
+  // local copy of production. The clearest sign the two systems disagree, so
+  // it gets a column of its own.
+  { key: 'coupaSapError',   label: 'Coupa → SAP error',      sql: 'cp.sap_error',        coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaSourcingEvent', label: 'Coupa Sourcing Event', sql: 'cp.event_id',        coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaSourcingType',  label: 'Coupa Sourcing Type',  sql: 'cp.event_kind',      coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaSourcingState', label: 'Coupa Sourcing State', sql: 'cp.event_state',     coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaBids',       label: 'Coupa Bids',             sql: 'cp.bids',             coupa: true, type: 'int',    default: false, sortable: true },
+  { key: 'coupaAwarded',    label: 'Coupa Awarded Supplier', sql: 'cp.awarded',          coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaInvoiceNo',  label: 'Coupa Invoice No',       sql: 'cp.invoice_nos',      coupa: true, type: 'string', default: false, sortable: true },
+  { key: 'coupaInvoiceStatus', label: 'Coupa Invoice Status', sql: 'cp.invoice_status',  coupa: true, type: 'string', default: false, sortable: true },
 ];
+
+/**
+ * One Coupa row per detail row, as a lateral join on the page query only.
+ *
+ * The chain (036): SAP PO line <- Coupa PO line (its sap-po-no-line-no field);
+ * a row with no SAP order yet falls back to the Coupa PO line raised from its
+ * SAP requisition item (initial-sap-pr-no-line-no). Never both for one row: a
+ * requisition split across orders would otherwise borrow a sibling order's
+ * Coupa line. From the Coupa PO line, its Coupa requisition; from the
+ * requisition, the newest sourcing event created from it; from the line, its
+ * invoices.
+ *
+ * Kept out of core.v_detail on purpose. The view serves Open Items and the
+ * aggregate pages, none of which need Coupa, and the Coupa store moves every
+ * few minutes while the view is a published, immutable version - a column that
+ * changes under a fixed version would make two reads of one version disagree.
+ * Here the reader is looking at a page of rows, which is what the lookup costs.
+ */
+const COUPA_JOIN = `
+  LEFT JOIN LATERAL (
+    SELECT cpl.via, cpl.requisition_id, cpl.po_number, cpl.status AS po_status,
+           CASE WHEN cpl.sap_po_no !~ '^[0-9]+$'
+                THEN btrim(regexp_replace(cpl.sap_po_no, '^null[[:space:]]*', '')) END AS sap_error,
+           cse.id AS event_id,
+           NULLIF(concat_ws(' / ', cse.event_type, cse.event_category), '') AS event_kind,
+           cse.state AS event_state, cse.bids, cse.awarded,
+           cin.invoice_nos, cin.invoice_status
+      FROM (
+        (SELECT x.order_line_id, x.requisition_id, x.po_number, x.status, x.updated_at,
+                x.sap_po_no, 'SAP PO line' AS via, 1 AS pri
+           FROM ops.coupa_po_line x
+          WHERE d.po_no IS NOT NULL AND x.sap_po_no = d.po_no AND x.sap_po_item = d.po_item
+          ORDER BY x.updated_at DESC NULLS LAST LIMIT 1)
+        UNION ALL
+        (SELECT x.order_line_id, x.requisition_id, x.po_number, x.status, x.updated_at,
+                x.sap_po_no, 'SAP PR item (no SAP PO yet)', 2
+           FROM ops.coupa_po_line x
+          WHERE d.po_no IS NULL AND d.pr_no IS NOT NULL
+            AND x.sap_pr_no = d.pr_no AND x.sap_pr_item = d.pr_item
+          ORDER BY x.updated_at DESC NULLS LAST LIMIT 1)
+        ORDER BY pri LIMIT 1
+      ) cpl
+      LEFT JOIN LATERAL (
+        SELECT e.id, e.event_type, e.event_category, e.state,
+               (SELECT count(*)::int FROM ops.coupa_supplier_response r
+                 WHERE r.quote_request_id = e.id) AS bids,
+               (SELECT string_agg(DISTINCT r.supplier_name, ', ') FROM ops.coupa_supplier_response r
+                 WHERE r.quote_request_id = e.id AND r.awarded) AS awarded
+          FROM ops.coupa_sourcing_event e
+         WHERE cpl.requisition_id IS NOT NULL AND e.requisition_id = cpl.requisition_id
+         ORDER BY e.updated_at DESC NULLS LAST LIMIT 1
+      ) cse ON true
+      LEFT JOIN LATERAL (
+        SELECT string_agg(DISTINCT i.invoice_number, ', ') AS invoice_nos,
+               CASE WHEN count(*) = 0 THEN NULL
+                    WHEN bool_and(i.paid) THEN 'Paid' ELSE 'Not paid' END AS invoice_status
+          FROM ops.coupa_invoice_line il
+          JOIN ops.coupa_invoice i ON i.id = il.invoice_id
+         WHERE il.order_line_id = cpl.order_line_id
+           AND i.status NOT IN ('voided', 'draft')
+      ) cin ON true
+  ) cp ON true`;
+
+/** A column's SELECT/ORDER expression: the view's column, or the Coupa lookup's. */
+const colExpr = (c: DetailColumn): string => (c.coupa ? c.sql : `d.${c.sql}`);
 
 const COLUMN_BY_KEY = new Map(DETAIL_COLUMNS.map((c) => [c.key, c]));
 
@@ -468,6 +558,13 @@ export async function queryDetail(
   limit: number,
   offset: number,
   includeFacets: boolean,
+  /**
+   * Look up the Coupa columns. The table always does (a page is cheap); the
+   * export does only when a Coupa column was chosen, because there the lookup
+   * would run for every one of up to MAX_EXPORT_ROWS rows to fill columns
+   * nobody asked for.
+   */
+  withCoupa = true,
 ): Promise<DetailPage> {
   const { sql: whereSql, params } = buildDetailWhere(versionId, scope, filters);
 
@@ -481,21 +578,39 @@ export async function queryDetail(
   const sortCol = sort ? COLUMN_BY_KEY.get(sort.key) : undefined;
   const orderBy =
     sortCol && sortCol.sortable
-      ? `d.${sortCol.sql} ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, d.pr_no, d.pr_item, d.po_no, d.po_item`
+      ? `${colExpr(sortCol)} ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, d.pr_no, d.pr_item, d.po_no, d.po_item`
       : 'd.pr_no NULLS LAST, d.pr_item, d.po_no, d.po_item';
 
-  const select = DETAIL_COLUMNS.map((c) => `d.${c.sql} AS "${c.key}"`).join(', ');
+  const coupa = withCoupa || Boolean(sortCol?.coupa);
+  const select = DETAIL_COLUMNS
+    .map((c) => `${c.coupa && !coupa ? 'NULL' : colExpr(c)} AS "${c.key}"`).join(', ');
+  const coupaJoin = coupa ? COUPA_JOIN : '';
   const pageParams = [...params, limit, offset];
 
-  const rows = await query<Record<string, unknown>>(
-    `SELECT ${select},
-            d.is_sto AS "_sto", d.release_exempt AS "_exempt", d.is_token_price AS "_token",
+  const flagCols = `d.is_sto AS "_sto", d.release_exempt AS "_exempt", d.is_token_price AS "_token",
             d.link_status AS "_link", d.is_direct_po AS "_direct", d.wbs_status AS "_wbs",
-            d.is_retro_po AS "_retro"
-       FROM core.v_detail d
-      WHERE ${whereSql}
-      ORDER BY ${orderBy}
-      LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+            d.is_retro_po AS "_retro"`;
+  const lim = `LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`;
+  /*
+   * The Coupa lookup runs on the PAGE, not the population: the page is chosen
+   * first and only its rows are looked up. Joined before the LIMIT, the planner
+   * looked up every matching row - 4.4 s for a page of 200 on 56,716 rows.
+   * Sorting BY a Coupa column has to look up every row to know the order, so
+   * that one case still joins first.
+   */
+  const rows = await query<Record<string, unknown>>(
+    sortCol?.coupa && sortCol.sortable
+      ? `SELECT ${select}, ${flagCols}
+           FROM core.v_detail d${coupaJoin}
+          WHERE ${whereSql}
+          ORDER BY ${orderBy}
+          ${lim}`
+      : `SELECT ${select}, ${flagCols}
+           FROM (SELECT d.* FROM core.v_detail d
+                  WHERE ${whereSql}
+                  ORDER BY ${orderBy}
+                  ${lim}) d${coupaJoin}
+          ORDER BY ${orderBy}`,
     pageParams,
   );
 

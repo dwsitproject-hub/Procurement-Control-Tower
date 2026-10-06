@@ -34,6 +34,11 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   'ingest.autopoll_enabled': false,
   'ingest.poll_interval_minutes': 30,
   'ingest.file_patterns': [],
+  // SAP uploads merge into what is loaded (035): new records are added,
+  // changed ones updated, nothing missing from a file is removed. false
+  // restores the old full-replace load, where every upload must carry all five
+  // exports and is the whole dataset on its own.
+  'ingest.merge_enabled': true,
   // Coupa poller (TECH_04 §3.4). Credentials are env-only, never here.
   'coupa.sync_enabled': false,
   'coupa.sync_interval_minutes': 10,

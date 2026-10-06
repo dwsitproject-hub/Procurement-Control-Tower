@@ -49,6 +49,7 @@ import { insertMany, query } from '../../db/client.js';
 import { PLANT_AREA } from './area_map.js';
 import { applyDimOverrides, applyFxOverrides } from '../master/edit.js';
 import type { RuleSnapshot } from '../admin/rules.js';
+import { loadEffective } from '../ingest/merge.js';
 
 // ─────────────────────────────────────────────────────────────────── typing
 
@@ -144,14 +145,23 @@ export async function runTransform(
   batchId: number,
   rules: RuleSnapshot,
 ): Promise<TransformResult> {
-  const [prRows, prelRows, poRows, porRows, grRows, fxRows] = await Promise.all([
-    loadStaged(batchId, 'pr'),
-    loadStaged(batchId, 'prel'),
-    loadStaged(batchId, 'po'),
-    loadStaged(batchId, 'por'),
-    loadStaged(batchId, 'gr'),
-    loadStaged(batchId, 'fx'),
-  ]);
+  /*
+   * The five transactional feeds come from the merged store (035): the newest
+   * copy of every document across this batch's lineage, so a file that carries
+   * one month updates that month and leaves the rest as it was. The pipeline
+   * has already written this batch's records there. Read on the transaction's
+   * own client - those records are not committed yet.
+   *
+   * Sequential, not Promise.all: one client runs one query at a time.
+   */
+  const prRows = (await loadEffective(client, batchId, 'pr')) as StagedRow[];
+  const prelRows = (await loadEffective(client, batchId, 'prel')) as StagedRow[];
+  const poRows = (await loadEffective(client, batchId, 'po')) as StagedRow[];
+  const porRows = (await loadEffective(client, batchId, 'por')) as StagedRow[];
+  const grRows = (await loadEffective(client, batchId, 'gr')) as StagedRow[];
+  // The rate table is not merged here: ops.fx_rate_source is already the
+  // accumulating store for it (buildFx).
+  const fxRows = await loadStaged(batchId, 'fx');
 
   // Category overrides are reference data an administrator can extend, so they
   // are read from the database rather than hardcoded as v1 did.
@@ -316,6 +326,13 @@ export async function runTransform(
   await client.query('SELECT core.create_version_partitions($1)', [versionId]);
 
   // ── PR release: continuation-row fill with guards ──
+  // Rows from the merged store were filled when they were stored (merge.ts),
+  // so the fill below finds no continuation rows in them; the flag it would
+  // have set travels in the payload instead.
+  const storedContinuation = new Set(
+    prelRows.filter((r) => r.payload['_continuation'] === true)
+      .map((r) => `${s(r.payload.prNo)}|${i(r.payload.prItem)}|${i(r.payload.relSeq)}`),
+  );
   const releaseRaw: ReleaseRowRaw[] = prelRows.map((r) => ({
     rowNumber: r.source_row,
     prNo: s(r.payload.prNo),
@@ -937,7 +954,7 @@ export async function runTransform(
       r.status,
       r.approveDate,
       r.approveTime,
-      r.wasContinuation,
+      r.wasContinuation || storedContinuation.has(k),
       r.plant,
       (r.plant ?? '').slice(0, 2) || null,
       r.purchOrg,

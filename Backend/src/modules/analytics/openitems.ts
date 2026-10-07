@@ -194,6 +194,15 @@ export interface OpenItemsSummary {
   bands: { key: string; label: string }[];
   stages: StageRow[];
   categories: CategoryRow[];
+  /**
+   * The backlog-by-category table's own filters (7 Oct 2026): what was applied,
+   * and the values on offer - counted over the open population WITHOUT these
+   * three, so choosing one plant still lists the others to add.
+   */
+  categoryFilter: {
+    applied: CategorySectionFilter;
+    options: Record<keyof CategorySectionFilter, { value: string; count: number }[]>;
+  };
   money: MoneyCards;
   totalOpen: number;
   totalPastSla: number;
@@ -330,11 +339,36 @@ function buildWhere(
   };
 }
 
+/**
+ * Filters of the backlog-by-category table alone (requested 7 Oct 2026). The
+ * cards above stay on the page's own population; these narrow only the table.
+ * Several values per dimension are allowed and OR'd; the three are AND'd.
+ */
+export interface CategorySectionFilter {
+  plant: string[];
+  prType: string[];
+  poType: string[];
+}
+
+const SECTION_COL: Record<keyof CategorySectionFilter, string> = {
+  plant: 'd.plant',
+  prType: 'd.pr_doc_type',
+  poType: 'd.po_doc_type',
+};
+
+/** The Detail Table parameter each section filter maps to (detail.ts). */
+const SECTION_DETAIL_PARAM: Record<keyof CategorySectionFilter, string> = {
+  plant: 'plant',
+  prType: 'prDocType',
+  poType: 'poDocType',
+};
+
 export async function openItemsSummary(
   versionId: number,
   asOfDate: string,
   scope: readonly ScopeEntry[],
   filter: GlobalFilter,
+  section: CategorySectionFilter = { plant: [], prType: [], poType: [] },
 ): Promise<OpenItemsSummary> {
   const w = buildWhere(versionId, scope, filter);
 
@@ -383,16 +417,39 @@ export async function openItemsSummary(
   // takes fact_po_line.spend_category itself - the same column those charts
   // group by - so the two agree by construction rather than by review.
   const dw = buildWhere(versionId, scope, filter);
+  // The options are counted before the section's own filters are added.
+  const sectionOptions = {} as OpenItemsSummary['categoryFilter']['options'];
+  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+    sectionOptions[k] = (await query<{ value: string; n: number }>(
+      `SELECT ${SECTION_COL[k]} AS value, count(*)::int AS n
+         FROM core.v_detail d WHERE ${dw.sql} AND ${SECTION_COL[k]} IS NOT NULL
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 300`,
+      dw.params,
+    )).map((x) => ({ value: x.value, count: x.n }));
+  }
+  const catParams = [...dw.params];
+  let catSql = dw.sql;
+  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+    if (section[k].length === 0) continue;
+    catParams.push(section[k]);
+    catSql += ` AND ${SECTION_COL[k]} = ANY($${catParams.length})`;
+  }
   const categories = await query<Record<string, unknown>>(
     `SELECT COALESCE(NULLIF(d.spend_category, ''), '(none)') AS desk,
             COALESCE(NULLIF(d.spend_category, ''), '(no spend category)') AS label,
             ${MEASURES}
        FROM core.v_detail d
-      WHERE ${dw.sql}
+      WHERE ${catSql}
       GROUP BY 1, 2
       ORDER BY over_late DESC, n DESC`,
-    dw.params,
+    catParams,
   );
+  // Carried into every click from the table, so the rows opened are the rows
+  // the table counted.
+  const sectionDetail: Record<string, string> = {};
+  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+    if (section[k].length > 0) sectionDetail[SECTION_DETAIL_PARAM[k]] = section[k].join(',');
+  }
 
   // ── after delivery: money still in flight ────────────────────────────
   //
@@ -510,8 +567,9 @@ export async function openItemsSummary(
       // with no material category is reported and left unclickable.
       detailFilter: (r['desk'] === '(none)'
         ? {}
-        : { status: ALL_STAGE_STATUSES, spendCategory: String(r['desk']) }) as Record<string, string>,
+        : { status: ALL_STAGE_STATUSES, spendCategory: String(r['desk']), ...sectionDetail }) as Record<string, string>,
     })),
+    categoryFilter: { applied: section, options: sectionOptions },
     money: {
       deliveredNotInvoiced: moneyCard('deliveredNotInvoiced'),
       invoicedNotPaid: moneyCard('invoicedNotPaid'),

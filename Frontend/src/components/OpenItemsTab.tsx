@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { api, type Finding, type Kpi } from '../lib/api';
 import { formatKpi, formatNumber } from '../lib/format';
 import { DetailTable } from './DetailTable';
+import { DetailModal } from './DetailModal';
 
 const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartPanel })));
 
@@ -11,8 +12,9 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  * Built from the design spec of 16 Sep 2026, which replaced a wall of fifteen
  * equal-weight tiles with a reading order: a sentence saying where the backlog
  * is, a five-stage pipeline carrying its own aging, and the remaining figures
- * demoted to a watchlist strip and a one-line hygiene bar. Nothing was dropped
- * — every one of the fifteen is still on the page.
+ * demoted to a watchlist strip and a one-line hygiene bar. The watchlist, the
+ * hygiene bar and four of the five charts were REMOVED on 7 Oct 2026, on
+ * request: the page is the pipeline, the backlog table and the rows.
  *
  * ── Three decisions taken at build time ─────────────────────────────────────
  *
@@ -85,6 +87,16 @@ interface MoneyCards {
   invoicedNotPaid: MoneyCard;
   coupaCoverage: { unpaidInvoices: number; matchedInvoices: number } | null;
 }
+/** The backlog table's own filters (openitems.ts CategorySectionFilter). */
+interface CatFilter { plant: string[]; prType: string[]; poType: string[] }
+const CAT_FILTER_LABELS: Record<keyof CatFilter, string> = {
+  plant: 'Plant', prType: 'PR Type', poType: 'PO Type',
+};
+const CAT_FILTER_PARAM: Record<keyof CatFilter, string> = {
+  plant: 'catPlant', prType: 'catPrType', poType: 'catPoType',
+};
+const NO_CAT_FILTER: CatFilter = { plant: [], prType: [], poType: [] };
+
 interface Summary {
   asOfDate: string; pastSlaDays: number; lateDays: number;
   bands: { key: string; label: string }[];
@@ -94,6 +106,10 @@ interface Summary {
   detailFilter: Record<string, string>;
   /** Parts of the global filter this page could not apply. Usually empty. */
   filterIgnored?: string[];
+  categoryFilter?: {
+    applied: CatFilter;
+    options: Record<keyof CatFilter, { value: string; count: number }[]>;
+  };
 }
 
 type Lens = 'buyer' | 'lead' | 'mgmt';
@@ -158,7 +174,7 @@ function AgeMixBar({ bands, total, labels, onBand }: {
 }
 
 export function OpenItemsTab({
-  kpis, findings, onDrill, currency, asOfDate, filterQuery,
+  findings, onDrill, currency, asOfDate, filterQuery,
 }: {
   kpis: Kpi[] | null;
   findings: Finding[];
@@ -175,14 +191,16 @@ export function OpenItemsTab({
   });
   const [desk, setDesk] = useState<string>(() => stored(DESK_KEY) ?? '');
   const [showCharts, setShowCharts] = useState(false);
+  /** Plant / PR Type / PO Type, for the backlog-by-category table only. */
+  const [catFilter, setCatFilter] = useState<CatFilter>(NO_CAT_FILTER);
 
   /**
    * What the reader last clicked, and the filter that reproduces it.
    *
-   * Every figure on a stage card is a button, and clicking one narrows the
-   * detail table at the bottom of the page rather than opening a modal — the
-   * rows are already on the page, so the useful move is to point the table at
-   * them.
+   * Every figure on a card or in the backlog table is a button. Since 7 Oct
+   * 2026 a click opens the rows in a floating panel (DetailModal) over the
+   * page, beside the number, rather than re-filtering the table two screens
+   * below it - which in the Management view did not exist at all.
    *
    * The filter always starts from the card's OWN detailFilter, which the server
    * states, so the table's row count matches the number that was clicked
@@ -223,12 +241,6 @@ export function OpenItemsTab({
       init: { ...init, ...(desk ? { spendCategory: desk } : {}) },
       ...(exact ? { exact } : {}),
     });
-    // A filter applied to a table two screens below the click is invisible, and
-    // reads as nothing having happened. Defer a frame so the table has
-    // re-rendered under its new key before we scroll to it.
-    requestAnimationFrame(() => {
-      document.getElementById('oi-rows')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
   };
 
   /**
@@ -240,7 +252,7 @@ export function OpenItemsTab({
    * not translate (detailHandoff), which is the same machinery v1's "Open in
    * Detail tab" used.
    *
-   * So: an EXACT handoff opens the table below, which is what the reader asked
+   * So: an EXACT handoff opens the rows popup, which is what the reader asked
    * for. An approximate one falls back to the drill panel, which returns the
    * rows the figure was computed from with the parity the sweep checks. An
    * average or a rate has no row set to hand off at all, and lands there too.
@@ -266,49 +278,21 @@ export function OpenItemsTab({
     onDrill(token, label);
   };
 
+  /** The backlog table's filters on the wire; they narrow only that table. */
+  const catFilterQuery = (Object.keys(CAT_FILTER_PARAM) as (keyof CatFilter)[])
+    .filter((k) => catFilter[k].length > 0)
+    .map((k) => `${CAT_FILTER_PARAM[k]}=${encodeURIComponent(catFilter[k].join(','))}`)
+    .join('&');
+
   useEffect(() => {
     let dead = false;
     setErr(null);
-    api.get<Summary>(`/api/v1/openitems/summary${pageQuery ? `?${pageQuery}` : ''}`)
+    const q = [pageQuery, catFilterQuery].filter(Boolean).join('&');
+    api.get<Summary>(`/api/v1/openitems/summary${q ? `?${q}` : ''}`)
       .then((d) => { if (!dead) setSum(d); })
       .catch((e: Error) => { if (!dead) { setSum(null); setErr(e.message); } });
     return () => { dead = true; };
-  }, [pageQuery]);
-
-  /**
-   * The page's KPI cards, recomputed under the chosen category.
-   *
-   * The parent fetches these under the GLOBAL filter, which is right until a
-   * category is chosen here - then the watchlist and hygiene rows would be the
-   * only figures on screen still describing the whole dataset. The ids come
-   * from the prop rather than a second hard-coded list, so this cannot drift
-   * from what the page actually renders.
-   *
-   * A KPI with no live recomputation path reports itself unavailable under the
-   * filter, which is the existing behaviour of that endpoint and the right one:
-   * a dash beats a number that silently ignores the narrowing.
-   */
-  const [catKpis, setCatKpis] = useState<Kpi[] | null>(null);
-  const kpiIds = useMemo(() => (kpis ?? []).map((k) => k.kpiId).join(','), [kpis]);
-
-  useEffect(() => {
-    if (!catQuery || kpiIds === '') { setCatKpis(null); return undefined; }
-    let dead = false;
-    api.get<{ kpis: Kpi[] }>(`/api/v1/kpi?ids=${encodeURIComponent(kpiIds)}&${pageQuery}`)
-      .then((d) => { if (!dead) setCatKpis(d.kpis); })
-      .catch(() => { if (!dead) setCatKpis(null); });
-    return () => { dead = true; };
-  }, [catQuery, kpiIds, pageQuery]);
-
-  const kpi = useMemo(() => {
-    const m = new Map<string, Kpi>();
-    for (const k of catKpis ?? kpis ?? []) m.set(k.kpiId, k);
-    return m;
-  }, [kpis, catKpis]);
-  const kval = (id: string): string => {
-    const k = kpi.get(id);
-    return k && k.status === 'ok' && k.value !== null ? formatKpi(k.value, k.unit) : '—';
-  };
+  }, [pageQuery, catFilterQuery]);
 
   const caveat = findings.find((f) => f.ruleId === 'V-B04');
 
@@ -354,7 +338,7 @@ export function OpenItemsTab({
                 there is nothing to reconcile. */}
             <p className="oi-total">
               {formatNumber(sum.totalOpen)}{' '}
-              <span>open lines{desk ? ` in ${desk}` : ''}</span>
+              <span>total open PR PO Lines{desk ? ` in ${desk}` : ''}</span>
             </p>
           </div>
           <span className="spacer" />
@@ -514,7 +498,7 @@ export function OpenItemsTab({
                     type="button"
                     className="oi-num"
                     disabled={s.count === 0}
-                    title={`Show the ${formatNumber(s.count)} ${s.name} lines in the table below`}
+                    title={`Show the ${formatNumber(s.count)} ${s.name} lines`}
                     onClick={() => openRows(s.name, s.detailFilter, false, `stage:${s.key}`)}
                   >
                     {formatNumber(s.count)}
@@ -620,79 +604,6 @@ export function OpenItemsTab({
         </div>
       </div>
 
-      {/* ── watchlist ──────────────────────────────────────────────── */}
-      {showSideFigures && (
-        <div className="panel">
-          <h3 className="pr-tbl-h">Watchlist</h3>
-          <div className="oi-watch">
-            {[
-              { id: 'emergency_open', note: 'Flagged emergency and still open — every one is already past the approval rule.' },
-              { id: 'urgent_open', note: 'Carrying an urgent priority and still waiting.' },
-              { id: 'avg_unreleased_age', note: 'How long the average unreleased requisition has been waiting.' },
-              { id: 'retro_po_rate', note: 'Orders raised before their requisition — the control was applied after the fact.' },
-            ].map((w) => {
-              const k = kpi.get(w.id);
-              return (
-                <div key={w.id} className="oi-watch-card">
-                  {/*
-                    The watchlist figures do NOT filter the table. Three of the
-                    four are an average or a rate — there is no set of detail
-                    rows that "329 days" or "5.7%" selects. Their KPI drill
-                    token opens exactly the rows the figure was computed from,
-                    with the parity the sweep checks, so that is what a click
-                    does here. A figure without a token is not a button.
-                  */}
-                  <p className="oi-watch-v">
-                    {k?.drillToken ? (
-                      <button
-                        type="button"
-                        className="oi-num"
-                        title={`Show the rows behind ${k.title}`}
-                        onClick={() => { void openRowsFromToken(k.drillToken!, k.title); }}
-                      >
-                        {kval(w.id)}
-                      </button>
-                    ) : kval(w.id)}
-                  </p>
-                  <p className="oi-watch-l">{k?.title ?? w.id}</p>
-                  <p className="oi-watch-n">{w.note}</p>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ── hygiene, one row ───────────────────────────────────────── */}
-      {showSideFigures && (
-        <div className="panel oi-hyg-panel">
-          <h3 className="pr-tbl-h">Compliance &amp; hygiene</h3>
-          <div className="oi-hyg">
-            {['open_pr_no_wbs', 'open_pr_with_wbs', 'commitment_over_60d', 'urgent_po_before_pr', 'po_hold']
-              .map((id) => (
-                <div key={id} className="oi-hyg-item">
-                  <span className="oi-hyg-v">
-                    {kpi.get(id)?.drillToken ? (
-                      <button
-                        type="button"
-                        className="oi-num oi-num--sm"
-                        title={`Show the rows behind ${kpi.get(id)!.title}`}
-                        onClick={() => {
-                          void openRowsFromToken(kpi.get(id)!.drillToken!, kpi.get(id)!.title);
-                        }}
-                      >
-                        {kval(id)}
-                      </button>
-                    ) : kval(id)}
-                  </span>
-                  <span className="oi-hyg-l">{kpi.get(id)?.title ?? id}</span>
-                </div>
-              ))}
-
-          </div>
-        </div>
-      )}
-
       {/* ── backlog by material category ────────── */}
       {showDesks && (
         <div className="panel">
@@ -704,6 +615,48 @@ export function OpenItemsTab({
             Grouped by what is being bought rather than by who files it. Requisition and order
             stages are counted together, because a category&apos;s open work is both.
           </p>
+          {/* This table's own filters (7 Oct 2026): several values per
+              filter, combined across filters. The cards above are unchanged
+              by them. */}
+          {sum.categoryFilter && (
+            <div className="dt-facets oi-cat-filters">
+              {(Object.keys(CAT_FILTER_LABELS) as (keyof CatFilter)[]).map((k) => {
+                const opts = sum.categoryFilter!.options[k] ?? [];
+                const on = catFilter[k];
+                return (
+                  <details key={k} className="dt-facet">
+                    <summary>
+                      {CAT_FILTER_LABELS[k]}
+                      {on.length > 0 && <span className="dt-badge">{on.length}</span>}
+                    </summary>
+                    <div className="dt-facet-list">
+                      {opts.length === 0 && <span className="muted">no values</span>}
+                      {opts.map((o) => (
+                        <label key={o.value} className="dt-chip">
+                          <input
+                            type="checkbox"
+                            checked={on.includes(o.value)}
+                            onChange={() => setCatFilter((cur) => ({
+                              ...cur,
+                              [k]: cur[k].includes(o.value)
+                                ? cur[k].filter((v) => v !== o.value)
+                                : [...cur[k], o.value],
+                            }))}
+                          />
+                          {o.value} <span className="muted">({formatNumber(o.count)})</span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+              {catFilterQuery !== '' && (
+                <button className="dt-btn" onClick={() => setCatFilter(NO_CAT_FILTER)}>
+                  Clear table filters
+                </button>
+              )}
+            </div>
+          )}
           <div className="table-wrap">
             <table className="data dd-tbl oi-desks">
               <thead>
@@ -718,6 +671,14 @@ export function OpenItemsTab({
                 </tr>
               </thead>
               <tbody>
+                {sum.categories.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="muted">
+                      No open lines match these table filters
+                      {catFilterQuery !== '' ? ' — try removing one' : ''}.
+                    </td>
+                  </tr>
+                )}
                 {sum.categories.map((d) => (
                   <tr key={d.desk}>
                     <th scope="row">
@@ -780,7 +741,7 @@ export function OpenItemsTab({
         lens === 'lead' && !showCharts ? (
           <p className="note">
             <button className="dt-btn" onClick={() => setShowCharts(true)}>Show charts</button>{' '}
-            Five aging and mix charts, hidden by default in this view so the desk table is what you
+            The category chart, hidden by default in this view so the backlog table is what you
             land on.
           </p>
         ) : (
@@ -791,8 +752,9 @@ export function OpenItemsTab({
               </p>
             )}
             <div className="chart-grid">
-              {['aging_severity_by_stage', 'aging_bands', 'open_by_priority',
-                'unapproved_by_category', 'unreleased_aging_buckets'].map((c) => (
+              {/* Four aging charts removed 7 Oct 2026, on request: the stage
+                  cards and the backlog table already carry the same bands. */}
+              {['unapproved_by_category'].map((c) => (
                 <Suspense key={c} fallback={<div className="panel" style={{ minHeight: 180 }}><div className="spinner" /></div>}>
                   {/* pageQuery, not filterQuery: the chart narrows with the
                       chosen category like everything else. onDrill routes
@@ -825,14 +787,6 @@ export function OpenItemsTab({
       {/* ── the rows ───────────────────────────────────────────────── */}
       {showTable ? (
         <div id="oi-rows" style={{ marginTop: '1rem' }}>
-          {focus && (
-            <p className="note oi-focus">
-              Showing <strong>{focus.label}</strong>{' '}
-              <button className="dt-btn" onClick={() => setFocus(null)}>
-                show all open items
-              </button>
-            </p>
-          )}
           <DetailTable
             /*
               The key carries the focus, so a click REMOUNTS the table with the
@@ -840,7 +794,7 @@ export function OpenItemsTab({
               state — changing the prop alone would leave the old filter in
               place and the click would appear to do nothing.
             */
-            key={`openitems-detail-${focus ? JSON.stringify(focus.init) : lens === 'buyer' ? desk || 'all' : 'all'}`}
+            key={`openitems-detail-${lens === 'buyer' ? desk || 'all' : 'all'}`}
             /*
               The default table shows the SAME population the pipeline counts —
               the five stage statuses — not the wider `onlyOpen` list, which
@@ -849,12 +803,7 @@ export function OpenItemsTab({
               definition of an open item.
             */
             initial={
-              focus
-                // An exact handoff is the figure's OWN population, which is not
-                // always the five open stages - imposing them on top would open
-                // a table whose count is smaller than the number clicked.
-                ? (focus.exact ? focus.init : { ...sum.detailFilter, ...focus.init })
-                : lens === 'buyer' && desk
+              lens === 'buyer' && desk
                   // spendCategory, not purchGroup. The picker changed dimension
                   // on 22 Sep and this seed did not, so choosing a category
                   // filtered the table by a purchasing group of that name -
@@ -863,18 +812,29 @@ export function OpenItemsTab({
                   ? { ...sum.detailFilter, spendCategory: desk }
                   : sum.detailFilter
             }
-            initialLabel={
-              focus
-                ? focus.label
-                : lens === 'buyer' && desk ? `Open items in ${desk}` : 'Open items only'
-            }
+            initialLabel={lens === 'buyer' && desk ? `Open items in ${desk}` : 'Open items only'}
+            globalQuery={filterQuery}
           />
         </div>
       ) : (
         <p className="note">
-          Row-level detail is not shown in the Management view.{' '}
+          Row-level detail is not shown in the Management view; click any figure above for its
+          rows.{' '}
           <a href="/detail-table">Open in the Detail table →</a>
         </p>
+      )}
+
+      {/* The rows behind the figure that was clicked, over the page. */}
+      {focus && (
+        <DetailModal
+          title={focus.label}
+          // An exact handoff is the figure's OWN population, which is not
+          // always the open stages - imposing them on top would open a table
+          // whose count is smaller than the number clicked.
+          initial={focus.exact ? focus.init : { ...sum.detailFilter, ...focus.init }}
+          globalQuery={filterQuery}
+          onClose={() => setFocus(null)}
+        />
       )}
     </>
   );

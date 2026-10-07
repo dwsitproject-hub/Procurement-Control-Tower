@@ -780,7 +780,10 @@ export function buildRouter(): Router {
     const offset = Number(req.query.cursor ?? 0);
     try {
       const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
-      const page = await executeDrill(payload, limit, offset);
+      const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
+      const sort = sortKey === null ? null
+        : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' as const : 'asc' as const };
+      const page = await executeDrill(payload, limit, offset, sort);
       res.json({ ...page, asOfDate: (await currentVersion())?.asOfDate ?? null });
     } catch (e) {
       if (e instanceof DrillTokenError) {
@@ -815,7 +818,10 @@ export function buildRouter(): Router {
   r.get('/api/v1/drill/:token/export.xlsx', role('analyst', async (req, res, ctx) => {
     try {
       const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
-      const page = await executeDrill(payload, MAX_EXPORT_ROWS, 0);
+      // The panel's sort, so the file is in the order on screen.
+      const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
+      const page = await executeDrill(payload, MAX_EXPORT_ROWS, 0, sortKey === null ? null
+        : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' : 'asc' });
       const v = await currentVersion();
 
       // The panel's heading, so the file is named after the figure the user
@@ -850,7 +856,14 @@ export function buildRouter(): Router {
         ]);
       }
 
-      const wb = buildExportWorkbook(page.columns, page.rows, {
+      // The panel's chosen columns in the panel's order (7 Oct 2026); unknown
+      // keys are dropped rather than failing the download, and none chosen
+      // means every column, as before.
+      const wanted = req.query.cols === undefined ? []
+        : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x !== '');
+      const byKey = new Map(page.columns.map((c) => [c.key, c]));
+      const picked = wanted.map((k) => byKey.get(k)).filter((c): c is NonNullable<typeof c> => c !== undefined);
+      const wb = buildExportWorkbook(picked.length > 0 ? picked : page.columns, page.rows, {
         sheetName: 'Rows',
         title,
         datasetVersionId: payload.v,
@@ -1199,10 +1212,14 @@ export function buildRouter(): Router {
     // under. A filter this page cannot express (a GR-grain dimension, say)
     // throws inside, and is reported rather than quietly ignored.
     const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    // The backlog table's own Plant / PR Type / PO Type filters.
+    const list = (k: string): string[] => String((req.query as Record<string, unknown>)[k] ?? '')
+      .split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 300);
+    const section = { plant: list('catPlant'), prType: list('catPrType'), poType: list('catPoType') };
     try {
       res.json({
         datasetVersionId: v.id,
-        ...(await openItemsSummary(v.id, v.asOfDate, ctx.scope, gf)),
+        ...(await openItemsSummary(v.id, v.asOfDate, ctx.scope, gf, section)),
       });
     } catch (e) {
       throw new HttpProblem(

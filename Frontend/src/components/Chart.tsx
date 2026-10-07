@@ -61,6 +61,23 @@ const SERIES_COLORS: Record<string, string> = {
   'Cancelled (by month raised)': '#94a3b8',
 };
 
+/**
+ * The requisition flow as a WATERFALL (requested 7 Oct 2026), per month:
+ *
+ *   brought forward - the requisitions still open when the month began,
+ *                     stacked by how long each had been waiting (six bands,
+ *                     colours as specified with the request);
+ *   + newly raised  - a step up from there;
+ *   - became PO     - a step down;
+ *   - cancelled     - a further step down, drawn only when there are any.
+ *
+ * Where the last step ends is what the NEXT month brings forward: the chart's
+ * own identity, open(M+1) = open(M) + new(M) - to PO(M) - cancelled(M).
+ */
+const WATERFALL_CHARTS = new Set(['pr_by_month']);
+const WATERFALL_BAND_COLORS = ['#4E79A7', '#F28E2B', '#59A14F', '#E15759', '#76B7B2', '#EDC948'];
+const WATERFALL_STEP_COLORS = { new_pr: '#2E7D32', to_po: '#1F3864', cancelled: '#94a3b8' };
+
 // v1's PR Status Distribution donut colours, keyed by status.
 const STATUS_COLORS: Record<string, string> = {
   Delivered: '#4CAF50',
@@ -245,6 +262,102 @@ export function ChartPanel({
       };
     }
 
+    if (WATERFALL_CHARTS.has(chartId)) {
+      const ser = (key: string) => data.series.find((x) => x.key === key);
+      const val = (key: string, bk: string): number =>
+        Number(ser(key)?.points.find((x) => x.bucketKey === bk)?.value ?? 0);
+      const bandKeys = data.series.map((x) => x.key).filter((k) => /^carried_in_b[0-9]$/.test(k)).sort();
+      const bf = (bk: string) => bandKeys.reduce((a, k) => a + val(k, bk), 0);
+      const hasCancelled = data.buckets.some((b) => val('cancelled', b.key) > 0);
+      // Each dataset knows the series it draws, so a click drills to that
+      // series' own point - the rows behind exactly that segment.
+      const sets: { key: string; label: string; stack: string; color: string;
+        values: (number | [number, number])[] }[] = [
+        ...bandKeys.map((k, i) => ({
+          key: k,
+          label: ser(k)?.label ?? k,
+          stack: 'bf',
+          color: WATERFALL_BAND_COLORS[i] ?? PALETTE[i % PALETTE.length]!,
+          values: data.buckets.map((b) => val(k, b.key)),
+        })),
+        {
+          key: 'new_pr', label: '+ Newly raised', stack: 'new', color: WATERFALL_STEP_COLORS.new_pr,
+          values: data.buckets.map((b) => [bf(b.key), bf(b.key) + val('new_pr', b.key)] as [number, number]),
+        },
+        {
+          key: 'to_po', label: '\u2212 Became PO', stack: 'po', color: WATERFALL_STEP_COLORS.to_po,
+          values: data.buckets.map((b) => {
+            const top = bf(b.key) + val('new_pr', b.key);
+            return [top - val('to_po', b.key), top] as [number, number];
+          }),
+        },
+        ...(hasCancelled ? [{
+          key: 'cancelled', label: '\u2212 Cancelled', stack: 'cx', color: WATERFALL_STEP_COLORS.cancelled,
+          values: data.buckets.map((b) => {
+            const top = bf(b.key) + val('new_pr', b.key) - val('to_po', b.key);
+            return [top - val('cancelled', b.key), top] as [number, number];
+          }),
+        }] : []),
+      ];
+      chart.current = new ChartJS(canvas.current, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: sets.map((d) => ({
+            label: d.label,
+            data: d.values as never,
+            stack: d.stack,
+            backgroundColor: d.color,
+            borderRadius: 2,
+          })),
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          onClick: (_e, elements) => {
+            const el = elements[0];
+            if (!el) return;
+            const d = sets[el.datasetIndex];
+            const bucket = data.buckets[el.index];
+            const point = d && bucket ? ser(d.key)?.points.find((x) => x.bucketKey === bucket.key) : undefined;
+            if (point?.drillToken && bucket && d) {
+              onDrill(point.drillToken, `${data.title} — ${bucket.label} · ${d.label}`);
+            }
+          },
+          plugins: {
+            legend: { display: true, position: 'bottom', labels: { boxWidth: 12 } },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => {
+                  const d = sets[ctx.datasetIndex];
+                  const bucket = data.buckets[ctx.dataIndex];
+                  if (!d || !bucket) return '';
+                  const n = val(d.key, bucket.key);
+                  return `${d.label}: ${n.toLocaleString('en-GB')}`;
+                },
+                afterBody: (items) => {
+                  const bucket = items[0] ? data.buckets[items[0].dataIndex] : undefined;
+                  if (!bucket) return '';
+                  const end = bf(bucket.key) + val('new_pr', bucket.key)
+                    - val('to_po', bucket.key) - val('cancelled', bucket.key);
+                  return `Brought forward ${bf(bucket.key).toLocaleString('en-GB')} \u2192 open at month end ${end.toLocaleString('en-GB')}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: { stacked: true, grid: { display: false }, ticks: { maxRotation: 60, minRotation: 0, autoSkip: true } },
+            y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => formatKpi(Number(v), 'count') } },
+          },
+        },
+      });
+      return () => {
+        chart.current?.destroy();
+        chart.current = null;
+      };
+    }
+
     // v1 prints the value above each bar; skipped when the chart is too dense
     // to stay readable (values remain in the tooltip).
     const barCount = data.buckets.length * shownSeries.length;
@@ -357,7 +470,7 @@ export function ChartPanel({
       chart.current?.destroy();
       chart.current = null;
     };
-  }, [data, onDrill, variant, currency]);
+  }, [data, onDrill, variant, currency, chartId]);
 
   if (error) {
     return (

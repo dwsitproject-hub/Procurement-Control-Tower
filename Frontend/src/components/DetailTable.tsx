@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, downloadFile } from '../lib/api';
+import { ScrollFrame } from './ScrollFrame';
 import {
   FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
 } from '../lib/format';
@@ -51,7 +52,7 @@ interface DetailResponse {
 
 type MultiKey =
   | 'status' | 'matCat' | 'spendCategory' | 'matGroup' | 'plant' | 'company'
-  | 'purchOrg' | 'purchGroup' | 'priority';
+  | 'purchOrg' | 'purchGroup' | 'priority' | 'prDocType' | 'poDocType';
 
 /**
  * Every multi-value filter this table seeds from `initial`, in ONE place.
@@ -63,7 +64,7 @@ type MultiKey =
  */
 const MULTI_KEYS: MultiKey[] = [
   'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company',
-  'purchOrg', 'purchGroup', 'priority',
+  'purchOrg', 'purchGroup', 'priority', 'prDocType', 'poDocType',
 ];
 
 const FILTER_LABELS: Record<MultiKey, string> = {
@@ -76,6 +77,22 @@ const FILTER_LABELS: Record<MultiKey, string> = {
   purchOrg: 'Purch Org',
   purchGroup: 'Purch Grp',
   priority: 'Priority',
+  prDocType: 'PR Type',
+  poDocType: 'PO Type',
+};
+
+/**
+ * Columns made default AFTER people had started saving layouts. A saved layout
+ * lists the columns its owner chose, so a column added later would never
+ * appear for them; these are offered once, appended, to a layout saved before
+ * the table recorded which columns it knew (see `known` below).
+ */
+const ADDED_DEFAULTS = ['poDeliveryDate'];
+
+/** The filter bar's dimensions the table follows (the global filter, 7 Oct 2026). */
+const GLOBAL_KEYS = ['company', 'plant', 'purchOrg', 'year', 'monthKey'] as const;
+const GLOBAL_LABELS: Record<(typeof GLOBAL_KEYS)[number], string> = {
+  company: 'Company', plant: 'Plant', purchOrg: 'Purch Org', year: 'Year', monthKey: 'Month',
 };
 
 const NUMERIC = new Set(['int', 'number', 'money', 'pct']);
@@ -83,10 +100,20 @@ const NUMERIC = new Set(['int', 'number', 'money', 'pct']);
 export function DetailTable({
   initial,
   initialLabel,
+  globalQuery,
 }: {
   /** Pre-applied filters from a drill handoff ("Open in Detail tab", G1.2). */
   initial?: Record<string, string>;
   initialLabel?: string;
+  /**
+   * The filter bar's query string (company, plant, purchOrg, year, monthKey).
+   * The table follows it as every other page does - before 7 Oct 2026 it
+   * ignored the bar entirely, so with the Year filter on by default it would
+   * have listed every year under a bar that said 2026. A Company, Plant or
+   * Purch Org picked in the table's OWN filters takes precedence over the
+   * bar's, since that is the more specific choice.
+   */
+  globalQuery?: string;
 } = {}) {
   const init = initial ?? {};
   const listOf = (k: string): string[] | undefined =>
@@ -143,12 +170,21 @@ export function DetailTable({
     return () => clearTimeout(t);
   }, [search]);
 
+  /** Every column key the table knew when the layout was last saved. */
+  const knownRef = useRef<string[] | null>(null);
+
   // Load the persisted layout once, before the first fetch renders columns.
   useEffect(() => {
     api
-      .get<{ value: { columns?: string[] } | null }>('/api/v1/me/preferences/detail_table_layout')
+      .get<{ value: { columns?: string[]; known?: string[] } | null }>('/api/v1/me/preferences/detail_table_layout')
       .then((p) => {
-        if (p?.value?.columns?.length) setVisible(p.value.columns);
+        const cols = p?.value?.columns;
+        if (!cols?.length) return;
+        knownRef.current = p?.value?.known ?? null;
+        // A layout saved before `known` existed gets the later defaults once.
+        setVisible(p?.value?.known
+          ? cols
+          : [...cols, ...ADDED_DEFAULTS.filter((k) => !cols.includes(k))]);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -165,8 +201,21 @@ export function DetailTable({
    * second string for the export by hand is how an export quietly stops
    * honouring a filter someone added to the table.
    */
+  /** The filter bar's values, as {key: 'a,b'}. */
+  const globalParams = useMemo(() => {
+    const g = new URLSearchParams(globalQuery ?? '');
+    const out: Partial<Record<(typeof GLOBAL_KEYS)[number], string>> = {};
+    for (const k of GLOBAL_KEYS) {
+      const v = g.get(k);
+      if (v) out[k] = v;
+    }
+    return out;
+  }, [globalQuery]);
+
   const filterQuery = useMemo(() => {
     const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(globalParams)) q.set(k, v);
+    // The table's own picks replace the bar's for the same dimension.
     for (const [k, v] of Object.entries(filters)) {
       if (v && v.length > 0) q.set(k, v.join(','));
     }
@@ -181,7 +230,7 @@ export function DetailTable({
       q.set('dir', sort.dir);
     }
     return q.toString();
-  }, [filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort]);
 
   const queryString = useMemo(
     () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
@@ -191,7 +240,7 @@ export function DetailTable({
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
     setPage(0);
-  }, [filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,6 +253,7 @@ export function DetailTable({
         setData(d);
         setRows(d.rows);
         if (visible === null) setVisible(d.columns.filter((c) => c.default).map((c) => c.key));
+        if (knownRef.current === null) knownRef.current = d.columns.map((c) => c.key);
       })
       .catch((e: Error) => {
         if (!cancelled) setError(e.message);
@@ -220,10 +270,14 @@ export function DetailTable({
 
   const persistLayout = useCallback((cols: string[]) => {
     if (!savedRef.current) return;
+    // `known` records which columns existed at save time, so a column added
+    // later can be told apart from one this person removed.
     void api
-      .put('/api/v1/me/preferences/detail_table_layout', { value: { columns: cols } })
+      .put('/api/v1/me/preferences/detail_table_layout', {
+        value: { columns: cols, known: data?.columns.map((c) => c.key) ?? knownRef.current ?? cols },
+      })
       .catch(() => undefined);
-  }, []);
+  }, [data]);
 
   const toggleColumn = (key: string) => {
     setVisible((cur) => {
@@ -388,6 +442,15 @@ export function DetailTable({
           </button>
         </div>
 
+        {Object.keys(globalParams).length > 0 && (
+          <p className="note dt-agechip">
+            Following the filter bar:{' '}
+            {GLOBAL_KEYS.filter((k) => globalParams[k] && !(filters[k as MultiKey]?.length))
+              .map((k) => `${GLOBAL_LABELS[k]} ${globalParams[k]!.split(',').join(', ')}`)
+              .join(' · ') || 'overridden by the table\u2019s own filters'}
+          </p>
+        )}
+
         {ageBand && (
           <p className="note dt-agechip">
             Age filter: <strong>{ageBand === 'past-sla' ? 'over 15 days' : `${ageBand} days`}</strong>{' '}
@@ -486,7 +549,7 @@ export function DetailTable({
         )}
 
         {data && data.totalCount > 0 && (
-          <div className="table-wrap dt-scroll">
+          <ScrollFrame className="table-wrap dt-scroll">
             <table className="data dd-tbl">
               <thead>
                 <tr>
@@ -623,7 +686,7 @@ export function DetailTable({
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollFrame>
         )}
 
         {data && data.totalCount > 0 && (

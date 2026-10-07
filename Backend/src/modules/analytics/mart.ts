@@ -63,6 +63,89 @@ export async function buildMart(
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>
     (await client.query<T>(sql, params)).rows;
 
+  // The fourteen inline KPIs and the five cycle times: one function each, shared
+  // with the filtered path (live.ts), so a filtered figure is this SQL plus
+  // the filter and never a second definition.
+  kpis.push(...await inlineKpis(q, versionId, rules, disabledKpis, {}));
+  kpis.push(...await cycleKpis(q, versionId, minSample, disabledKpis, {}));
+
+  // ───────────────────────────────────────────────────────── persist KPIs
+
+  await insertMany(
+    client,
+    'mart.kpi_value',
+    KPI_COLS,
+    kpis.map((k) => [
+      versionId, k.kpiId, '*', '*', '*', k.status, k.value, k.numerator, k.denominator,
+      k.sampleSize, k.unit, k.currencyBasis, k.severity, k.statusReason,
+      k.detail === null ? null : JSON.stringify(k.detail),
+      k.drillPredicate === null ? null : JSON.stringify(k.drillPredicate),
+    ]),
+  );
+
+  await buildCharts(client, versionId, agingThreshold);
+  // The v1 parity cards and charts (Docs/V1_V2_Parity_Matrix.md).
+  await buildParityMart(client, versionId);
+  void asOfDate;
+}
+
+/** The KPIs inlineKpis() produces, so the live path knows which ids it covers. */
+export const INLINE_KPI_IDS: readonly KpiId[] = [
+  'demand_realism', 'otd_vs_requested', 'expedite_effectiveness', 'grir_over_60d',
+  'commitment_over_60d', 'wbs_compliance', 'sto_share', 'direct_po_share', 'retro_po_rate',
+  'open_items', 'split_sourcing', 'reversal_rate', 'pending_pr_approvals', 'pending_po_approvals',
+];
+
+/**
+ * The fourteen KPIs written directly in the mart build rather than as parity
+ * specs, for the mart (empty filter) AND for a filtered request.
+ *
+ * Until 7 Oct 2026 they had no filtered path at all: under any global filter
+ * they rendered "does not support the global filter yet". With the Year filter
+ * now on by default (the current year, on every page) that would have been
+ * fourteen dashes on first load, so each one now takes the filter - the SAME
+ * query with the clause added, as the parity KPIs and the cycle times do.
+ *
+ * Each block filters the grain its drill opens, so the card and its drill
+ * agree under a filter (the sweep checks this). A block whose grain cannot take
+ * a filter (the scope toggle on GR postings, say) reports itself unavailable
+ * under that filter instead of quietly returning the unfiltered number.
+ */
+export async function inlineKpis(
+  q: <T extends Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]>,
+  versionId: number,
+  rules: RuleSnapshot,
+  disabledKpis: ReadonlySet<string>,
+  filter: GlobalFilter,
+): Promise<KpiRow[]> {
+  const agingThreshold = Number(rules['aging.threshold_days'] ?? 60);
+  const minSample = Number(rules['kpi.min_sample'] ?? 30);
+  const kpis: KpiRow[] = [];
+  const filtered = !isEmptyFilter(filter);
+  const drillOf = (d: Record<string, unknown>) => (filtered ? mergeIntoPredicate(d, filter) : d);
+  /** The filter as a WHERE fragment for one grain, numbered after $1. */
+  const fc = (kind: FactKind, alias: string) => buildFilterClause(filter, kind, alias, 2);
+  /**
+   * Run one block; under a filter, a block that cannot take it reports its
+   * KPIs as unavailable. Unfiltered, a failure is a real fault and is thrown.
+   */
+  const block = async (ids: Array<[KpiId, KpiRow['unit']]>, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (err) {
+      if (!filtered) throw err;
+      for (const [kpiId, unit] of ids) {
+        kpis.push({
+          kpiId, status: 'unavailable', value: null, numerator: null, denominator: null,
+          sampleSize: null, unit, currencyBasis: null, severity: null,
+          statusReason: `Could not compute under the active filter: ${
+            err instanceof Error ? err.message.slice(0, 120) : 'unknown error'}`,
+          detail: null, drillPredicate: null,
+        });
+      }
+    }
+  };
+
   // ─────────────────────────────────── Demand Realism (disabled by V-M01)
 
   if (disabledKpis.has('demand_realism')) {
@@ -83,98 +166,91 @@ export async function buildMart(
       drillPredicate: null,
     });
   } else {
-    const rows = await q<{ req_lead: number | null; material_group: string | null }>(
-      `SELECT (need_by_date - requisition_date) AS req_lead, material_group
-         FROM core.fact_pr_item
-        WHERE dataset_version_id = $1 AND need_by_date IS NOT NULL AND requisition_date IS NOT NULL
-          AND NOT is_deleted`,
-      [versionId],
-    );
-    const actual = await q<{ material_group: string | null; lead: number | null }>(
-      `SELECT pri.material_group, (pol.receipt_date - pri.requisition_date) AS lead
-         FROM core.fact_po_line pol
-         JOIN core.fact_pr_item pri
-           ON pri.dataset_version_id = pol.dataset_version_id
-          AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
-        WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL`,
-      [versionId],
-    );
-    const byGroup = new Map<string, number[]>();
-    const all: number[] = [];
-    for (const r of actual) {
-      if (r.lead === null) continue;
-      all.push(r.lead);
-      const k = r.material_group ?? '?';
-      const list = byGroup.get(k);
-      if (list) list.push(r.lead);
-      else byGroup.set(k, [r.lead]);
-    }
-    const overall = median(all);
-    let evaluated = 0;
-    let realistic = 0;
-    for (const r of rows) {
-      if (r.req_lead === null) continue;
-      const bench = median(byGroup.get(r.material_group ?? '?') ?? []) ?? overall;
-      if (bench === null) continue;
-      evaluated += 1;
-      if (r.req_lead >= bench) realistic += 1;
-    }
-    kpis.push(
-      evaluated < minSample
-        ? nullKpi('demand_realism', 'percent', `Fewer than ${minSample} evaluable requisitions.`, evaluated)
-        : {
-            kpiId: 'demand_realism',
-            status: 'ok',
-            value: (realistic / evaluated) * 100,
-            numerator: realistic,
-            denominator: evaluated,
-            sampleSize: evaluated,
-            unit: 'percent',
-            currencyBasis: null,
-            severity: realistic / evaluated < 0.4 ? 'critical' : 'good',
-            statusReason: null,
-            detail: { actualMedianDays: overall },
-            drillPredicate: { grain: 'pr_item', filters: { demandUnrealistic: true } },
-          },
-    );
+    await block([['demand_realism', 'percent']], async () => {
+      const cp = fc('pr_item', '');
+      const rows = await q<{ req_lead: number | null; material_group: string | null }>(
+        `SELECT (need_by_date - requisition_date) AS req_lead, material_group
+           FROM core.fact_pr_item
+          WHERE dataset_version_id = $1 AND need_by_date IS NOT NULL AND requisition_date IS NOT NULL
+            AND NOT is_deleted${cp.sql}`,
+        [versionId, ...cp.params],
+      );
+      // The benchmark (actual lead time per material group) is filtered the same
+      // way, on the requisition: "realistic" means realistic for this slice.
+      const ca = fc('pr_item', 'pri.');
+      const actual = await q<{ material_group: string | null; lead: number | null }>(
+        `SELECT pri.material_group, (pol.receipt_date - pri.requisition_date) AS lead
+           FROM core.fact_po_line pol
+           JOIN core.fact_pr_item pri
+             ON pri.dataset_version_id = pol.dataset_version_id
+            AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
+          WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL${ca.sql}`,
+        [versionId, ...ca.params],
+      );
+      const byGroup = new Map<string, number[]>();
+      const all: number[] = [];
+      for (const r of actual) {
+        if (r.lead === null) continue;
+        all.push(r.lead);
+        const k = r.material_group ?? '?';
+        const list = byGroup.get(k);
+        if (list) list.push(r.lead);
+        else byGroup.set(k, [r.lead]);
+      }
+      const overall = median(all);
+      let evaluated = 0;
+      let realistic = 0;
+      for (const r of rows) {
+        if (r.req_lead === null) continue;
+        const bench = median(byGroup.get(r.material_group ?? '?') ?? []) ?? overall;
+        if (bench === null) continue;
+        evaluated += 1;
+        if (r.req_lead >= bench) realistic += 1;
+      }
+      kpis.push(
+        evaluated < minSample
+          ? nullKpi('demand_realism', 'percent', `Fewer than ${minSample} evaluable requisitions.`, evaluated)
+          : {
+              kpiId: 'demand_realism',
+              status: 'ok',
+              value: (realistic / evaluated) * 100,
+              numerator: realistic,
+              denominator: evaluated,
+              sampleSize: evaluated,
+              unit: 'percent',
+              currencyBasis: null,
+              severity: realistic / evaluated < 0.4 ? 'critical' : 'good',
+              statusReason: null,
+              detail: { actualMedianDays: overall },
+              drillPredicate: drillOf({ grain: 'pr_item', filters: { demandUnrealistic: true } }),
+            },
+      );
+    });
   }
 
-  // ─────────────────────────── On-Time vs Requested (blocked by D4 / V-M01)
+  // ───────────────────────────── On-Time vs the PO Delivery Date (7 Oct 2026)
   //
-  // v1's v3x-otdr: receipt on or before the REQUESTED date (EBAN-LFDAT), not
-  // the PO promise date. Same gate as Demand Realism — the pathway is fully
-  // built and lights up on the first ingest whose PR export carries a genuine
-  // need-by column, with no code change.
+  // Was: receipt on or before the REQUESTED date (the PR's need-by, EBAN-LFDAT),
+  // which the PR export does not carry, so the card had been disabled by V-M01
+  // since it was built. Now, as asked: the GR date against the PO's own
+  // Delivery Date (EINDT) - the date the order promised. V-M03 still applies:
+  // on about a quarter of lines that date equals the PO date, which makes such
+  // a line late by construction unless it is received the day it is ordered.
 
-  if (disabledKpis.has('otd_vs_requested')) {
-    kpis.push({
-      kpiId: 'otd_vs_requested',
-      status: 'disabled',
-      value: null,
-      numerator: null,
-      denominator: null,
-      sampleSize: null,
-      unit: 'percent',
-      currencyBasis: null,
-      severity: null,
-      statusReason:
-        'Requested delivery date not present in this export (V-M01). On-time is measurable only against the PO promise date (see vendor OTD). Fix: add SAP EBAN-LFDAT to the ME5A variant. See PRD 13.1.1.',
-      detail: null,
-      drillPredicate: null,
-    });
-  } else {
+  await block([['otd_vs_requested', 'percent']], async () => {
+    const c = fc('po_line', '');
     const [row] = await q<{ ok: number; tot: number }>(
-      `SELECT count(*) FILTER (WHERE receipt_date <= need_by_date)::int AS ok,
+      `SELECT count(*) FILTER (WHERE receipt_date <= delivery_date)::int AS ok,
               count(*)::int AS tot
          FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND NOT is_deleted AND NOT is_sto
-          AND receipt_date IS NOT NULL AND need_by_date IS NOT NULL`,
-      [versionId],
+          AND receipt_date IS NOT NULL AND delivery_date IS NOT NULL${c.sql}`,
+      [versionId, ...c.params],
     );
     const tot = row?.tot ?? 0;
     kpis.push(
       tot < minSample
-        ? nullKpi('otd_vs_requested', 'percent', `Fewer than ${minSample} lines carry both a receipt and a requested date.`, tot)
+        ? nullKpi('otd_vs_requested', 'percent', `Fewer than ${minSample} lines carry both a receipt and a PO delivery date.`, tot)
         : {
             kpiId: 'otd_vs_requested',
             status: 'ok',
@@ -187,17 +263,19 @@ export async function buildMart(
             severity: (row?.ok ?? 0) / tot < 0.5 ? 'critical' : (row?.ok ?? 0) / tot < 0.8 ? 'warning' : 'good',
             statusReason: null,
             detail: null,
-            drillPredicate: {
+            drillPredicate: drillOf({
               grain: 'po_line',
               filters: { notDeleted: true, notSto: true, otdrEvaluable: true },
-            },
+            }),
           },
     );
-  }
+  });
 
   // ───────────────────────────────────────────── Expedite Effectiveness
 
-  {
+  await block([['expedite_effectiveness', 'ratio']], async () => {
+    // On the requisition, which is the grain the drill opens.
+    const c = fc('pr_item', 'pri.');
     const rows = await q<{ urgency: number | null; days: number | null }>(
       `SELECT pri.urgency, (pol.document_date - pri.requisition_date) AS days
          FROM core.bridge_pr_po b
@@ -209,8 +287,8 @@ export async function buildMart(
           AND pol.po_no = b.po_no AND pol.po_item = b.po_item
         WHERE b.dataset_version_id = $1 AND b.split_seq = 1
           AND NOT pri.is_deleted AND NOT pol.is_sto
-          AND pri.requisition_date IS NOT NULL AND pol.document_date IS NOT NULL`,
-      [versionId],
+          AND pri.requisition_date IS NOT NULL AND pol.document_date IS NOT NULL${c.sql}`,
+      [versionId, ...c.params],
     );
     // Urgent = {1,2}; standard = {3,4}. Urgency 0 is undefined in the source and
     // excluded from both arms.
@@ -238,39 +316,42 @@ export async function buildMart(
               urgentSample: e.urgentSample,
               standardSample: e.standardSample,
             },
-            drillPredicate: { grain: 'pr_item', filters: { urgencyIn: [1, 2] } },
+            drillPredicate: drillOf({ grain: 'pr_item', filters: { urgencyIn: [1, 2] } }),
           }
         : nullKpi('expedite_effectiveness', 'ratio', 'Not enough matched requisitions in each arm.', e.urgentSample + e.standardSample),
     );
-  }
+  });
 
   // ───────────────────────────────── GR/IR and open commitment > threshold
 
-  {
+  await block([['grir_over_60d', 'percent']], async () => {
+    const c = fc('po_line', '');
     const rows = await q<{ val: number | null; usd: number | null; aging: number | null; ccy: string }>(
       `SELECT still_invoice_val AS val, still_invoice_val_usd AS usd, aging_days AS aging, currency_code AS ccy
          FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
-          AND COALESCE(still_deliver_qty, 0) = 0 AND COALESCE(still_invoice_val, 0) > 0`,
-      [versionId],
+          AND COALESCE(still_deliver_qty, 0) = 0 AND COALESCE(still_invoice_val, 0) > 0${c.sql}`,
+      [versionId, ...c.params],
     );
-    kpis.push(shareKpi('grir_over_60d', rows, agingThreshold, 'warning'));
-  }
+    kpis.push(withDrill(shareKpi('grir_over_60d', rows, agingThreshold, 'warning'), drillOf));
+  });
 
-  {
+  await block([['commitment_over_60d', 'percent']], async () => {
+    const c = fc('po_line', '');
     const rows = await q<{ val: number | null; usd: number | null; aging: number | null; ccy: string }>(
       `SELECT still_deliver_val AS val, still_deliver_val_usd AS usd, aging_days AS aging, currency_code AS ccy
          FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
-          AND COALESCE(still_deliver_val, 0) > 0`,
-      [versionId],
+          AND COALESCE(still_deliver_val, 0) > 0${c.sql}`,
+      [versionId, ...c.params],
     );
-    kpis.push(shareKpi('commitment_over_60d', rows, agingThreshold, 'warning'));
-  }
+    kpis.push(withDrill(shareKpi('commitment_over_60d', rows, agingThreshold, 'warning'), drillOf));
+  });
 
   // ──────────────────────────────────────────────────── WBS compliance
 
-  {
+  await block([['wbs_compliance', 'count']], async () => {
+    const c = fc('pr_item', '');
     const rows = await q<{ violations: number; prs: number; over: number; indet: number; value: number | null }>(
       `SELECT count(*) FILTER (WHERE wbs_status = 'violation')::int AS violations,
               count(DISTINCT pr_no) FILTER (WHERE wbs_status = 'violation')::int AS prs,
@@ -278,8 +359,8 @@ export async function buildMart(
               count(*) FILTER (WHERE wbs_status = 'indeterminate')::int AS indet,
               COALESCE(sum(total_value_idr) FILTER (WHERE wbs_status = 'violation'), 0) AS value
          FROM core.fact_pr_item
-        WHERE dataset_version_id = $1`,
-      [versionId],
+        WHERE dataset_version_id = $1${c.sql}`,
+      [versionId, ...c.params],
     );
     const r = rows[0]!;
     kpis.push({
@@ -302,112 +383,137 @@ export async function buildMart(
         // The rule in force must appear wherever the number does.
         thresholdLabel: wbsLabel(rules),
       },
-      drillPredicate: { grain: 'pr_item', filters: { wbsStatus: 'violation' } },
+      drillPredicate: drillOf({ grain: 'pr_item', filters: { wbsStatus: 'violation' } }),
     });
-  }
-
-  // ──────────────────────────────────────────────────── cycle-time KPIs
-
-  kpis.push(...await cycleKpis(q, versionId, minSample, disabledKpis, {}));
+  });
 
   // ─────────────────────────────────────────────── operational counts
 
-  const counts = await q<{
-    po_lines: number; sto_lines: number; direct_po: number; dangling: number; retro: number;
-    open_items: number; open_emg: number; open_urg: number; token: number; exempt: number;
-  }>(
-    `SELECT count(*)::int AS po_lines,
-            count(*) FILTER (WHERE is_sto)::int AS sto_lines,
-            -- A direct PO carries no requisition reference AT ALL. A dangling
-            -- line DOES carry one that simply does not resolve — a different
-            -- condition, counted separately so the two are never conflated.
-            count(*) FILTER (WHERE link_status IS NULL)::int AS direct_po,
-            count(*) FILTER (WHERE link_status = 'dangling')::int AS dangling,
-            count(*) FILTER (WHERE is_retro_po)::int AS retro,
-            count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered'))::int AS open_items,
-            count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered') AND urgency <= 1)::int AS open_emg,
-            count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered') AND urgency = 2)::int AS open_urg,
-            count(*) FILTER (WHERE is_token_price)::int AS token,
-            count(*) FILTER (WHERE release_exempt)::int AS exempt
-       FROM core.fact_po_line WHERE dataset_version_id = $1`,
-    [versionId],
-  );
-  const c = counts[0]!;
+  let exemptLines = 0;
+  await block(
+    [['sto_share', 'percent'], ['direct_po_share', 'percent'], ['retro_po_rate', 'count'], ['open_items', 'count']],
+    async () => {
+      const cc = fc('po_line', '');
+      const counts = await q<{
+        po_lines: number; sto_lines: number; direct_po: number; dangling: number; retro: number;
+        open_items: number; open_emg: number; open_urg: number; token: number; exempt: number;
+      }>(
+        `SELECT count(*)::int AS po_lines,
+                count(*) FILTER (WHERE is_sto)::int AS sto_lines,
+                -- A direct PO carries no requisition reference AT ALL. A dangling
+                -- line DOES carry one that simply does not resolve — a different
+                -- condition, counted separately so the two are never conflated.
+                count(*) FILTER (WHERE link_status IS NULL)::int AS direct_po,
+                count(*) FILTER (WHERE link_status = 'dangling')::int AS dangling,
+                count(*) FILTER (WHERE is_retro_po)::int AS retro,
+                count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered'))::int AS open_items,
+                count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered') AND urgency <= 1)::int AS open_emg,
+                count(*) FILTER (WHERE status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered') AND urgency = 2)::int AS open_urg,
+                count(*) FILTER (WHERE is_token_price)::int AS token,
+                count(*) FILTER (WHERE release_exempt)::int AS exempt
+           FROM core.fact_po_line WHERE dataset_version_id = $1${cc.sql}`,
+        [versionId, ...cc.params],
+      );
+      const c = counts[0]!;
+      exemptLines = c.exempt;
 
-  kpis.push(simpleCount('sto_share', (c.sto_lines / Math.max(c.po_lines, 1)) * 100, 'percent', c.po_lines,
-    { stoLines: c.sto_lines, totalLines: c.po_lines }, { grain: 'po_line', filters: { isSto: true } }));
+      kpis.push(simpleCount('sto_share', (c.sto_lines / Math.max(c.po_lines, 1)) * 100, 'percent', c.po_lines,
+        { stoLines: c.sto_lines, totalLines: c.po_lines }, drillOf({ grain: 'po_line', filters: { isSto: true } })));
 
-  kpis.push(simpleCount('direct_po_share', (c.direct_po / Math.max(c.po_lines, 1)) * 100, 'percent', c.po_lines,
-    { directLines: c.direct_po, danglingLines: c.dangling, totalLines: c.po_lines },
-    { grain: 'po_line', filters: { directPo: true } }));
+      kpis.push(simpleCount('direct_po_share', (c.direct_po / Math.max(c.po_lines, 1)) * 100, 'percent', c.po_lines,
+        { directLines: c.direct_po, danglingLines: c.dangling, totalLines: c.po_lines },
+        drillOf({ grain: 'po_line', filters: { directPo: true } })));
 
-  kpis.push(simpleCount('retro_po_rate', c.retro, 'count', c.po_lines, { retroLines: c.retro },
-    { grain: 'po_line', filters: { isRetroPo: true } }));
+      kpis.push(simpleCount('retro_po_rate', c.retro, 'count', c.po_lines, { retroLines: c.retro },
+        drillOf({ grain: 'po_line', filters: { isRetroPo: true } })));
 
-  kpis.push(simpleCount('open_items', c.open_items, 'count', c.po_lines,
-    {
-      chip_emergency: c.open_emg, chip_urgent: c.open_urg,
-      chip_standard: c.open_items - c.open_emg - c.open_urg,
+      kpis.push(simpleCount('open_items', c.open_items, 'count', c.po_lines,
+        {
+          chip_emergency: c.open_emg, chip_urgent: c.open_urg,
+          chip_standard: c.open_items - c.open_emg - c.open_urg,
+        },
+        drillOf({ grain: 'po_line', filters: { statusIn: ['PO-Not Approved', 'HOLD PO', 'PO-No GR', 'Partially Delivered'] } })));
     },
-    { grain: 'po_line', filters: { statusIn: ['PO-Not Approved', 'HOLD PO', 'PO-No GR', 'Partially Delivered'] } }));
-
-  const split = await q<{ items: number; maxlines: number }>(
-    `SELECT count(DISTINCT (pr_no, pr_item)) FILTER (WHERE split_total > 1)::int AS items,
-            COALESCE(max(split_total), 0)::int AS maxlines
-       FROM core.bridge_pr_po WHERE dataset_version_id = $1`,
-    [versionId],
-  );
-  kpis.push(simpleCount('split_sourcing', split[0]!.items, 'count', null,
-    { maxPoLinesPerPrItem: split[0]!.maxlines, entityUnit: 'PR items' }, { grain: 'po_line', filters: { splitSourced: true } }));
-
-  const rev = await q<{ receipts: number; reversals: number }>(
-    `SELECT count(*) FILTER (WHERE movement_type = '101')::int AS receipts,
-            count(*) FILTER (WHERE posting_class = 'reversal')::int AS reversals
-       FROM core.fact_gr_posting WHERE dataset_version_id = $1`,
-    [versionId],
-  );
-  const rv = rev[0]!;
-  kpis.push(simpleCount('reversal_rate', rv.receipts > 0 ? (rv.reversals / rv.receipts) * 100 : 0, 'percent',
-    rv.receipts, { receipts: rv.receipts, reversals: rv.reversals },
-    { grain: 'gr_posting', filters: { postingClass: 'reversal' } }));
-
-  const pendPr = await q<{ n: number }>(
-    `SELECT count(DISTINCT (pr_no, pr_item))::int AS n FROM core.fact_pr_release
-      WHERE dataset_version_id = $1 AND approve_date IS NULL`,
-    [versionId],
-  );
-  kpis.push(simpleCount('pending_pr_approvals', pendPr[0]!.n, 'count', null, { entityUnit: 'PR items' },
-    { grain: 'pr_release', filters: { pending: true } }));
-
-  // Release-exempt POs are excluded: they have no release record and can never be
-  // approved, so leaving them in the queue would strand them permanently.
-  const pendPo = await q<{ n: number }>(
-    `SELECT count(DISTINCT po_no)::int AS n FROM core.fact_po_line
-      WHERE dataset_version_id = $1 AND po_release_state = 'pending'`,
-    [versionId],
-  );
-  kpis.push(simpleCount('pending_po_approvals', pendPo[0]!.n, 'count', null,
-    { releaseExemptExcluded: c.exempt, entityUnit: 'POs' },
-    { grain: 'po_line', filters: { poReleaseState: 'pending' } }));
-
-  // ───────────────────────────────────────────────────────── persist KPIs
-
-  await insertMany(
-    client,
-    'mart.kpi_value',
-    KPI_COLS,
-    kpis.map((k) => [
-      versionId, k.kpiId, '*', '*', '*', k.status, k.value, k.numerator, k.denominator,
-      k.sampleSize, k.unit, k.currencyBasis, k.severity, k.statusReason,
-      k.detail === null ? null : JSON.stringify(k.detail),
-      k.drillPredicate === null ? null : JSON.stringify(k.drillPredicate),
-    ]),
   );
 
-  await buildCharts(client, versionId, agingThreshold);
-  // The v1 parity cards and charts (Docs/V1_V2_Parity_Matrix.md).
-  await buildParityMart(client, versionId);
-  void asOfDate;
+  await block([['split_sourcing', 'count']], async () => {
+    // Joined to the order line so the filter has columns to act on; every
+    // bridge row has its order line, so the unfiltered count is unchanged.
+    const c = fc('po_line', 'pol.');
+    const split = await q<{ items: number; maxlines: number }>(
+      `SELECT count(DISTINCT (b.pr_no, b.pr_item)) FILTER (WHERE b.split_total > 1)::int AS items,
+              COALESCE(max(b.split_total), 0)::int AS maxlines
+         FROM core.bridge_pr_po b
+         JOIN core.fact_po_line pol
+           ON pol.dataset_version_id = b.dataset_version_id
+          AND pol.po_no = b.po_no AND pol.po_item = b.po_item
+        WHERE b.dataset_version_id = $1${c.sql}`,
+      [versionId, ...c.params],
+    );
+    kpis.push(simpleCount('split_sourcing', split[0]!.items, 'count', null,
+      { maxPoLinesPerPrItem: split[0]!.maxlines, entityUnit: 'PR items' },
+      drillOf({ grain: 'po_line', filters: { splitSourced: true } })));
+  });
+
+  await block([['reversal_rate', 'percent']], async () => {
+    const c = fc('gr_posting', '');
+    const rev = await q<{ receipts: number; reversals: number }>(
+      `SELECT count(*) FILTER (WHERE movement_type = '101')::int AS receipts,
+              count(*) FILTER (WHERE posting_class = 'reversal')::int AS reversals
+         FROM core.fact_gr_posting WHERE dataset_version_id = $1${c.sql}`,
+      [versionId, ...c.params],
+    );
+    const rv = rev[0]!;
+    kpis.push(simpleCount('reversal_rate', rv.receipts > 0 ? (rv.reversals / rv.receipts) * 100 : 0, 'percent',
+      rv.receipts, { receipts: rv.receipts, reversals: rv.reversals },
+      drillOf({ grain: 'gr_posting', filters: { postingClass: 'reversal' } })));
+  });
+
+  await block([['pending_pr_approvals', 'count']], async () => {
+    /*
+     * PR items in the facts with an approval step still open. Counted on the
+     * REQUISITION since 7 Oct 2026 (was: distinct items among the release rows)
+     * so a Year or Month filter means the year the requisition was raised: on
+     * the release rows themselves the only date is the approval date, which an
+     * open step does not have, and every pending item vanished under the
+     * default Year filter. 14 release-only items whose requisition is not in
+     * the facts (excluded, or not in the PR List) no longer count - they could
+     * never be opened as requisitions anyway.
+     */
+    const c = fc('pr_item', '');
+    const pendPr = await q<{ n: number }>(
+      `SELECT count(*)::int AS n FROM core.fact_pr_item
+        WHERE dataset_version_id = $1
+          AND EXISTS (SELECT 1 FROM core.fact_pr_release r
+                       WHERE r.dataset_version_id = core.fact_pr_item.dataset_version_id
+                         AND r.pr_no = core.fact_pr_item.pr_no AND r.pr_item = core.fact_pr_item.pr_item
+                         AND r.approve_date IS NULL)${c.sql}`,
+      [versionId, ...c.params],
+    );
+    kpis.push(simpleCount('pending_pr_approvals', pendPr[0]!.n, 'count', null, { entityUnit: 'PR items' },
+      drillOf({ grain: 'pr_item', filters: { releasePending: true } })));
+  });
+
+  await block([['pending_po_approvals', 'count']], async () => {
+    // Release-exempt POs are excluded: they have no release record and can
+    // never be approved, so leaving them in the queue would strand them.
+    const c = fc('po_line', '');
+    const pendPo = await q<{ n: number }>(
+      `SELECT count(DISTINCT po_no)::int AS n FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND po_release_state = 'pending'${c.sql}`,
+      [versionId, ...c.params],
+    );
+    kpis.push(simpleCount('pending_po_approvals', pendPo[0]!.n, 'count', null,
+      { releaseExemptExcluded: exemptLines, entityUnit: 'POs' },
+      drillOf({ grain: 'po_line', filters: { poReleaseState: 'pending' } })));
+  });
+
+  return kpis;
+}
+
+/** A KPI built by a shared helper, with its drill re-issued under the filter. */
+function withDrill(k: KpiRow, drillOf: (d: Record<string, unknown>) => Record<string, unknown> | null): KpiRow {
+  return k.drillPredicate === null ? k : { ...k, drillPredicate: drillOf(k.drillPredicate) };
 }
 
 // ────────────────────────────────────────────────────────────────── helpers
@@ -449,18 +555,26 @@ export async function cycleKpis(
     isEmptyFilter(filter) ? drill : mergeIntoPredicate(drill, filter);
 
   // Every cycle card drills to its own evaluable lines (user ask 5 Aug 2026);
-  // the filters reproduce the exact >= 0 population the values come from.
-  const cycles: Array<[KpiId, string, FactKind, Record<string, unknown>]> = [
+  // the filters reproduce the exact population the values come from - >= 0
+  // for the three spans, every value for delivery (below).
+  const cycles: Array<[KpiId, string, FactKind, Record<string, unknown>, boolean?]> = [
     ['cycle_pr_approval', 'release_final_date - requisition_date', 'pr_item',
       { grain: 'pr_item', filters: { released: true } }],
     ['cycle_sourcing', 'sourcing_days', 'po_line',
       { grain: 'po_line', filters: { measureNonNeg: 'sourcing' } }],
     ['cycle_po_approval', 'po_approval_days', 'po_line',
       { grain: 'po_line', filters: { measureNonNeg: 'po_approval' } }],
-    ['cycle_delivery', 'delivery_days', 'po_line',
-      { grain: 'po_line', filters: { measureNonNeg: 'delivery' } }],
+    /*
+     * "Plan Deliv. -> GR" since 7 Oct 2026 (was PO released -> GR): the GR date
+     * against the PO's own Delivery Date (EINDT), i.e. how late against the
+     * promise. Early receipts are NEGATIVE and are kept: they are 37% of
+     * received lines, and dropping them would report only the late half and
+     * call it the average (25.3 days vs 11.6 on the reference data).
+     */
+    ['cycle_delivery', 'delivery_vs_promise_days', 'po_line',
+      { grain: 'po_line', filters: { deliveryVsPlanEvaluable: true } }, true],
   ];
-  for (const [kpiId, expr, kind, drill] of cycles) {
+  for (const [kpiId, expr, kind, drill, keepNegative] of cycles) {
     const table = kind === 'pr_item' ? 'core.fact_pr_item' : 'core.fact_po_line';
     const clause = buildFilterClause(filter, kind, '', 2);
     const rows = await q<{ d: number | null }>(
@@ -468,7 +582,7 @@ export async function cycleKpis(
         WHERE dataset_version_id = $1 AND (${expr}) IS NOT NULL${clause.sql}`,
       [versionId, ...clause.params],
     );
-    const vals = rows.map((x) => x.d!).filter((d) => d !== null && d >= 0);
+    const vals = rows.map((x) => x.d!).filter((d) => d !== null && (keepNegative === true || d >= 0));
     // Average headline (decision 3 Aug 2026, v1 parity); median in the subtitle.
     out.push(cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg', drillOf(drill)));
   }
@@ -617,26 +731,7 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
   // recomputed under a filter, and this chart is on a page whose filter bar is
   // the first thing a reader touches.
 
-  // ordered vs received by PO month (STO included in delivery)
-  {
-    const r = await client.query<{ mk: string; ordered: number; received: number }>(
-      `SELECT to_char(document_date, 'YYYY-MM') AS mk,
-              count(*)::int AS ordered,
-              count(*) FILTER (WHERE receipt_date IS NOT NULL)::int AS received
-         FROM core.fact_po_line
-        WHERE dataset_version_id = $1 AND NOT is_deleted
-        GROUP BY 1 ORDER BY 1`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) => {
-      push('delivery_ordered_vs_received', 'ordered', 'PO lines', x.mk, monthLabel(x.mk), i + 1,
-        x.ordered, x.ordered, 'count',
-        { grain: 'po_line', filters: { monthKey: x.mk, notDeleted: true } });
-      push('delivery_ordered_vs_received', 'received', 'Lines with GR', x.mk, monthLabel(x.mk), i + 1,
-        x.received, x.received, 'count',
-        { grain: 'po_line', filters: { monthKey: x.mk, hasReceipt: true, notDeleted: true } });
-    });
-  }
+  // delivery_ordered_vs_received moved to PARITY_CHARTS on 7 Oct 2026 (filterable).
 
   // aging bands on open lines
   // aging_bands moved to PARITY_CHARTS on 23 Sep 2026, with the shared six
@@ -683,56 +778,11 @@ async function buildCharts(client: pg.PoolClient, versionId: number, agingThresh
     );
   }
 
-  // pending PR approvals by PIC
-  {
-    const r = await client.query<{ pic: string | null; n: number }>(
-      `SELECT pic_release AS pic, count(*)::int AS n FROM core.fact_pr_release
-        WHERE dataset_version_id = $1 AND approve_date IS NULL
-        GROUP BY 1 ORDER BY n DESC LIMIT 20`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) =>
-      push('pending_pr_by_pic', 'pending', 'Pending', x.pic ?? '?', x.pic ?? '(unknown)', i + 1,
-        x.n, x.n, 'count', { grain: 'pr_release', filters: { picRelease: x.pic, pending: true } }),
-    );
-  }
-
-  // WBS violations by plant
-  {
-    const r = await client.query<{ plant: string; n: number }>(
-      `SELECT plant, count(*)::int AS n FROM core.fact_pr_item
-        WHERE dataset_version_id = $1 AND wbs_status = 'violation'
-        GROUP BY 1 ORDER BY n DESC LIMIT 20`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) =>
-      push('wbs_by_plant', 'violations', 'Violations', x.plant, x.plant, i + 1, x.n, x.n, 'count',
-        { grain: 'pr_item', filters: { wbsStatus: 'violation', plant: x.plant } }),
-    );
-  }
-
-  // movement type mix
-  {
-    const r = await client.query<{ mt: string; cls: string; n: number }>(
-      `SELECT movement_type AS mt, posting_class AS cls, count(*)::int AS n
-         FROM core.fact_gr_posting WHERE dataset_version_id = $1
-        GROUP BY 1,2 ORDER BY n DESC`,
-      [versionId],
-    );
-    r.rows.forEach((x, i) =>
-      push('movement_mix', 'postings', 'Postings', x.mt, `${x.mt} (${x.cls})`, i + 1, x.n, x.n, 'count',
-        { grain: 'gr_posting', filters: { movementType: x.mt } }),
-    );
-  }
+  // pending_pr_by_pic, wbs_by_plant and movement_mix moved to PARITY_CHARTS on
+  // 7 Oct 2026, so they recompute under the global filter.
 
   await insertMany(client, 'mart.chart_series', CHART_COLS, rows);
   void agingThreshold;
-}
-
-function monthLabel(mk: string): string {
-  const names = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const [y, m] = mk.split('-');
-  return `${names[Number(m)] ?? m} ${y}`;
 }
 
 export { CHART_META };

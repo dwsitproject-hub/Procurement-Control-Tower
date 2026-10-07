@@ -5,10 +5,10 @@ import { formatNumber } from '../lib/format';
 /**
  * Global filter bar — v1's gms('co') / gms('mo') / gms('pl') controls.
  *
- * Selections are lifted to App so every KPI and chart request carries them, and
- * are encoded in the URL so a filtered view is shareable. The recipient's own
- * data scope is always re-applied server-side, so a shared link can never widen
- * what someone is allowed to see.
+ * Selections are lifted to App so every KPI and chart request carries them.
+ * They are NOT in the URL (this said they were; nothing ever wrote them there).
+ * The Year starts on the data's current year (App, 7 Oct 2026). The reader's
+ * own data scope is always re-applied server-side.
  */
 
 export interface GlobalFilterState {

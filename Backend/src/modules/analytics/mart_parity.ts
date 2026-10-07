@@ -14,6 +14,7 @@ import {
 } from '@pct/rules';
 import { sizeBandLabelSql, spendCategoryWithPlantSql } from '@pct/rules';
 import { insertMany } from '../../db/client.js';
+import type { FactKind } from './globalfilter.js';
 
 // Statuses v1 treats as "open".
 const OPEN = `('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`;
@@ -883,7 +884,7 @@ interface ChartSpec {
    * otherwise. A PR-grain spec that resolves each requisition's order in a
    * subquery mentions fact_po_line and would be inferred as po_line.
    */
-  filterKind?: 'pr_item' | 'po_line' | 'gr_posting';
+  filterKind?: FactKind;
 }
 
 /**
@@ -945,7 +946,7 @@ interface ChartSpec {
  * where a reader will meet it.
  */
 const PR_FLOW_BASE = `WITH pr AS (
-    SELECT pri.pr_no, pri.pr_item, pri.is_deleted,
+    SELECT pri.pr_no, pri.pr_item, pri.is_deleted, pri.requisition_date AS rd,
            to_char(pri.requisition_date, 'YYYY-MM') AS rm,
            (SELECT CASE WHEN min(pl.document_date) IS NULL THEN NULL
                         ELSE GREATEST(to_char(min(pl.document_date), 'YYYY-MM'),
@@ -963,8 +964,11 @@ const PR_FLOW_BASE = `WITH pr AS (
     SELECT pm      FROM pr WHERE pm IS NOT NULL
   )`;
 
-/** One series of the flow chart: the spine, its phase, and its own drill. */
-const prFlowSeries = (phase: string, joinOn: string): string =>
+/**
+ * One series of the flow chart: the spine, its phase, and its own drill. `band`
+ * narrows the brought-forward stock to one age band (below).
+ */
+const prFlowSeries = (phase: string, joinOn: string, band?: string): string =>
   `${PR_FLOW_BASE}
    SELECT s.mk AS bucket_key,
           to_char(to_date(s.mk, 'YYYY-MM'), 'Mon YYYY') AS bucket_label,
@@ -972,10 +976,31 @@ const prFlowSeries = (phase: string, joinOn: string): string =>
           count(pr.pr_no)::int AS row_count,
           jsonb_build_object('grain','pr_item','filters',
             jsonb_build_object('prFlow',
-              jsonb_build_object('phase','${phase}','month', s.mk))) AS drill
+              jsonb_build_object('phase','${phase}','month', s.mk${band === undefined ? '' : `, 'band', '${band}'`}))) AS drill
      FROM spine s
      LEFT JOIN pr ON ${joinOn}
     GROUP BY 1,2 ORDER BY 1`;
+
+/**
+ * The brought-forward stock split by how long each requisition had been
+ * waiting WHEN THE MONTH OPENED (requested 7 Oct 2026, for the waterfall): the
+ * same six bands as Open Items, measured from the raise date to the 1st of the
+ * month. The six add up to `carried_in` exactly - every brought-forward
+ * requisition was raised before the month, so its age is at least one day and
+ * falls in exactly one band.
+ */
+const CARRIED_IN_BAND_SERIES: ChartSpec[] = AGE_BANDS.map((b, idx) => ({
+  chartId: 'pr_by_month',
+  seriesKey: `carried_in_b${idx}`,
+  filterKind: 'pr_item' as const,
+  filterAlias: 'pri.',
+  seriesLabel: `Brought forward ${b.label}`,
+  unit: 'count',
+  sql: prFlowSeries('carried_in',
+    `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk
+     AND ${ageBandPredicateSql(`(to_date(s.mk, 'YYYY-MM') - pr.rd)`, b.key)}`,
+    b.key),
+}));
 
 /** Six PO-approval bands (user decision 4 Aug 2026), same-day first. */
 const APPR6_BUCKET = `CASE WHEN d <= 0 THEN '0d' WHEN d <= 3 THEN '1-3d' WHEN d <= 7 THEN '4-7d'
@@ -1127,6 +1152,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
     seriesLabel: 'Cancelled (by month raised)', unit: 'count',
     sql: prFlowSeries('cancelled', `pr.is_deleted AND pr.rm = s.mk`),
   },
+  ...CARRIED_IN_BAND_SERIES,
 
   // ── Executive Summary charts (022) ──
   //
@@ -2547,6 +2573,66 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM r WHERE rk > 8
           HAVING count(*) > 0
           ORDER BY 3 DESC NULLS LAST`,
+  },
+  // ── Four charts moved here from mart.ts buildCharts (7 Oct 2026) ──
+  //
+  // As inline builders they could not be recomputed under the global filter,
+  // and showed every year with a "filter NOT applied" note - which, with the
+  // Year filter now on by default, was the Delivery page's first impression.
+  // Same SQL and drills as before, written as specs.
+  {
+    chartId: 'delivery_ordered_vs_received', seriesKey: 'ordered', seriesLabel: 'PO lines', unit: 'count',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'delivery_ordered_vs_received', seriesKey: 'received', seriesLabel: 'Lines with GR', unit: 'count',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 count(*) FILTER (WHERE receipt_date IS NOT NULL)::numeric AS value,
+                 count(*) FILTER (WHERE receipt_date IS NOT NULL)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'hasReceipt',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    // Pending release STEPS by the person they wait on. Filtered, like every
+    // PR-release figure, by the year/month the requisition was raised.
+    chartId: 'pending_pr_by_pic', seriesKey: 'pending', seriesLabel: 'Pending', unit: 'count',
+    filterKind: 'pr_release',
+    sql: `SELECT COALESCE(pic_release, '?') AS bucket_key,
+                 COALESCE(pic_release, '(unknown)') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_release','filters',
+                   jsonb_build_object('picRelease', pic_release,'pending',true)) AS drill
+            FROM core.fact_pr_release WHERE dataset_version_id = $1 AND approve_date IS NULL
+           GROUP BY pic_release ORDER BY 3 DESC LIMIT 20`,
+  },
+  {
+    chartId: 'wbs_by_plant', seriesKey: 'violations', seriesLabel: 'Violations', unit: 'count',
+    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('wbsStatus','violation','plant', plant)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND wbs_status = 'violation'
+           GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20`,
+  },
+  {
+    chartId: 'movement_mix', seriesKey: 'postings', seriesLabel: 'Postings', unit: 'count',
+    filterKind: 'gr_posting',
+    sql: `SELECT movement_type AS bucket_key, movement_type || ' (' || posting_class || ')' AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','gr_posting','filters',
+                   jsonb_build_object('movementType', movement_type)) AS drill
+            FROM core.fact_gr_posting WHERE dataset_version_id = $1
+           GROUP BY movement_type, posting_class ORDER BY 3 DESC`,
   },
 ];
 

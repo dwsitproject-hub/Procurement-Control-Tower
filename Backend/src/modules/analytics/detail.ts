@@ -81,6 +81,12 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'supplier',        label: 'Vendor Name',            sql: 'supplier',            type: 'string', default: true,  sortable: true },
   { key: 'poNextApprover',  label: 'PO Next Approver',       sql: 'po_next_approver',    type: 'string', default: false, sortable: true },
   { key: 'poaDays',         label: 'POA(d)',                 sql: 'poa_days',            type: 'int',    default: false, sortable: true },
+  // 037. The order's promised delivery date (EINDT): what AVG Delivery LT and
+  // On-Time measure the GR date against, shown beside the GR date it is
+  // compared with. Default on, as asked 7 Oct 2026.
+  { key: 'prDocType',       label: 'PR Type',                sql: 'pr_doc_type',         type: 'string', default: false, sortable: true },
+  { key: 'poDocType',       label: 'PO Type',                sql: 'po_doc_type',         type: 'string', default: false, sortable: true },
+  { key: 'poDeliveryDate',  label: 'PO Delivery Date',       sql: 'po_delivery_date',    type: 'date',   default: true,  sortable: true },
   { key: 'grDate',          label: 'GR Date',                sql: 'gr_date',             type: 'date',   default: true,  sortable: true },
   { key: 'delivDays',       label: 'Deliv(d)',               sql: 'deliv_days',          type: 'int',    default: false, sortable: true },
   { key: 'srcDays',         label: 'Src(d)',                 sql: 'src_days',            type: 'int',    default: false, sortable: true },
@@ -211,6 +217,9 @@ export interface DetailFilters {
   monthKey?: string[];
   /** 'YYYY', on the same date as monthKey. */
   year?: string[];
+  /** The requisition's / the order's SAP document type (037). */
+  prDocType?: string[];
+  poDocType?: string[];
   search?: string;
   /**
    * One of the four age bands, or 'past-sla' for everything beyond the first.
@@ -245,7 +254,7 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'year', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
 
@@ -365,6 +374,8 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     priority: list('priority'),
     monthKey: list('monthKey'),
     year: list('year')?.filter((y) => /^\d{4}$/.test(y)),
+    prDocType: list('prDocType'),
+    poDocType: list('poDocType'),
     search: q['q'] === undefined ? undefined : String(q['q']),
     ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
     moneyState: q['moneyState'] === undefined ? undefined : String(q['moneyState']),
@@ -406,6 +417,8 @@ export function describeDetailFilters(
     ['priority', 'Priority'],
     ['monthKey', 'Month'],
     ['year', 'Year'],
+    ['prDocType', 'PR Type'],
+    ['poDocType', 'PO Type'],
   ];
   for (const [key, label] of listLabels) {
     const v = filters[key] as string[] | undefined;
@@ -467,6 +480,8 @@ const FACETS: { name: keyof DetailFilters & string; col: string }[] = [
   { name: 'purchOrg', col: 'purch_org' },
   { name: 'purchGroup', col: 'purch_group' },
   { name: 'priority', col: 'p_cat' },
+  { name: 'prDocType', col: 'pr_doc_type' },
+  { name: 'poDocType', col: 'po_doc_type' },
 ];
 
 /**
@@ -517,6 +532,13 @@ function buildDetailWhere(
   if (filters.year && filters.year.length > 0) {
     params.push(filters.year);
     where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY') = ANY($${params.length})`);
+  }
+  for (const [key, col] of [['prDocType', 'd.pr_doc_type'], ['poDocType', 'd.po_doc_type']] as const) {
+    const vals = filters[key];
+    if (vals && vals.length > 0 && omit !== key) {
+      params.push(vals);
+      where.push(`${col} = ANY($${params.length})`);
+    }
   }
 
   // Toggles are NOT omitted for any facet: they narrow the population the

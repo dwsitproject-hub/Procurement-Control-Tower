@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { ApiError, api, downloadFile, type DrillPage } from '../lib/api';
 import { FLAG_META, STATUS_PILL, formatCell, formatNumber, moneyCellText } from '../lib/format';
+import { ScrollFrame } from './ScrollFrame';
+import {
+  ColumnChooser, SortButton, useColumnLayout, useHeaderDrag, type SortState,
+} from './TableTools';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
 function agingStyle(days: number): React.CSSProperties | undefined {
@@ -36,6 +40,21 @@ export function DrillModal({
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  /**
+   * Sorted on the SERVER (7 Oct 2026): the panel holds 200 rows of possibly
+   * thousands, and sorting only those would put the largest of the first 200
+   * at the top rather than the largest of all.
+   */
+  const [sort, setSort] = useState<SortState>(null);
+  const sortQs = sort ? `&sort=${encodeURIComponent(sort.key)}&dir=${sort.dir}` : '';
+  // Column choice and order, remembered per grain: a PO-line drill and a GR
+  // drill have different columns, and choosing for one must not hide the other's.
+  const layout = useColumnLayout(page ? `drill_layout_${page.grain}` : null, page?.columns ?? null);
+  const thProps = useHeaderDrag(layout.reorder);
+  const byKey = new Map((page?.columns ?? []).map((c) => [c.key, c]));
+  const shownCols = layout.visible
+    .map((k) => byKey.get(k))
+    .filter((c): c is NonNullable<typeof c> => c !== undefined);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -49,7 +68,7 @@ export function DrillModal({
     let cancelled = false;
     setLoading(true);
     api
-      .get<DrillPage>(`/api/v1/drill/${token}?limit=200`)
+      .get<DrillPage>(`/api/v1/drill/${token}?limit=200${sortQs}`)
       .then((d) => {
         if (cancelled) return;
         setPage(d);
@@ -70,7 +89,7 @@ export function DrillModal({
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, sortQs]);
 
   /**
    * Export every row behind this figure.
@@ -91,8 +110,14 @@ export function DrillModal({
     try {
       // The heading the user is looking at, so the file is named after it.
       const shown = label || page?.label || '';
+      // The file follows the screen: the columns shown, in their order, and
+      // the sort.
+      const q = new URLSearchParams();
+      if (shown) q.set('label', shown);
+      if (shownCols.length > 0) q.set('cols', shownCols.map((c) => c.key).join(','));
+      if (sort) { q.set('sort', sort.key); q.set('dir', sort.dir); }
       const r = await downloadFile(
-        `/api/v1/drill/${token}/export.xlsx${shown ? `?label=${encodeURIComponent(shown)}` : ''}`,
+        `/api/v1/drill/${token}/export.xlsx${q.toString() ? `?${q.toString()}` : ''}`,
         'pct-drill.xlsx',
       );
       const n = r.rows ?? 0;
@@ -119,7 +144,7 @@ export function DrillModal({
 
   const loadMore = async () => {
     if (!cursor) return;
-    const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}`);
+    const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}${sortQs}`);
     setRows((r) => [...r, ...d.rows]);
     setCursor(d.nextCursor);
   };
@@ -136,6 +161,9 @@ export function DrillModal({
         <header>
           <h3 id="drill-title">{'\u{1F50D} '}{label || page?.label}</h3>
           <span className="spacer" />
+          {page && !error && page.totalCount > 0 && (
+            <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} />
+          )}
           {page && !error && page.totalCount > 0 && (
             <button
               className="dd-open"
@@ -218,13 +246,15 @@ export function DrillModal({
                   include them.
                 </p>
               ) : (
-                <div className="table-wrap">
+                <ScrollFrame className="table-wrap">
                   <table className="data dd-tbl">
                     <thead>
                       <tr>
                         <th />
-                        {page.columns.map((c) => (
-                          <th key={c.key}>{c.label}</th>
+                        {shownCols.map((c) => (
+                          <th key={c.key} {...thProps(c.key)}>
+                            <SortButton label={c.label} colKey={c.key} sort={sort} onSort={setSort} />
+                          </th>
                         ))}
                       </tr>
                     </thead>
@@ -246,7 +276,7 @@ export function DrillModal({
                               ) : null;
                             })}
                           </td>
-                          {page.columns.map((c) => {
+                          {shownCols.map((c) => {
                             const v = r[c.key];
                             const num = ['money', 'int', 'number', 'pct'].includes(c.type);
                             // v1's status pill, colour-coded per lifecycle state.
@@ -297,7 +327,7 @@ export function DrillModal({
                       })}
                     </tbody>
                   </table>
-                </div>
+                </ScrollFrame>
               )}
 
               {cursor && (

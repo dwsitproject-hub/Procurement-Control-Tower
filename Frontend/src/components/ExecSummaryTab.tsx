@@ -1238,12 +1238,10 @@ export function ExecSummaryTab({
       value: currency === 'IDR' && totalIdr !== null
         ? rupiah(totalIdr)
         : formatMoney(totalUsd, 'USD'),
-      // Said on the tile when it cannot follow the IDR toggle, rather than
-      // switching currency without a word: the strict rule refuses a rupiah
-      // total while any line in scope has no rupiah value.
-      sub: currency === 'IDR' && totalIdr === null && totalUsd !== null
-        ? 'in USD — some lines have no IDR rate'
-        : 'net order value, ex STO',
+      // Always this caption (asked 7 Oct 2026). When the rupiah total cannot be
+      // formed the tile falls back to USD, and the currency prefix on the
+      // figure itself says so.
+      sub: 'net order value, ex STO',
       periods: [
         { name: `YTD ${period?.year ?? ''}`, text: money(valueYtd) },
         { name: monthName, text: money(valueMtd) },
@@ -1319,7 +1317,9 @@ export function ExecSummaryTab({
     {
       label: 'avg delivery LT',
       value: days(val('cycle_delivery')),
-      sub: 'PO released → GR',
+      // Since 7 Oct 2026: GR date against the PO's own delivery date (EINDT),
+      // early receipts negative - see cycleKpis in mart.ts.
+      sub: 'Plan Deliv. → GR',
       periods: periodPair('cycle_delivery', days),
       ...(k('cycle_delivery') ? { kpi: k('cycle_delivery')! } : {}),
     },

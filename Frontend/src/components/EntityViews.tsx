@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { ScrollFrame } from './ScrollFrame';
+import { SortButton, ToolTable, type SortState, type ToolTableColumn } from './TableTools';
 import {
   CategoryScale, Chart as ChartJS, Legend, LineController, LineElement,
   LinearScale, PointElement, Tooltip,
@@ -84,7 +86,15 @@ function EntPager({
   );
 }
 
-export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string) => void }) {
+export function VendorsTab({ onDrill, filterQuery = '' }: {
+  onDrill: (token: string, label: string) => void;
+  /**
+   * The filter bar (7 Oct 2026). Both tables ignored it until the Year filter
+   * became the default, when Vendor 360 would have been the one page still
+   * showing every year under a bar that said otherwise.
+   */
+  filterQuery?: string;
+}) {
   const [rows, setRows] = useState<VendorRow[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
@@ -97,21 +107,28 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
   const [view, setView] = useState<'top' | 'pivot'>('top');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
+  /**
+   * Header sort (7 Oct 2026), done on the SERVER: the table is paged, and
+   * sorting the page on screen would rank 50 of the vendors, not all of them.
+   * null is the default ranking, spend descending.
+   */
+  const [sort, setSort] = useState<SortState>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
     return () => clearTimeout(t);
   }, [search]);
 
-  // A new search or page size restarts from the first page.
-  useEffect(() => { setPage(0); }, [debounced, pageSize]);
+  // A new search, page size, sort or filter restarts from the first page.
+  useEffect(() => { setPage(0); }, [debounced, pageSize, sort, filterQuery]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     api
       .get<{ totalVendors: number; rows: VendorRow[] }>(
-        `/api/v1/entity/vendors?limit=${pageSize}&offset=${page * pageSize}${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`,
+        `/api/v1/entity/vendors?limit=${pageSize}&offset=${page * pageSize}${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`
+          + `${sort ? `&sort=${sort.key}&dir=${sort.dir}` : ''}${filterQuery ? `&${filterQuery}` : ''}`,
       )
       .then((d) => {
         if (cancelled) return;
@@ -123,7 +140,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
     return () => {
       cancelled = true;
     };
-  }, [debounced, page, pageSize]);
+  }, [debounced, page, pageSize, sort, filterQuery]);
 
   return (
     <>
@@ -150,26 +167,28 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
       </div>
 
       {view === 'pivot' ? (
-        <VendorPivot search={debounced} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
+        <VendorPivot search={debounced} filterQuery={filterQuery} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
       ) : loading ? (
         <div className="center-msg"><div className="spinner" />Loading vendors…</div>
       ) : (
         <>
-        <div className="table-wrap dt-scroll">
+        <ScrollFrame className="table-wrap dt-scroll">
           <table className="data dd-tbl">
             <thead>
               <tr>
                 <th className="num">No</th>
-                <th>Vendor</th><th>Code</th>
-                <th>PO Email</th>
-                <th style={{ textAlign: 'right' }}>POs</th>
-                <th style={{ textAlign: 'right' }}>Lines</th>
-                <th style={{ textAlign: 'right' }}>Spend USD</th>
-                <th style={{ textAlign: 'right' }}>Materials</th>
-                <th style={{ textAlign: 'right' }}>Areas</th>
-                <th style={{ textAlign: 'right' }}>OTD %</th>
-                <th style={{ textAlign: 'right' }}>Avg late (d)</th>
-                <th style={{ textAlign: 'right' }}>Open USD</th>
+                {/* Every header sorts, both ways (7 Oct 2026). The keys are the
+                    server's whitelist (entity.ts VENDOR_SORT). */}
+                {([
+                  ['vendorName', 'Vendor', false], ['vendorCode', 'Code', false], ['poEmail', 'PO Email', false],
+                  ['poCount', 'POs', true], ['lineCount', 'Lines', true], ['spendUsd', 'Spend USD', true],
+                  ['materials', 'Materials', true], ['areas', 'Areas', true], ['otdPct', 'OTD %', true],
+                  ['avgDaysLate', 'Avg late (d)', true], ['openExposureUsd', 'Open USD', true],
+                ] as const).map(([key, label, right]) => (
+                  <th key={key} style={right ? { textAlign: 'right' } : undefined}>
+                    <SortButton label={label} colKey={key} sort={sort} onSort={setSort} />
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -197,7 +216,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
               ))}
             </tbody>
           </table>
-        </div>
+        </ScrollFrame>
         {total > 0 && (
           <EntPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
         )}
@@ -220,9 +239,10 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
 // ─────────────────────────── vendors × materials × month pivot (G3.1)
 
 function VendorPivot({
-  search, onOpenVendor, onOpenMaterial,
+  search, filterQuery, onOpenVendor, onOpenMaterial,
 }: {
   search: string;
+  filterQuery: string;
   onOpenVendor: (code: string) => void;
   onOpenMaterial: (code: string) => void;
 }) {
@@ -230,16 +250,24 @@ function VendorPivot({
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
   const [expanded, setExpanded] = useState<Record<string, Record<string, any>[] | 'loading'>>({});
+  /**
+   * Header sort (7 Oct 2026): vendor name, any month, or the total. Ranked on
+   * the server before paging, so sorting by a month ranks every vendor by it.
+   * null is the default ranking, total descending.
+   */
+  const [sort, setSort] = useState<SortState>(null);
 
-  useEffect(() => { setPage(0); }, [search, pageSize]);
+  useEffect(() => { setPage(0); }, [search, pageSize, sort, filterQuery]);
 
   useEffect(() => {
     const q = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) });
     if (search) q.set('q', search);
+    if (sort) { q.set('sort', sort.key); q.set('dir', sort.dir); }
+    for (const [k, v] of new URLSearchParams(filterQuery)) q.set(k, v);
     api.get<Record<string, any>>(`/api/v1/entity/vendor-pivot?${q.toString()}`)
       .then(setD)
       .catch(() => setD(null));
-  }, [search, page, pageSize]);
+  }, [search, page, pageSize, sort, filterQuery]);
 
   const toggle = (code: string) => {
     if (expanded[code]) {
@@ -264,14 +292,20 @@ function VendorPivot({
   return (
     <>
       <p className="note" style={{ marginTop: 0 }}>{d.note}</p>
-      <div className="table-wrap dt-scroll">
+      <ScrollFrame className="table-wrap dt-scroll">
         <table className="data dd-tbl">
           <thead>
             <tr>
-              <th>Vendor / material (USD)</th>
+              <th><SortButton label="Vendor / material (USD)" colKey="name" sort={sort} onSort={setSort} /></th>
               <th>PO Email</th>
-              {months.map((m) => <th key={m} style={{ textAlign: 'right' }}>{m}</th>)}
-              <th style={{ textAlign: 'right' }}>Total</th>
+              {months.map((m) => (
+                <th key={m} style={{ textAlign: 'right' }}>
+                  <SortButton label={m} colKey={m} sort={sort} onSort={setSort} />
+                </th>
+              ))}
+              <th style={{ textAlign: 'right' }}>
+                <SortButton label="Total" colKey="total" sort={sort} onSort={setSort} />
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -323,7 +357,7 @@ function VendorPivot({
             </tr>
           </tfoot>
         </table>
-      </div>
+      </ScrollFrame>
       {d.totalVendors > 0 && (
         <EntPager
           total={d.totalVendors} page={page} pageSize={pageSize}
@@ -508,10 +542,15 @@ export function VendorModal({
 
               <h4 className="ent-h">Materials supplied <span className="muted">(top {d.materials.length} of cap {d.caps.materials})</span></h4>
               <SimpleTable
+                prefKey="vendor_materials_layout"
                 head={['Material', 'Description', 'Lines', 'Qty', 'Spend USD', 'Last PO']}
+                right={[false, false, true, true, true, false]}
                 rows={d.materials.map((m: any) => [
                   m.materialCode ?? '(service)', m.description, formatNumber(m.lines),
                   formatNumber(m.qty, 1), formatMoney(m.usd, 'USD'), formatDate(m.lastPo),
+                ])}
+                sortValues={d.materials.map((m: any) => [
+                  m.materialCode, m.description, m.lines, m.qty, m.usd, m.lastPo,
                 ])}
               />
 
@@ -531,10 +570,16 @@ export function VendorModal({
 
               <h4 className="ent-h">GR history <span className="muted">(newest {d.grHistory.length}, cap {d.caps.grHistory})</span></h4>
               <SimpleTable
+                prefKey="vendor_gr_history_layout"
                 head={['Mat. doc', 'PO', 'Item', 'Mvt', 'Class', 'Posted', 'Signed qty', 'Material']}
+                right={[false, false, true, false, false, false, true, false]}
                 rows={d.grHistory.map((g: any) => [
                   g.materialDoc, g.poNo, String(g.poItem), g.movementType, g.postingClass,
                   formatDate(g.postingDate), formatNumber(g.signedQty, 3), g.materialDesc ?? DASH,
+                ])}
+                sortValues={d.grHistory.map((g: any) => [
+                  g.materialDoc, g.poNo, g.poItem, g.movementType, g.postingClass,
+                  g.postingDate, g.signedQty, g.materialDesc,
                 ])}
               />
             </>
@@ -961,64 +1006,63 @@ function MiniBars({
   );
 }
 
-function SimpleTable({ head, rows }: { head: string[]; rows: (string | null)[][] }) {
-  return (
-    <div className="table-wrap" style={{ maxHeight: '300px', overflow: 'auto' }}>
-      <table className="data">
-        <thead><tr>{head.map((h2) => <th key={h2}>{h2}</th>)}</tr></thead>
-        <tbody>
-          {rows.map((r2, i) => (
-            <tr key={i}>{r2.map((c, j) => <td key={j}>{c ?? DASH}</td>)}</tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+/**
+ * A popup list with the table tools (7 Oct 2026): choose columns, drag to
+ * reorder, sort any header either way, scrollbar above. `rows` are the cells
+ * as shown; `sortValues`, when given, are the raw values they sort by, so a
+ * money or quantity column sorts by amount rather than by its formatted text.
+ */
+function SimpleTable({ prefKey, head, rows, sortValues, right }: {
+  prefKey: string;
+  head: string[];
+  rows: (string | null)[][];
+  sortValues?: unknown[][];
+  right?: boolean[];
+}) {
+  type R = { cells: (string | null)[]; raw: unknown[] };
+  const data: R[] = rows.map((cells, i) => ({ cells, raw: sortValues?.[i] ?? cells }));
+  const columns: ToolTableColumn<R>[] = head.map((h2, j) => ({
+    key: String(j),
+    label: h2,
+    right: right?.[j] ?? false,
+    render: (r) => r.cells[j] ?? DASH,
+    sortValue: (r) => r.raw[j],
+  }));
+  return <ToolTable prefKey={prefKey} columns={columns} rows={data} maxHeight="300px" className="data" />;
 }
 
 function PoHistoryTable({ rows, vendor = false }: { rows: Record<string, any>[]; vendor?: boolean }) {
+  const columns: ToolTableColumn<Record<string, any>>[] = [
+    { key: 'poNo', label: 'PO', render: (r) => r.poNo },
+    { key: 'poItem', label: 'Item', right: true, render: (r) => r.poItem },
+    { key: 'documentDate', label: 'Date', render: (r) => formatDate(r.documentDate) },
+    ...(vendor ? [{ key: 'vendorName', label: 'Vendor', render: (r: Record<string, any>) => r.vendorName ?? DASH }] : []),
+    { key: 'orderQty', label: 'Qty', right: true, render: (r) => formatNumber(r.orderQty, 2) },
+    { key: 'orderUnit', label: 'Unit', render: (r) => r.orderUnit ?? DASH },
+    {
+      key: 'unitPrice', label: 'Unit price', right: true,
+      render: (r) => ((r.flags as string[])?.includes('sto') ? `${DASH} (STO)` : formatNumber(r.unitPrice, 2)),
+    },
+    { key: 'priceUnit', label: 'Price unit', right: true, render: (r) => r.priceUnit ?? DASH },
+    { key: 'currencyCode', label: 'Ccy', render: (r) => r.currencyCode },
+    { key: 'netOrderValue', label: 'Value', right: true, render: (r) => formatMoney(r.netOrderValue) },
+    { key: 'netOrderValueUsd', label: 'Value USD', right: true, render: (r) => formatMoney(r.netOrderValueUsd, 'USD') },
+    {
+      key: 'status', label: 'Status',
+      render: (r) => <span className={'bs ' + (STATUS_PILL[String(r.status)] ?? 'sl')}>{r.status}</span>,
+    },
+    { key: 'receiptDate', label: 'GR date', render: (r) => formatDate(r.receiptDate) },
+  ];
   return (
-    <div className="table-wrap" style={{ maxHeight: '340px', overflow: 'auto' }}>
-      <table className="data dd-tbl">
-        <thead>
-          <tr>
-            <th /><th>PO</th><th>Item</th><th>Date</th>
-            {vendor && <th>Vendor</th>}
-            <th style={{ textAlign: 'right' }}>Qty</th><th>Unit</th>
-            <th style={{ textAlign: 'right' }}>Unit price</th>
-            <th style={{ textAlign: 'right' }}>Price unit</th>
-            <th>Ccy</th>
-            <th style={{ textAlign: 'right' }}>Value</th>
-            <th style={{ textAlign: 'right' }}>Value USD</th>
-            <th>Status</th><th>GR date</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r2, i) => (
-            <tr key={i}>
-              <td>
-                {((r2.flags as string[]) ?? []).map((f) => {
-                  const m = FLAG_META[f];
-                  return m ? <span key={f} className="flag" title={m.label}>{m.icon}</span> : null;
-                })}
-              </td>
-              <td>{r2.poNo}</td>
-              <td className="num">{r2.poItem}</td>
-              <td>{formatDate(r2.documentDate)}</td>
-              {vendor && <td className="muted">{r2.vendorName ?? DASH}</td>}
-              <td className="num">{formatNumber(r2.orderQty, 2)}</td>
-              <td>{r2.orderUnit ?? DASH}</td>
-              <td className="num">{(r2.flags as string[])?.includes('sto') ? `${DASH} (STO)` : formatNumber(r2.unitPrice, 2)}</td>
-              <td className="num">{r2.priceUnit ?? DASH}</td>
-              <td>{r2.currencyCode}</td>
-              <td className="num">{formatMoney(r2.netOrderValue)}</td>
-              <td className="num">{formatMoney(r2.netOrderValueUsd, 'USD')}</td>
-              <td><span className={'bs ' + (STATUS_PILL[String(r2.status)] ?? 'sl')}>{r2.status}</span></td>
-              <td>{formatDate(r2.receiptDate)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <ToolTable
+      prefKey={vendor ? 'material_po_history_layout' : 'vendor_po_history_layout'}
+      columns={columns}
+      rows={rows}
+      maxHeight="340px"
+      lead={(r) => ((r.flags as string[]) ?? []).map((f) => {
+        const m = FLAG_META[f];
+        return m ? <span key={f} className="flag" title={m.label}>{m.icon}</span> : null;
+      })}
+    />
   );
 }

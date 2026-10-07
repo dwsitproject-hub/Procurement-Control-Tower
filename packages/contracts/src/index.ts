@@ -287,7 +287,7 @@ export const KPI_TITLES: Record<KpiId, string> = {
   sole_source_materials: 'Sole-Source Materials',
   delivered_not_invoiced: 'Delivered, Not Invoiced',
   po_irc: 'Info-Record Coverage %',
-  otd_vs_requested: 'On-Time vs Requested %',
+  otd_vs_requested: 'On-Time vs PO Delivery Date %',
   tail_spend_po_pct: 'Tail Spend % (by PO)',
   valuation_coverage_pct: 'Valuation Coverage %',
   unique_requisitioners: 'Unique Requisitioners',

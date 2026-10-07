@@ -8,6 +8,7 @@
  * silently truncated.
  */
 
+import { buildFilterClause, type GlobalFilter } from './globalfilter.js';
 import { query, queryOne } from '../../db/client.js';
 import { spendCategoryWithPlantSql } from '@pct/rules';
 import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
@@ -72,12 +73,40 @@ export interface VendorRow {
   openExposureUsd: number | null;
 }
 
+/**
+ * Sortable columns of the Top vendors table (7 Oct 2026), by the key the page
+ * sends. Each is the aggregate itself rather than its output alias, so it can
+ * sit inside an expression; the vendor code follows as a tiebreak so paging a
+ * sorted list never repeats or skips a vendor.
+ */
+const VENDOR_SORT: Record<string, string> = {
+  vendorCode: 'pol.vendor_code',
+  vendorName: 'max(pol.vendor_name)',
+  poEmail: 'max(sup.po_email)',
+  inCoupa: 'bool_or(sup.number IS NOT NULL)',
+  poCount: 'count(DISTINCT pol.po_no)',
+  lineCount: 'count(*)',
+  spendUsd: 'sum(pol.net_order_value_usd)',
+  materials: 'count(DISTINCT pol.material_code)',
+  areas: 'count(DISTINCT pol.plant)',
+  otdPct: `(count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL
+                             AND pol.receipt_date <= pol.delivery_date + 7))::numeric
+           / NULLIF(count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL), 0)`,
+  avgDaysLate: 'avg(pol.receipt_date - pol.delivery_date) FILTER (WHERE pol.receipt_date > pol.delivery_date)',
+  openExposureUsd: 'sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0)',
+};
+
+export type SortSpec = { key: string; dir: 'asc' | 'desc' } | null;
+
 export async function vendorList(
   versionId: number,
   scope: readonly ScopeEntry[],
   search: string,
   limit: number,
   offset = 0,
+  /** The global filter bar (7 Oct 2026), on the order line. */
+  filter: GlobalFilter = {},
+  sort: SortSpec = null,
 ): Promise<{ totalVendors: number; rows: VendorRow[] }> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -86,6 +115,13 @@ export async function vendorList(
     params.push(`%${search.trim()}%`);
     searchSql = ` AND (pol.vendor_name ILIKE $${params.length} OR pol.vendor_code ILIKE $${params.length})`;
   }
+  const gf = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gf.params);
+  searchSql += gf.sql;
+  const sortExpr = sort ? VENDOR_SORT[sort.key] : undefined;
+  const orderBy = sortExpr
+    ? `${sortExpr} ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, pol.vendor_code`
+    : 'spend_usd DESC NULLS LAST, pol.vendor_code';
 
   const total = await queryOne<{ n: number }>(
     `SELECT count(DISTINCT vendor_code)::int AS n FROM core.fact_po_line pol
@@ -127,7 +163,7 @@ export async function vendorList(
        ) sup ON true
       WHERE ${where}${searchSql} AND pol.vendor_code IS NOT NULL AND NOT pol.is_sto
       GROUP BY pol.vendor_code
-      ORDER BY spend_usd DESC NULLS LAST
+      ORDER BY ${orderBy}
       LIMIT $${params.length} OFFSET $${(params.push(offset), params.length)}`,
     params,
   );
@@ -419,6 +455,14 @@ export async function vendorPivot(
   search: string,
   limit: number,
   offset: number,
+  /** The global filter bar (7 Oct 2026), on the order line. */
+  filter: GlobalFilter = {},
+  /**
+   * 'code' | 'name' | 'total' | a 'YYYY-MM' month column (7 Oct 2026). Applied
+   * where the page of vendors is CHOSEN, so sorting by March ranks every vendor
+   * by March - not just the forty already on screen.
+   */
+  sort: SortSpec = null,
 ): Promise<Record<string, unknown>> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -427,6 +471,9 @@ export async function vendorPivot(
     params.push(`%${search.trim()}%`);
     extra = ` AND (pol.vendor_name ILIKE $${params.length} OR pol.vendor_code ILIKE $${params.length})`;
   }
+  const gf = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gf.params);
+  extra += gf.sql;
   const base = `${where}${extra} AND NOT pol.is_sto AND NOT pol.is_deleted AND pol.vendor_code IS NOT NULL`;
 
   const months = await query<{ mk: string }>(
@@ -443,16 +490,27 @@ export async function vendorPivot(
     params,
   );
 
-  const pageParams = [...params, limit, offset];
+  const pageParams = [...params];
+  const dir = sort?.dir === 'asc' ? 'ASC' : 'DESC';
+  let rank = 'sum(pol.net_order_value_usd)';
+  if (sort?.key === 'code') rank = 'pol.vendor_code';
+  else if (sort?.key === 'name') rank = 'max(pol.vendor_name)';
+  else if (sort && /^[0-9]{4}-[0-9]{2}$/.test(sort.key)) {
+    pageParams.push(sort.key);
+    rank = `sum(pol.net_order_value_usd) FILTER (WHERE to_char(pol.document_date, 'YYYY-MM') = $${pageParams.length})`;
+  }
+  const rankDir = sort ? dir : 'DESC';
+  pageParams.push(limit, offset);
   const rows = await query<{
-    code: string; name: string | null; mk: string; usd: number | null; unrated: number;
+    code: string; name: string | null; mk: string; usd: number | null; unrated: number; rnk: number;
   }>(
     `WITH top AS (
-       SELECT pol.vendor_code AS code, sum(pol.net_order_value_usd) AS total
+       SELECT pol.vendor_code AS code,
+              row_number() OVER (ORDER BY ${rank} ${rankDir} NULLS LAST, pol.vendor_code) AS rnk
          FROM core.fact_po_line pol WHERE ${base}
-        GROUP BY 1 ORDER BY total DESC NULLS LAST
+        GROUP BY 1 ORDER BY ${rank} ${rankDir} NULLS LAST, pol.vendor_code
         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length})
-     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name, max(top.rnk) AS rnk,
             to_char(pol.document_date, 'YYYY-MM') AS mk,
             sum(pol.net_order_value_usd) AS usd,
             count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unrated
@@ -479,7 +537,7 @@ export async function vendorPivot(
     for (const x of sup) { emails.set(x.number, x.po_email); inCoupa.add(x.number); }
   }
 
-  const byVendor = new Map<string, { code: string; name: string | null; poEmail: string | null; inCoupa: boolean; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean }>();
+  const byVendor = new Map<string, { code: string; name: string | null; poEmail: string | null; inCoupa: boolean; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean; rnk: number }>();
   for (const r of rows) {
     let v = byVendor.get(r.code);
     if (!v) {
@@ -487,7 +545,7 @@ export async function vendorPivot(
         code: r.code, name: r.name,
         poEmail: emails.get(r.code) ?? null,
         inCoupa: inCoupa.has(r.code),
-        byMonth: {}, total: 0, anyUnrated: false,
+        byMonth: {}, total: 0, anyUnrated: false, rnk: Number(r.rnk),
       };
       byVendor.set(r.code, v);
     }
@@ -500,7 +558,9 @@ export async function vendorPivot(
     months: months.map((m) => m.mk),
     totalVendors: totalRow?.vendors ?? 0,
     grandTotalUsd: (totalRow?.unrated ?? 0) > 0 ? null : totalRow?.grand_usd ?? null,
-    rows: [...byVendor.values()].sort((a, b) => b.total - a.total),
+    // In the order the page was chosen in - the server's ranking - so the
+    // rows on screen follow the sort the reader picked.
+    rows: [...byVendor.values()].sort((a, b) => a.rnk - b.rnk).map(({ rnk: _r, ...v }) => v),
     note: 'USD-converted, period-matched FX · STO and deleted lines excluded · cells with unrated currencies show —',
   };
 }

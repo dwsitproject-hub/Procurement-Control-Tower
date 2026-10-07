@@ -189,10 +189,13 @@ export async function checkStaged(batchId: number): Promise<Finding[]> {
         ruleId: 'V-M01',
         severity: 'CAVEAT',
         feed: 'pr',
-        message: `Requested delivery date is not distinct from release date (${pct.toFixed(2)}% of rows differ, expected >= 50%). The column is not a need-by date, so Demand Realism and On-Time vs Requested remain disabled. Fix: add SAP EBAN-LFDAT to the ME5A export variant (PRD 13.1.1).`,
+        message: `Requested delivery date is not distinct from release date (${pct.toFixed(2)}% of rows differ, expected >= 50%). The column is not a need-by date, so Demand Realism remains disabled (On-Time is measured against the PO delivery date instead). Fix: add SAP EBAN-LFDAT to the ME5A export variant (PRD 13.1.1).`,
         affectedRows: dv.total - dv.differing,
         measured: { expected: '>=50%', actual: `${pct.toFixed(2)}%`, total: dv.total, differing: dv.differing },
-        disablesKpis: ['demand_realism', 'otd_vs_requested'],
+        // otd_vs_requested left this list on 7 Oct 2026: it now measures
+        // against the PO delivery date, not the requested date this caveat
+        // is about.
+        disablesKpis: ['demand_realism'],
         drillPredicate: null,
       });
     }

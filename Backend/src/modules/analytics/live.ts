@@ -8,7 +8,7 @@
 
 import { pool } from '../../db/client.js';
 import { PARITY_KPIS, PARITY_CHARTS } from './mart_parity.js';
-import { cycleKpis } from './mart.js';
+import { cycleKpis, inlineKpis } from './mart.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import {
   buildFilterClause, injectFilter, mergeIntoPredicate, type FactKind, type GlobalFilter,
@@ -60,7 +60,8 @@ function targetOf(id: string, grain: string | undefined): { kind: FactKind; alia
   const joined = JOINED_ALIAS[id];
   if (joined) return joined;
   const kind: FactKind =
-    grain === 'pr_item' ? 'pr_item' : grain === 'gr_posting' ? 'gr_posting' : 'po_line';
+    grain === 'pr_item' || grain === 'gr_posting' || grain === 'pr_release' || grain === 'po_release'
+      ? grain : 'po_line';
   return { kind, alias: '' };
 }
 
@@ -182,6 +183,7 @@ export async function computeLiveKpis(
   )).rows.map((r) => r.kpi_id));
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>
     (await pool.query<T>(sql, params)).rows;
+  out.push(...await inlineKpis(q, versionId, rules, disabled, filter));
   out.push(...await cycleKpis(q, versionId, Number(rules['kpi.min_sample'] ?? 30), disabled, filter));
 
   return out;

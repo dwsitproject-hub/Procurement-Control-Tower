@@ -39,6 +39,9 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   // restores the old full-replace load, where every upload must carry all five
   // exports and is the whole dataset on its own.
   'ingest.merge_enabled': true,
+  // Deleted PRs and PO lines (and the orders of a deleted PR) are left out of
+  // every fact at load time (7 Oct 2026). false keeps them, flagged, as before.
+  'exclusions.deleted_docs': true,
   // Coupa poller (TECH_04 §3.4). Credentials are env-only, never here.
   'coupa.sync_enabled': false,
   'coupa.sync_interval_minutes': 10,

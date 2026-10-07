@@ -193,6 +193,19 @@ export async function runTransform(
    * than not excluding anything.
    */
   const exHoldPos = rules['exclusions.hold_pos'] === true || rules['exclusions.hold_pos'] === 'true';
+  /**
+   * Deleted documents (requested 7 Oct 2026: "PR & PO with Status contain
+   * 'Deleted' shall not included in any calculation in any chart, card or
+   * pages"). Excluded here, like the rules above, because that is the only
+   * place that reaches EVERY page by construction - one forgotten
+   * `NOT is_deleted` in one query was how a deleted USD 516 M order line (PO
+   * 1012014225 item 1, about Rp 8.7 T) kept appearing on Vendor 360.
+   *
+   * A requisition's deletion follows to its orders, as its org exclusion does:
+   * such a line's status is PR-Deleted. ON by default; the rule switches it
+   * off for an audit of what was deleted.
+   */
+  const exDeleted = !(rules['exclusions.deleted_docs'] === false || rules['exclusions.deleted_docs'] === 'false');
   const exIntercoPrefixes = ((rules['exclusions.interco_vendor_prefixes'] as string[] | undefined) ?? [])
     .map((x) => String(x).trim().toUpperCase())
     .filter((x) => x !== '');
@@ -244,7 +257,8 @@ export async function runTransform(
    */
   const prExclusionOf = (p: StagedRow['payload']): string | null => {
     const prDocType = s(p.docType);
-    return prDocType !== null && exDocTypes.has(prDocType) ? `doc_type=${prDocType}`
+    return exDeleted && (s(p.deletionIndicator) ?? '').toLowerCase() === 'true' ? 'deleted'
+      : prDocType !== null && exDocTypes.has(prDocType) ? `doc_type=${prDocType}`
       : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
         : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
           : null;
@@ -431,8 +445,49 @@ export async function runTransform(
     prByKey.set(k, r.payload);
   }
 
-  // ── linkage (PO side authoritative) ──
+  /**
+   * Why an order line is excluded, or null: its own document type, group,
+   * org or deletion; the requisition it was raised from; then the line-level
+   * rules (held, intercompany). Used to keep excluded lines out of the PR/PO
+   * linkage, which is built before the order pass; the order pass applies the
+   * same tests in the same order (header-level, then line-level by status).
+   *
+   * The linkage used to be built from EVERY order line, excluded or not, so a
+   * requisition whose only order had been excluded still counted that order
+   * (po_line_count, its status, split sourcing) although the order was not in
+   * the facts. Harmless while exclusions were a few org codes; with deleted
+   * documents excluded (7 Oct 2026) it would have left 3,720 deleted order
+   * lines' requisitions looking ordered.
+   *
+   * HOLD is decided here from the inputs rowStatus decides it from - not
+   * deleted, requisition not deleted, incomplete flag set - because the
+   * linkage is needed before statuses exist.
+   */
+  const poExclusionOf = (p: StagedRow['payload']): string | null => {
+    const docType = s(p.docType);
+    const own = exDeleted && (s(p.deletionIndicator) ?? '').trim().toUpperCase() === 'L' ? 'deleted'
+      : docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
+        : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+          : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+            : null;
+    if (own !== null) return own;
+    const prKey = `${s(p.prNo)}|${i(p.prItem)}`;
+    const fromRequisition = excludedPrReason.get(prKey);
+    if (fromRequisition !== undefined) return `requisition ${fromRequisition}`;
+    const code = splitSupplier(p.supplierRaw).code;
+    if (isInterco(code)) return `interco_vendor=${code}`;
+    if (exHoldPos && (s(p.incomplete) ?? '').trim().toUpperCase() === 'X') {
+      const poDel = (s(p.deletionIndicator) ?? '').trim().toUpperCase() === 'L';
+      const pr = prByKey.get(prKey);
+      const prDel = pr !== undefined && (s(pr.deletionIndicator) ?? '').toLowerCase() === 'true';
+      if (!poDel && !prDel) return 'status=HOLD PO';
+    }
+    return null;
+  };
+
+  // ── linkage (PO side authoritative), over the order lines that survive ──
   const poLinkRefs: PoLinkRef[] = poRows
+    .filter((r) => poExclusionOf(r.payload) === null)
     .map((r) => ({
       poNo: s(r.payload.poNo) ?? '',
       poItem: i(r.payload.poItem) ?? 0,
@@ -506,7 +561,9 @@ export async function runTransform(
 
     const docType = s(p.docType);
 
-    const ownExclusion = docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
+    // Same tests, in the same order, as poExclusionOf above.
+    const ownExclusion = exDeleted && (s(p.deletionIndicator) ?? '').trim().toUpperCase() === 'L' ? 'deleted'
+      : docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
       : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
         : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
           : null;

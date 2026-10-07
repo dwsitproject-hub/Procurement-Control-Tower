@@ -271,6 +271,19 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 .modal .body { overflow: auto; padding: .5rem 1rem 1rem; }
 .modal .count { color: var(--muted); font-size: .72rem; }
 
+/* The Detail Table in a popup (DetailModal): wider than a drill, since it
+   carries the whole table with its toolbar and filters. */
+.modal--wide { width: min(1500px, 100%); }
+.modal--wide .panel { box-shadow: none; border: none; padding: 0; margin: 0; }
+
+/* A second horizontal scrollbar above a wide table (ScrollFrame). The strip is
+   just tall enough to show the browser's own scrollbar. */
+.scroll-top { overflow-x: auto; overflow-y: hidden; height: 14px; margin-bottom: 2px; }
+.scroll-top > div { height: 1px; }
+
+/* The backlog table's own filter row on Open Items. */
+.oi-cat-filters { margin: .25rem 0 .6rem; align-items: center; }
+
 /* ── drill modal — v1's dd-modal look ── */
 .modal header h3 { font-weight: 800; }
 .dd-open {

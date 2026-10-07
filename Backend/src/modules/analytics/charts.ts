@@ -104,13 +104,16 @@ export const CHART_META: ChartMeta[] = [
     tab: 'pr',
     grain: 'pr_item',
     unit: 'count',
+    // Drawn as a waterfall (Chart.tsx WATERFALL_CHARTS) since 7 Oct 2026.
     notes: [
-      'IN = brought forward + newly raised. OUT = became PO + cancelled.',
+      'Each month: what was still open when it began (stacked by how long it had '
+      + 'been waiting), plus what was raised, minus what became a PO. Where the '
+      + 'last step ends is what the next month brings forward.',
       'Brought forward is a STOCK, not a flow: a requisition waiting three months '
       + 'is counted in all three, so those bars must not be added up.',
-      'The export carries a deletion flag and no deletion date, so cancellations '
-      + 'are shown against the month the requisition was RAISED, not the month it '
-      + 'was cancelled.',
+      'Deleted requisitions are left out of every figure, so nothing is shown as '
+      + 'cancelled. Under a Year filter only requisitions raised that year are '
+      + 'counted, so the first month brings forward nothing from the year before.',
     ],
   },
   {

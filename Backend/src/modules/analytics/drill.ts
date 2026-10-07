@@ -22,6 +22,7 @@ import {
   ageBandPredicateSql, prSpendCategoryMatchSql, spendCategoryWithPlantSql,
 } from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
+import { datePredicate, dimPredicate } from './globalfilter.js';
 
 const env = loadEnv();
 
@@ -221,7 +222,7 @@ const FILTERS: Record<string, Compiler> = {
    * across months, and the chart says so.
    */
   prFlow: (v, a, ps) => {
-    const o = v as { phase?: string; month?: string };
+    const o = v as { phase?: string; month?: string; band?: string };
     const month = String(o.month ?? '');
     if (!/^[0-9]{4}-[0-9]{2}$/.test(month)) {
       throw new Error(`prFlow needs a YYYY-MM month, got: ${month}`);
@@ -239,8 +240,13 @@ const FILTERS: Record<string, Compiler> = {
         return `${a}.is_deleted AND ${raised} = ${m}`;
       case 'to_po':
         return `NOT ${a}.is_deleted AND ${PR_CONVERTED_MONTH(a)} = ${m}`;
-      case 'carried_in':
-        return `NOT ${a}.is_deleted AND ${raised} < ${m} AND ${conv} >= ${m}`;
+      case 'carried_in': {
+        const stock = `NOT ${a}.is_deleted AND ${raised} < ${m} AND ${conv} >= ${m}`;
+        // One age band of the stock: age on the 1st of the month (the
+        // waterfall's segments, mart_parity CARRIED_IN_BAND_SERIES).
+        if (o.band === undefined) return stock;
+        return `${stock} AND ${ageBandPredicateSql(`(to_date(${m}, 'YYYY-MM') - ${a}.requisition_date)`, String(o.band))}`;
+      }
       default:
         throw new Error(`unknown prFlow phase: ${String(o.phase)}`);
     }
@@ -329,14 +335,24 @@ const FILTERS: Record<string, Compiler> = {
   // ── global filters (W2) ──
   // Merged into every predicate issued from a filtered figure, so a card and its
   // drill can never disagree once a filter is applied.
-  companyCodeIn: (v, a, ps) => `${a}.company_code = ANY(${p(ps, (v as unknown[]).map(String))})`,
-  plantIn: (v, a, ps) => `${a}.plant = ANY(${p(ps, (v as unknown[]).map(String))})`,
-  purchOrgIn: (v, a, ps) => `${a}.purch_org = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  // The figure's own expression (globalfilter.dimPredicate): a table that does
+  // not carry the column reaches its order line, on both sides.
+  companyCodeIn: (v, a, ps, grain) =>
+    dimPredicate(grain, 'company', `${a}.`, p(ps, (v as unknown[]).map(String))),
+  plantIn: (v, a, ps, grain) =>
+    dimPredicate(grain, 'plant', `${a}.`, p(ps, (v as unknown[]).map(String))),
+  purchOrgIn: (v, a, ps, grain) =>
+    dimPredicate(grain, 'purchOrg', `${a}.`, p(ps, (v as unknown[]).map(String))),
+  // The global Month and Year filters: the figure's own date rule
+  // (globalfilter.datePredicate) - which for a PR release step is its
+  // requisition's raise date, not the step's approval date. The chart-bucket
+  // `monthKey` below keeps PRIMARY_DATE: a bar of approvals by month IS by
+  // approval month.
   monthKeyIn: (v, a, ps, grain) =>
-    `${monthExpr(a, grain)} = ANY(${p(ps, (v as unknown[]).map(String))})`,
-  /** The global Year filter: 'YYYY' against the grain's primary date, as monthKeyIn is. */
+    datePredicate(grain, `${a}.`, 'YYYY-MM', p(ps, (v as unknown[]).map(String))),
+  /** The global Year filter: 'YYYY', on the same date as monthKeyIn. */
   yearIn: (v, a, ps, grain) =>
-    `left(${monthExpr(a, grain)}, 4) = ANY(${p(ps, (v as unknown[]).map(String))})`,
+    datePredicate(grain, `${a}.`, 'YYYY', p(ps, (v as unknown[]).map(String))),
 
   /**
    * A lead-time chart only aggregates rows where its measure exists (a sourcing
@@ -368,6 +384,11 @@ const FILTERS: Record<string, Compiler> = {
     if (!col) throw new Error(`unknown measure: ${String(v)}`);
     return `(${a}.${col} IS NOT NULL AND ${a}.${col} >= 0)`;
   },
+  /**
+   * cycle_delivery's population since 7 Oct 2026: received lines with a PO
+   * delivery date. Early receipts count (negative days) - see cycleKpis.
+   */
+  deliveryVsPlanEvaluable: (_v, a) => `${a}.delivery_vs_promise_days IS NOT NULL`,
   // cycle_e2e's population: received lines whose linked PR gives a
   // non-negative requisition->receipt span.
   e2eEvaluable: (_v, a) =>
@@ -725,7 +746,14 @@ const FILTERS: Record<string, Compiler> = {
       : `${a}.status = 'Delivered'`,
   // On-Time vs Requested (D4): a line is evaluable only when both the receipt
   // and the requested date exist. Empty until EBAN-LFDAT reaches the export.
-  otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.need_by_date IS NOT NULL`,
+  // otd_vs_requested's population since 7 Oct 2026: received lines with a PO
+  // delivery date (EINDT), the date the card now measures against.
+  otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.delivery_date IS NOT NULL`,
+  /** PR items with an approval step still open: pending_pr_approvals' population. */
+  releasePending: (_v, a) => `EXISTS (SELECT 1 FROM core.fact_pr_release _rp
+                     WHERE _rp.dataset_version_id = ${a}.dataset_version_id
+                       AND _rp.pr_no = ${a}.pr_no AND _rp.pr_item = ${a}.pr_item
+                       AND _rp.approve_date IS NULL)`,
   // v1's open definition (OPEN_ST + "any GR means Delivered"): a PR item is
   // open while no PO exists, or while its POs are unapproved/held/awaiting GR
   // AND no linked line has received ANY goods. Differs from scopeOpen, which
@@ -911,6 +939,14 @@ export async function executeDrill(
   payload: TokenPayload,
   limit: number,
   offset: number,
+  /**
+   * Sort by one of the grain's own columns (requested 7 Oct 2026: every popup
+   * table sortable both ways). Looked up in COLUMNS - never interpolated from
+   * the request - and ordered by the column's OUTPUT name, so the sort is on
+   * exactly what the cell shows. The grain's stable key follows as a
+   * tiebreak, so paging through a sorted drill never repeats or skips a row.
+   */
+  sort: { key: string; dir: 'asc' | 'desc' } | null = null,
 ): Promise<DrillPage> {
   const t = TABLES[payload.grain];
   const params: unknown[] = [payload.v];
@@ -959,10 +995,14 @@ export async function executeDrill(
       }
     : null;
 
+  const sortCol = sort ? COLUMNS[payload.grain].find((c) => c.key === sort.key) : undefined;
+  const orderBy = sortCol
+    ? `"${sortCol.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, ${t.order}`
+    : t.order;
   const pageParams = [...params, limit, offset];
   const rows = await query<Record<string, unknown>>(
     `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
-      WHERE ${whereSql} ORDER BY ${t.order}
+      WHERE ${whereSql} ORDER BY ${orderBy}
       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
     pageParams,
   );

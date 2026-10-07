@@ -71,14 +71,91 @@ export function isEmptyFilter(f: GlobalFilter): boolean {
   );
 }
 
-/** The date column a month filter applies to, per fact table. */
-export type FactKind = 'pr_item' | 'po_line' | 'gr_posting';
+/**
+ * The fact table a clause filters. The two release tables were added 7 Oct
+ * 2026: the KPIs and charts that read them used to be filtered as if they were
+ * order lines, and failed ("column document_date does not exist") or reported
+ * themselves unfilterable the moment any filter - now including the default
+ * Year - was on.
+ */
+export type FactKind = 'pr_item' | 'po_line' | 'gr_posting' | 'pr_release' | 'po_release';
 
-const MONTH_COL: Record<FactKind, string> = {
+/**
+ * The date a Month or Year filter applies to, per table. null: the table's own
+ * date is the wrong one, and the filter reaches the requisition (datePredicate).
+ */
+const MONTH_COL: Record<FactKind, string | null> = {
   pr_item: 'requisition_date',
   po_line: 'document_date',
   gr_posting: 'posting_date',
+  // A PR release step's only date is its APPROVAL date, which a pending step
+  // does not have: filtered on it, every pending approval vanished under the
+  // default Year filter. Release steps are filtered by the year/month their
+  // requisition was raised, as the joined approval specs already are.
+  pr_release: null,
+  po_release: 'po_date',
 };
+
+/**
+ * `to_char(<the table's filter date>, <fmt>) = ANY(<placeholder>)`. Shared with
+ * the drill compiler (monthKeyIn / yearIn), for the reason dimPredicate is.
+ */
+export function datePredicate(
+  kind: FactKind, alias: string, fmt: 'YYYY-MM' | 'YYYY', placeholder: string,
+): string {
+  const col = MONTH_COL[kind];
+  if (col !== null) return `to_char(${alias}${col}, '${fmt}') = ANY(${placeholder})`;
+  const outer = alias !== '' ? alias : `${TABLE_OF[kind]}.`;
+  return `EXISTS (SELECT 1 FROM core.fact_pr_item _gq
+                   WHERE _gq.dataset_version_id = ${outer}dataset_version_id
+                     AND _gq.pr_no = ${outer}pr_no AND _gq.pr_item = ${outer}pr_item
+                     AND to_char(_gq.requisition_date, '${fmt}') = ANY(${placeholder}))`;
+}
+
+const TABLE_OF: Record<FactKind, string> = {
+  pr_item: 'core.fact_pr_item',
+  po_line: 'core.fact_po_line',
+  gr_posting: 'core.fact_gr_posting',
+  pr_release: 'core.fact_pr_release',
+  po_release: 'core.fact_po_release',
+};
+
+type Dim = 'company' | 'plant' | 'purchOrg';
+const DIM_SQL: Record<Dim, string> = { company: 'company_code', plant: 'plant', purchOrg: 'purch_org' };
+
+/**
+ * Where each table keeps company, plant and purchasing org. false: the table
+ * does not carry it, and the predicate reaches the ORDER LINE the row belongs
+ * to - a receipt's purchasing org is its order's, a PO release's plant is its
+ * order's lines'.
+ */
+const HAS_DIM: Record<FactKind, Record<Dim, boolean>> = {
+  pr_item:    { company: true, plant: true,  purchOrg: true },
+  po_line:    { company: true, plant: true,  purchOrg: true },
+  gr_posting: { company: true, plant: true,  purchOrg: false },
+  pr_release: { company: true, plant: true,  purchOrg: true },
+  po_release: { company: true, plant: false, purchOrg: true },
+};
+
+/**
+ * `<dim> = ANY(<placeholder>)` on one table, as SQL. Shared with the drill
+ * compiler (drill.ts companyCodeIn / plantIn / purchOrgIn): a figure and the
+ * rows behind it must be filtered by the SAME expression or the sweep's
+ * card-equals-drill check cannot hold.
+ *
+ * `alias` ends with a dot ('pol.') or is '' for an unaliased single table.
+ */
+export function dimPredicate(kind: FactKind, dim: Dim, alias: string, placeholder: string): string {
+  const col = DIM_SQL[dim];
+  if (HAS_DIM[kind][dim]) return `${alias}${col} = ANY(${placeholder})`;
+  const outer = alias !== '' ? alias : `${TABLE_OF[kind]}.`;
+  const lineMatch = kind === 'gr_posting'
+    ? `_gd.po_no = ${outer}po_no AND _gd.po_item = ${outer}po_item`
+    : `_gd.po_no = ${outer}po_no`;
+  return `EXISTS (SELECT 1 FROM core.fact_po_line _gd
+                   WHERE _gd.dataset_version_id = ${outer}dataset_version_id
+                     AND ${lineMatch} AND _gd.${col} = ANY(${placeholder}))`;
+}
 
 export interface Clause {
   /** Begins with ' AND ' when non-empty, so it can be appended directly. */
@@ -106,26 +183,29 @@ export function buildFilterClause(
   const params: unknown[] = [];
   let n = startIndex;
 
-  const add = (col: string, vals: string[] | undefined) => {
+  const add = (dim: Dim, vals: string[] | undefined) => {
     if (!vals || vals.length === 0) return;
     params.push(vals);
-    parts.push(`${alias}${col} = ANY($${n})`);
+    parts.push(dimPredicate(kind, dim, alias, `$${n}`));
     n += 1;
   };
 
-  add('company_code', f.companyCode);
+  add('company', f.companyCode);
   add('plant', f.plant);
-  add('purch_org', f.purchOrg);
+  add('purchOrg', f.purchOrg);
+
+  /** The Executive Summary dimensions and the scope toggle mean nothing on these. */
+  const lifecycleless = kind === 'gr_posting' || kind === 'pr_release' || kind === 'po_release';
 
   if (f.monthKey && f.monthKey.length > 0) {
     params.push(f.monthKey);
-    parts.push(`to_char(${alias}${MONTH_COL[kind]}, 'YYYY-MM') = ANY($${n})`);
+    parts.push(datePredicate(kind, alias, 'YYYY-MM', `$${n}`));
     n += 1;
   }
 
   if (f.year && f.year.length > 0) {
     params.push(f.year);
-    parts.push(`to_char(${alias}${MONTH_COL[kind]}, 'YYYY') = ANY($${n})`);
+    parts.push(datePredicate(kind, alias, 'YYYY', `$${n}`));
     n += 1;
   }
 
@@ -145,8 +225,8 @@ export function buildFilterClause(
    * rather than quietly returning an unfiltered number.
    */
   const poScoped = (predicate: (t: string) => string) => {
-    if (kind === 'gr_posting') {
-      throw new Error('Executive Summary filters do not apply to GR postings');
+    if (lifecycleless) {
+      throw new Error(`Executive Summary filters do not apply to ${kind}`);
     }
     if (kind === 'pr_item') {
       const outer = alias !== '' ? alias : 'core.fact_pr_item.';
@@ -164,8 +244,8 @@ export function buildFilterClause(
   if (f.spendCategory && f.spendCategory.length > 0) {
     params.push(f.spendCategory);
     const i = n;
-    if (kind === 'gr_posting') {
-      throw new Error('Executive Summary filters do not apply to GR postings');
+    if (lifecycleless) {
+      throw new Error(`Executive Summary filters do not apply to ${kind}`);
     }
     if (kind === 'pr_item') {
       // The order's category, falling back to the requisition's own material -
@@ -197,8 +277,8 @@ export function buildFilterClause(
   if (f.scope !== undefined) {
     // GR postings carry no lifecycle status; a spec on that grain cannot be
     // scoped honestly — the caller reports it unavailable instead.
-    if (kind === 'gr_posting') {
-      throw new Error('scope filter does not apply to GR postings');
+    if (lifecycleless) {
+      throw new Error(`scope filter does not apply to ${kind}`);
     }
     if (kind === 'pr_item') {
       // A converted PR item's own status stays 'PO-No GR' forever — the PR

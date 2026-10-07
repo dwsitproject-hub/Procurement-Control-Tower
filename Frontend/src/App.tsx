@@ -126,7 +126,10 @@ const TAB_KPIS: Record<Tab, string[]> = {
   pr: [
     'cycle_pr_approval', 'median_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
     'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
-    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand', 'pr_cancellation_rate', 'pr_deleted',
+    // pr_cancellation_rate and pr_deleted left this page on 7 Oct 2026: deleted
+    // documents are excluded at load (exclusions.deleted_docs), so both could
+    // only ever read 0 - a figure that says nothing was deleted.
+    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand',
     'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
     'valuation_coverage_pct', 'unique_requisitioners', 'avg_pr_line_value_idr',
   ],
@@ -150,7 +153,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
   governance: [
     'wbs_compliance', 'open_pr_no_wbs', 'retro_po_rate', 'sto_share',
     'direct_po_share', 'sole_source_materials', 'tail_spend_pct',
-    'pr_cancellation_rate', 'emergency_pct_value',
+    'emergency_pct_value',
     'single_source_spend_idr', 'top_vendor_share_pct', 'top5_vendor_share_pct',
     'avg_suppliers_per_material',
   ],
@@ -337,7 +340,20 @@ export default function App() {
 
   useEffect(() => {
     if (!me) return;
-    api.get<DatasetCurrent>('/api/v1/dataset/current').then(setDataset).catch(() => undefined);
+    api.get<DatasetCurrent>('/api/v1/dataset/current').then((d) => {
+      /*
+       * Every page opens on the current year (requested 7 Oct 2026). "Current"
+       * is the DATA's year - its as-of date - not the browser's calendar: on
+       * 2 January a dataset that runs to 31 December would otherwise open on
+       * an empty year. Set in the same update as the dataset, so the first
+       * request every page makes already carries it rather than loading all
+       * years and then again. A Year the reader already chose is kept, and
+       * "Clear all" in the bar still shows every year.
+       */
+      const y = (d.asOfDate ?? '').slice(0, 4);
+      if (/^[0-9]{4}$/.test(y)) setGf((cur) => (cur.year.length > 0 ? cur : { ...cur, year: [y] }));
+      setDataset(d);
+    }).catch(() => undefined);
   }, [me]);
 
   // Saved custom cards are only needed where they can appear: the Custom page,
@@ -703,7 +719,7 @@ export default function App() {
             />
           </PageChunk>
         ) : tab === 'vendors' ? (
-          <PageChunk tab={tab}><VendorsTab onDrill={onDrill} /></PageChunk>
+          <PageChunk tab={tab}><VendorsTab onDrill={onDrill} filterQuery={gfQuery} /></PageChunk>
         ) : tab === 'materials' ? (
           <PageChunk tab={tab}><MaterialsTab onDrill={onDrill} /></PageChunk>
         ) : tab === 'coupa_src' ? (
@@ -733,6 +749,7 @@ export default function App() {
             key={detailInit ? JSON.stringify(detailInit.params) : 'plain'}
             initial={detailInit?.params}
             initialLabel={detailInit?.label}
+            globalQuery={gfQuery}
           />
         ) : tab === 'datacheck' ? (
           <DataCheck versionId={dataset.datasetVersionId} />

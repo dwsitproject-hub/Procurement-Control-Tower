@@ -40,6 +40,13 @@ import {
   shareLastResult,
 } from '../modules/ingest/share_poller.js';
 import { loadEnv } from '../config/env.js';
+import { parseGlobalFilter } from '../modules/analytics/globalfilter.js';
+
+/** `?sort=<key>&dir=asc|desc` from a table header; the callee whitelists the key. */
+function sortOf(q: Record<string, unknown>): { key: string; dir: 'asc' | 'desc' } | null {
+  if (q['sort'] === undefined || String(q['sort']).trim() === '') return null;
+  return { key: String(q['sort']).slice(0, 40), dir: String(q['dir']) === 'asc' ? 'asc' : 'desc' };
+}
 import { storageBasePath, storageHealth } from '../config/storage.js';
 
 // Injected from routes.ts so both files share one implementation.
@@ -171,6 +178,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       String(req.query.q ?? ''),
       Math.min(Number(req.query.limit ?? 50), 200),
       Math.max(Number(req.query.offset ?? 0), 0),
+      parseGlobalFilter(req.query as Record<string, unknown>),
+      sortOf(req.query as Record<string, unknown>),
     );
     res.json({ datasetVersionId: v.id, asOfDate: v.asOfDate, ...out });
   }));
@@ -816,6 +825,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       v.id, ctx.scope, String(req.query.q ?? ''),
       Math.min(Number(req.query.limit ?? 40), 200),
       Math.max(Number(req.query.offset ?? 0), 0),
+      parseGlobalFilter(req.query as Record<string, unknown>),
+      sortOf(req.query as Record<string, unknown>),
     );
     res.json({ datasetVersionId: v.id, asOfDate: v.asOfDate, ...out });
   }));

@@ -140,7 +140,10 @@ export async function execTilePeriods(
   const [po] = await query<Record<string, unknown>>(
     `WITH b AS (
        SELECT pol.net_order_value_idr, pol.net_order_value_usd, pol.vendor_code,
-              pol.purch_group, pol.sourcing_days, pol.po_approval_days, pol.delivery_days,
+              pol.purch_group, pol.sourcing_days, pol.po_approval_days,
+              -- cycle_delivery's measure since 7 Oct 2026: GR date against the
+              -- PO delivery date, early receipts negative and kept.
+              pol.delivery_vs_promise_days AS delivery_days,
               (NOT pol.is_sto AND NOT pol.is_deleted) AS purch,
               to_char(pol.document_date, 'YYYY')    = $${yIdx} AS in_ytd,
               to_char(pol.document_date, 'YYYY-MM') = $${mIdx} AS in_mtd
@@ -167,8 +170,8 @@ export async function execTilePeriods(
        avg(sourcing_days)    FILTER (WHERE in_mtd AND sourcing_days    >= 0) AS sourcing_mtd,
        avg(po_approval_days) FILTER (WHERE in_ytd AND po_approval_days >= 0) AS po_appr_ytd,
        avg(po_approval_days) FILTER (WHERE in_mtd AND po_approval_days >= 0) AS po_appr_mtd,
-       avg(delivery_days)    FILTER (WHERE in_ytd AND delivery_days    >= 0) AS delivery_ytd,
-       avg(delivery_days)    FILTER (WHERE in_mtd AND delivery_days    >= 0) AS delivery_mtd
+       avg(delivery_days)    FILTER (WHERE in_ytd AND delivery_days IS NOT NULL) AS delivery_ytd,
+       avg(delivery_days)    FILTER (WHERE in_mtd AND delivery_days IS NOT NULL) AS delivery_mtd
        FROM b`,
     poParams,
   );

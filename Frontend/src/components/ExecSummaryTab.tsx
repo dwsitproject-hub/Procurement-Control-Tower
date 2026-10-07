@@ -615,11 +615,11 @@ function BandPairs({ data, onFocus }: {
                   {seg(at(ov, b.key), 'xs-open', 'Not yet delivered', b.label, b.key, tip)}
                 </span>
                 <span className="xs-band-num">
-                  {pct(vTot)} of value
+                  <strong>{pct(vTot)}</strong> of value
                   <span className="xs-band-split">
-                    <span className="xs-sp-closed">{pct(at(cv, b.key)?.value ?? 0)}</span>
+                    (<span className="xs-sp-closed">{pct(at(cv, b.key)?.value ?? 0)}</span>
                     {' + '}
-                    <span className="xs-sp-open">{pct(at(ov, b.key)?.value ?? 0)}</span>
+                    <span className="xs-sp-open">{pct(at(ov, b.key)?.value ?? 0)}</span>)
                   </span>
                 </span>
               </span>
@@ -629,11 +629,11 @@ function BandPairs({ data, onFocus }: {
                   {seg(at(ol, b.key), 'xs-open', 'Not yet delivered', b.label, b.key, tip)}
                 </span>
                 <span className="xs-band-num">
-                  {pct(lTot)} of lines
+                  <strong>{pct(lTot)}</strong> of lines
                   <span className="xs-band-split">
-                    <span className="xs-sp-closed">{pct(at(cl, b.key)?.value ?? 0)}</span>
+                    (<span className="xs-sp-closed">{pct(at(cl, b.key)?.value ?? 0)}</span>
                     {' + '}
-                    <span className="xs-sp-open">{pct(at(ol, b.key)?.value ?? 0)}</span>
+                    <span className="xs-sp-open">{pct(at(ol, b.key)?.value ?? 0)}</span>)
                   </span>
                 </span>
               </span>

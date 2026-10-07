@@ -219,6 +219,11 @@ a { color: var(--accent); }
 
 .chart-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
 .chart-box { position: relative; height: 260px; }
+/* A chart that needs the page's full width (Chart.tsx WIDE_CHARTS). */
+.chart-wide { grid-column: 1 / -1; }
+/* Pages wrap each chart in a grid cell (layout slots), so the cell holding a
+   wide chart is the one that must span. */
+.chart-grid > div:has(.chart-wide) { grid-column: 1 / -1; }
 
 /* ── tables ───────────────────────────────────────────────────────── */
 
@@ -806,7 +811,10 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
   color: #fff; font-size: .55rem; font-weight: 700; overflow: hidden; }
 
 /* Transaction size: the closed/open split beside each band percentage. */
-.xs-band-split { display: block; font-size: .6rem; color: var(--muted); }
+/* On the SAME line as its total (8 Oct 2026). As a second block line it
+   overflowed the 12-pixel row and printed over the row below - every figure
+   in the panel collided with its neighbour. */
+.xs-band-split { display: inline; margin-left: .3rem; font-size: .64rem; color: var(--muted); }
 
 /* Spend category: a value bar and a PO-lines bar stacked in one row, each on
    its own scale. The two measures differ by orders of magnitude, so a shared
@@ -883,7 +891,7 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 }
 
 /* Size bands: two stacked bars per band, sharing the band's row. */
-.xs-bands { display: flex; flex-direction: column; gap: .3rem; }
+.xs-bands { display: flex; flex-direction: column; gap: .55rem; }
 .xs-band-row {
   display: grid; grid-template-columns: minmax(8rem, 11rem) 1fr;
   align-items: center; gap: .6rem;
@@ -894,12 +902,18 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 .xs-band-row:hover:not(:disabled) { background: var(--bg); }
 .xs-band-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .xs-band-label { font-size: .7rem; font-weight: 700; text-align: right; }
-.xs-band-bars { display: flex; flex-direction: column; gap: 2px; }
-.xs-band-line { position: relative; display: flex; align-items: center; gap: .4rem; height: .78rem; }
+.xs-band-bars { display: flex; flex-direction: column; gap: 4px; }
+.xs-band-line { position: relative; display: flex; align-items: center; gap: .6rem; height: 1.05rem; }
 .xs-band-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
 /* Value and volume must be distinguishable without colour: value is solid, and
    volume is lighter AND labelled, so the pair reads in greyscale too. */
-.xs-band-num { font-size: .62rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* A fixed column, so the figures line up down the panel and the bars all end
+   at the same place instead of each shrinking to its own label's width. */
+.xs-band-num {
+  flex: 0 0 13.5rem; font-size: .68rem; color: var(--muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.xs-band-num strong { color: var(--heading); }
 
 .xs-means { margin: .2rem 0 0; padding-left: 1.1rem; font-size: .74rem; line-height: 1.55; }
 .xs-means li { margin-bottom: .35rem; }

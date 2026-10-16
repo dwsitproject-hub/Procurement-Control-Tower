@@ -240,7 +240,8 @@ export const MASTER_PAGES: MasterPageSpec[] = [
         note: 'Accumulated from the exports rather than loaded from a master, so a '
           + 'material appears once it has been requisitioned or ordered. Category is '
           + 'resolved by the same rule that stamps the orders, and "Category from" says '
-          + 'which step produced it — search it for "code prefix" to see the carve-outs.',
+          + 'which step produced it — search it for "code prefix" to see the carve-outs, or '
+          + '"manual" for the categories an Admin chose here.',
         columns: [
           C('materialCode', 'Material'), C('description', 'Description'),
           C('materialGroup', 'Group'), C('baseUom', 'UOM'),
@@ -259,7 +260,11 @@ export const MASTER_PAGES: MasterPageSpec[] = [
                  m.first_seen::text AS "firstSeen", m.last_seen::text AS "lastSeen"`,
         from: 'core.dim_material m',
         orderBy: 'm.material_code',
-        searchCols: ['m.material_code', 'm.description', 'm.material_group', 'm.base_uom'],
+        // The category and its source are searchable too - the note above
+        // promises "search it for code prefix", which only these make true.
+        searchCols: ['m.material_code', 'm.description', 'm.material_group', 'm.base_uom',
+          `(${spendCategorySql('m.material_code', 'm.material_group')})`,
+          `(${spendCategorySourceSql('m.material_code', 'm.material_group')})`],
       },
       {
         name: 'Material groups',

@@ -12,7 +12,7 @@ import argon2 from 'argon2';
 import { queryOne, query } from '../db/client.js';
 import { recordAudit } from '../modules/audit/audit.js';
 import {
-  addRow, editRow, EditError, editSpecFor, hideRow, overridesFor, pendingFxOverrides, revertRow,
+  addRow, editRow, EditError, editSpecFor, fieldsForPage, hideRow, overridesFor, pendingFxOverrides, revertRow,
 } from '../modules/master/edit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
 import { sessionFingerprint } from '../modules/auth/session.js';
@@ -123,7 +123,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         const spec = editSpecFor(String(t['relation']));
         if (!spec) continue;
         t['edit'] = {
-          keys: spec.keys, fields: spec.fields, readOnly: spec.readOnly,
+          // fieldsForPage: a choice field carries its allowed values.
+          keys: spec.keys, fields: await fieldsForPage(spec), readOnly: spec.readOnly,
           allowAdd: spec.allowAdd, allowDelete: spec.allowDelete, note: spec.note, fx: spec.fx === true,
         };
         t['marks'] = await overridesFor(spec.relation);

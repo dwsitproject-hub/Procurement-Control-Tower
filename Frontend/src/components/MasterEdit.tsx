@@ -15,15 +15,22 @@ import { api } from '../lib/api';
 
 export interface EditField {
   col: string; key: string; label: string;
-  kind: 'text' | 'bool' | 'int' | 'number';
+  kind: 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice';
   effect: 'label' | 'recompute' | 'mart';
   required?: boolean;
+  /** A choice field's allowed values, stated by the server. */
+  options?: string[];
+  /**
+   * A choice that can be left to the rules. Empty means Automatic, and the row
+   * value at `viaKey` says whether the current value was chosen by hand.
+   */
+  auto?: { viaKey: string; manualValue: string; label: string };
 }
 export interface EditKey { col: string; key: string; label: string; kind: EditField['kind'] }
 export interface EditBlock {
   keys: EditKey[];
   fields: EditField[];
-  readOnly: { key: string; reason: string }[];
+  readOnly: { key: string; reason: string; label?: string }[];
   allowAdd: boolean;
   allowDelete: boolean;
   note: string;
@@ -86,6 +93,10 @@ export function MasterEditDialog({
   for (const f of edit.fields) {
     const v = row?.[f.key];
     initial[f.key] = v === null || v === undefined ? '' : String(v);
+    // A value the rules produced is not a choice someone made: the form starts
+    // on Automatic, and saving without touching it changes nothing.
+    if (f.auto && row && row[f.auto.viaKey] !== f.auto.manualValue) initial[f.key] = '';
+    if (f.kind === 'date') initial[f.key] = (initial[f.key] ?? '').slice(0, 10);
   }
   const [form, setForm] = useState<Record<string, string>>(initial);
   const [saving, setSaving] = useState(false);
@@ -116,8 +127,22 @@ export function MasterEditDialog({
     }
   };
 
-  const input = (key: string, kind: EditField['kind'], disabled: boolean) => (
-    kind === 'bool' ? (
+  const input = (key: string, kind: EditField['kind'], disabled: boolean, field?: EditField) => (
+    kind === 'choice' ? (
+      <select
+        className="gf-search-in"
+        value={form[key] ?? ''}
+        disabled={disabled}
+        onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+      >
+        <option value="">
+          {field?.auto
+            ? `${field.auto.label}${row && row[key] ? ` (now: ${String(row[key])})` : ''}`
+            : '—'}
+        </option>
+        {(field?.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    ) : kind === 'bool' ? (
       <select
         value={form[key] === 'true' || form[key] === 'yes' ? 'yes' : form[key] === '' ? '' : 'no'}
         disabled={disabled}
@@ -130,7 +155,7 @@ export function MasterEditDialog({
     ) : (
       <input
         className="gf-search-in"
-        type={kind === 'text' ? 'text' : 'number'}
+        type={kind === 'text' ? 'text' : kind === 'date' ? 'date' : 'number'}
         step={kind === 'number' ? 'any' : '1'}
         value={form[key] ?? ''}
         disabled={disabled}
@@ -163,7 +188,7 @@ export function MasterEditDialog({
                 <span className="me-label">
                   {f.label}{f.required ? ' *' : ''}
                 </span>
-                {input(f.key, f.kind, false)}
+                {input(f.key, f.kind, false, f)}
                 {EFFECT_NOTE[f.effect] && <span className="me-effect">{EFFECT_NOTE[f.effect]}</span>}
               </label>
             ))}
@@ -177,7 +202,7 @@ export function MasterEditDialog({
               <p className="me-ro-h">Not editable here</p>
               <ul>
                 {edit.readOnly.map((r) => (
-                  <li key={r.key}><strong>{r.key}</strong> — {r.reason}</li>
+                  <li key={r.key}><strong>{r.label ?? r.key}</strong> — {r.reason}</li>
                 ))}
               </ul>
             </div>

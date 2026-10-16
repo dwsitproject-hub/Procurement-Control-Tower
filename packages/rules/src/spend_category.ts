@@ -20,6 +20,10 @@
  *
  * ── The order, and why each step exists ─────────────────────────────────────
  *
+ *   0. set by hand            an Admin's choice on Master > Materials (038),
+ *                             core.dim_material_category_manual. First, because
+ *                             it is the one answer someone made deliberately
+ *                             for this exact material.
  *   1. exact material code    the business file names individual materials
  *   2. material-code PREFIX   912.001 is every Bleaching Earth code; the
  *                             business shows those beside Chemical, not inside
@@ -37,6 +41,7 @@
 
 /** How the category was reached — the values spendCategorySourceSql can return. */
 export const SPEND_CATEGORY_SOURCES = [
+  'manual',
   'material code',
   'code prefix',
   'material group',
@@ -56,6 +61,8 @@ export type SpendCategorySource = (typeof SPEND_CATEGORY_SOURCES)[number];
  */
 export function spendCategorySql(codeCol: string, groupCol: string): string {
   return `COALESCE(
+              (SELECT mc_.category FROM core.dim_material_category_manual mc_
+                WHERE mc_.material_code = ${codeCol}),
               (SELECT sc_.category FROM core.dim_spend_category sc_
                 WHERE sc_.material_code = ${codeCol}),
               (SELECT sc_.category FROM core.dim_spend_category sc_
@@ -86,6 +93,9 @@ export function spendCategorySql(codeCol: string, groupCol: string): string {
  */
 export function spendCategorySourceSql(codeCol: string, groupCol: string): string {
   return `CASE
+            WHEN EXISTS (SELECT 1 FROM core.dim_material_category_manual mc_
+                          WHERE mc_.material_code = ${codeCol})
+              THEN 'manual'
             WHEN EXISTS (SELECT 1 FROM core.dim_spend_category sc_
                           WHERE sc_.material_code = ${codeCol})
               THEN 'material code'

@@ -35,7 +35,12 @@ import type pg from 'pg';
 import { query, queryOne, transaction } from '../../db/client.js';
 import type { FxRate } from '@pct/rules';
 
-export type FieldKind = 'text' | 'bool' | 'int' | 'number';
+/**
+ * 'date' is YYYY-MM-DD. 'choice' must be one of a list the server states at
+ * request time (EditField.choices) - a free-text category would turn every typo
+ * into a new bucket on every chart.
+ */
+export type FieldKind = 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice';
 export type FieldEffect = 'label' | 'recompute' | 'mart';
 
 export interface EditField {
@@ -47,11 +52,26 @@ export interface EditField {
   kind: FieldKind;
   effect: FieldEffect;
   required?: boolean;
+  /**
+   * Stored OUTSIDE the relation. 'material_category' is a material's manual
+   * spend category (038): it is not a column of dim_material but the first
+   * step of the category rule, so it is written to its own table.
+   */
+  store?: 'material_category';
+  /** Where a 'choice' field's allowed values come from (choicesFor). */
+  choices?: 'spend_categories';
+  /**
+   * A choice that may be left AUTOMATIC - empty means "let the rules decide".
+   * The form needs to know which row value says the current one is manual,
+   * so it can show "Automatic (now: X)" rather than pretend X was chosen.
+   */
+  auto?: { viaKey: string; manualValue: string; label: string };
 }
 
 export interface KeyColumn { col: string; key: string; label: string; kind: FieldKind }
 
-export interface ReadOnlyField { key: string; reason: string }
+/** `label` is the column's name as the table shows it; the key is shown when absent. */
+export interface ReadOnlyField { key: string; reason: string; label?: string }
 
 export interface EditSpec {
   relation: string;
@@ -171,16 +191,24 @@ export const EDIT_SPECS: EditSpec[] = [
       { col: 'description', key: 'description', label: 'Description', kind: 'text', effect: 'label' },
       { col: 'material_group', key: 'materialGroup', label: 'Group', kind: 'text', effect: 'label' },
       { col: 'base_uom', key: 'baseUom', label: 'UOM', kind: 'text', effect: 'label' },
+      // Editable since 16 Oct 2026. A chosen category beats every mapping
+      // rule for this material (038); Automatic hands it back to the rules.
+      {
+        col: 'category', key: 'category', label: 'Category', kind: 'choice', effect: 'recompute',
+        store: 'material_category', choices: 'spend_categories',
+        auto: { viaKey: 'categoryVia', manualValue: 'manual', label: 'Automatic - from the mapping rules' },
+      },
+      { col: 'first_seen', key: 'firstSeen', label: 'First seen', kind: 'date', effect: 'label' },
+      { col: 'last_seen', key: 'lastSeen', label: 'Last seen', kind: 'date', effect: 'label' },
     ],
     readOnly: [
-      { key: 'category', reason: 'Resolved from the material master and the spend-category mapping - edit the category on the Material master page.' },
-      { key: 'categoryVia', reason: 'Which rule the category was resolved by.' },
-      { key: 'firstSeen', reason: SEEN },
-      { key: 'lastSeen', reason: SEEN },
+      { key: 'categoryVia', label: 'Category from', reason: 'Which rule produced the category - it reads "manual" once a category is chosen here.' },
     ],
     allowAdd: true,
     allowDelete: true,
-    note: 'Descriptions and groups are refreshed by every SAP sync; edited values are kept.',
+    note: 'Descriptions, groups and dates are refreshed by every SAP sync; edited values are kept. '
+      + 'A chosen category wins over the mapping file and the material master for this material: '
+      + 'this page shows it at once, the charts and KPIs at the next Recompute.',
   },
   {
     relation: 'core.dim_material_group',
@@ -281,7 +309,92 @@ function coerce(kind: FieldKind, raw: unknown, label: string, required: boolean)
       if (!Number.isFinite(n) || n <= 0) throw new EditError(`${label} must be a positive number`);
       return n;
     }
+    case 'date': {
+      const t = String(raw).trim().slice(0, 10);
+      const d = new Date(`${t}T00:00:00Z`);
+      if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(t) || Number.isNaN(d.getTime())
+        || d.toISOString().slice(0, 10) !== t) {
+        throw new EditError(`${label} must be a date (YYYY-MM-DD)`);
+      }
+      return t;
+    }
+    case 'choice':
+      // Checked against the allowed list in the transaction (checkChoices).
+      return String(raw).trim();
   }
+}
+
+/**
+ * The values a 'choice' field accepts, read when needed - they are DATA.
+ * Spend categories are the mapping file's own vocabulary (core.dim_spend_category);
+ * offering anything else would invent a category no chart groups by.
+ */
+export async function choicesFor(source: NonNullable<EditField['choices']>): Promise<string[]> {
+  if (source === 'spend_categories') {
+    const r = await query<{ category: string }>(
+      `SELECT DISTINCT category FROM core.dim_spend_category WHERE category IS NOT NULL ORDER BY 1`,
+    );
+    return r.map((x) => x.category);
+  }
+  return [];
+}
+
+/** The fields as the page is told them: choice fields carry their allowed values. */
+export async function fieldsForPage(spec: EditSpec): Promise<Array<EditField & { options?: string[] }>> {
+  return Promise.all(spec.fields.map(async (f) => (
+    f.choices ? { ...f, options: await choicesFor(f.choices) } : f
+  )));
+}
+
+async function checkChoices(spec: EditSpec, vals: Record<string, unknown>): Promise<void> {
+  for (const f of spec.fields) {
+    if (!f.choices || vals[f.col] === null || vals[f.col] === undefined) continue;
+    const allowed = await choicesFor(f.choices);
+    if (!allowed.includes(String(vals[f.col]))) {
+      throw new EditError(`${f.label} must be one of: ${allowed.join(', ')}`);
+    }
+  }
+}
+
+/** Values for the relation itself, and values kept in their own store. */
+function splitVals(spec: EditSpec, vals: Record<string, unknown>): {
+  direct: Record<string, unknown>; stored: Array<[EditField, unknown]>;
+} {
+  const direct: Record<string, unknown> = {};
+  const stored: Array<[EditField, unknown]> = [];
+  for (const [col, v] of Object.entries(vals)) {
+    const f = spec.fields.find((x) => x.col === col);
+    if (f?.store) stored.push([f, v]);
+    else direct[col] = v;
+  }
+  return { direct, stored };
+}
+
+/** Write (or, for an empty value, remove) the out-of-relation values. */
+async function writeStored(
+  c: pg.PoolClient, key: Record<string, unknown>, stored: Array<[EditField, unknown]>, actor: string | null,
+): Promise<void> {
+  for (const [f, v] of stored) {
+    if (f.store === 'material_category') {
+      const code = String(key['material_code']);
+      if (v === null || v === undefined || v === '') {
+        await c.query(`DELETE FROM core.dim_material_category_manual WHERE material_code = $1`, [code]);
+      } else {
+        await c.query(
+          `INSERT INTO core.dim_material_category_manual (material_code, category, updated_by)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (material_code) DO UPDATE
+             SET category = EXCLUDED.category, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+          [code, String(v), actor],
+        );
+      }
+    }
+  }
+}
+
+/** Remove every out-of-relation value a row has (revert, hide). */
+async function clearStored(c: pg.PoolClient, spec: EditSpec, key: Record<string, unknown>): Promise<void> {
+  await writeStored(c, key, spec.fields.filter((f) => f.store).map((f) => [f, null]), null);
 }
 
 /** The row key, coerced, from display-keyed input. Keys are always required. */
@@ -371,6 +484,8 @@ export async function addRow(relation: string, input: Record<string, unknown>, a
   if (!spec.allowAdd) throw new EditError('rows cannot be added to this table');
   const key = readKey(spec, input);
   const vals = readVals(spec, input, true);
+  await checkChoices(spec, vals);
+  const { direct, stored } = splitVals(spec, vals);
   await transaction(async (c) => {
     if (spec.fx) {
       if (await findOverride(c, relation, key)) throw new EditError('a manual rate already exists for that currency and month - edit it instead');
@@ -383,7 +498,8 @@ export async function addRow(relation: string, input: Record<string, unknown>, a
       [relation, JSON.stringify(key), JSON.stringify(vals), actor],
     );
     if (!spec.fx) {
-      await upsertRow(c, spec, { ...spec.insertDefaults, ...vals, ...key }, Object.keys(vals));
+      await upsertRow(c, spec, { ...spec.insertDefaults, ...direct, ...key }, Object.keys(direct));
+      await writeStored(c, key, stored, actor);
     }
   });
 }
@@ -393,6 +509,8 @@ export async function editRow(relation: string, input: Record<string, unknown>, 
   const spec = requireSpec(relation);
   const key = readKey(spec, input);
   const vals = readVals(spec, input, false);
+  await checkChoices(spec, vals);
+  const { direct, stored } = splitVals(spec, vals);
   await transaction(async (c) => {
     const existing = await findOverride(c, relation, key);
     if (existing?.action === 'delete') throw new EditError('that row is hidden - restore it first');
@@ -410,7 +528,12 @@ export async function editRow(relation: string, input: Record<string, unknown>, 
         [relation, JSON.stringify(key), JSON.stringify(vals), original ? JSON.stringify(original) : null, actor],
       );
     }
-    if (!spec.fx) await upsertRow(c, spec, { ...spec.insertDefaults, ...vals, ...key }, Object.keys(vals));
+    if (!spec.fx) {
+      if (Object.keys(direct).length > 0) {
+        await upsertRow(c, spec, { ...spec.insertDefaults, ...direct, ...key }, Object.keys(direct));
+      }
+      await writeStored(c, key, stored, actor);
+    }
   });
 }
 
@@ -428,6 +551,7 @@ export async function hideRow(relation: string, input: Record<string, unknown>, 
     if (existing?.admin_added) {
       await c.query(`DELETE FROM app.master_override WHERE id = $1`, [existing.id]);
       await deleteRow(c, spec, key);
+      await clearStored(c, spec, key);
       return;
     }
     const current = await readRow(c, spec, key);
@@ -449,6 +573,10 @@ export async function hideRow(relation: string, input: Record<string, unknown>, 
       );
     }
     await deleteRow(c, spec, key);
+    // A manual category goes with the row, so a restore brings the material
+    // back to its rule-decided category rather than to a choice that was
+    // made for a row someone then removed.
+    await clearStored(c, spec, key);
   });
 }
 
@@ -465,6 +593,8 @@ export async function revertRow(relation: string, input: Record<string, unknown>
     if (!existing) throw new EditError('nothing to revert - this row has no override');
     await c.query(`DELETE FROM app.master_override WHERE id = $1`, [existing.id]);
     if (spec.fx) return;
+    // Reverting hands the category back to the rules as well.
+    await clearStored(c, spec, key);
     if (existing.admin_added) {
       await deleteRow(c, spec, key);
     } else if (existing.original) {
@@ -508,8 +638,12 @@ export async function applyDimOverrides(c: pg.PoolClient): Promise<{ applied: nu
       if (o.action === 'delete') {
         await deleteRow(c, spec, o.row_key);
       } else {
-        const base = { ...spec.insertDefaults, ...(o.original ?? {}), ...o.vals, ...o.row_key };
-        await upsertRow(c, spec, base, Object.keys(o.vals));
+        const { direct, stored } = splitVals(spec, o.vals);
+        const base = { ...spec.insertDefaults, ...(o.original ?? {}), ...direct, ...o.row_key };
+        await upsertRow(c, spec, base, Object.keys(direct));
+        // Idempotent: the store is not touched by the sync, but a row put back
+        // by hand (or a restored database) is re-imposed here like any other.
+        await writeStored(c, o.row_key, stored, null);
       }
       await c.query('RELEASE SAVEPOINT master_override');
       applied += 1;

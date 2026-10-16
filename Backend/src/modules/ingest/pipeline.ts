@@ -19,7 +19,10 @@ import {
 import { classifyHeaders } from './classify.js';
 import { loadMappings } from '../admin/steward.js';
 import { REQUIRED_FEEDS } from './contracts.js';
-import { extractRow, readSheetFromBuffer } from './parse.js';
+import {
+  MERGE_FEEDS, recordSourceRows, resolveParent, type MergeFeed, type MergeSummary,
+} from './merge.js';
+import { extractRowChecked, readSheetFromBuffer } from './parse.js';
 import {
   assertFileSize, assertMagicBytes, bundleHash, DEFAULT_SAFETY, sha256,
   SourceUnavailableError, type FileSource, type SafetyLimits,
@@ -40,13 +43,110 @@ export interface IngestOptions {
   onProgress?: (stage: string, detail?: string) => void;
 }
 
+/**
+ * What each file contributed, per feed.
+ *
+ * `rowsRead` is what the sheet held; `rowsWithError` is how many of those carry
+ * at least one cell that could not be read (023). `rowsAccepted` is the
+ * difference — and it is a count of rows STAGED, not of rows that reached the
+ * facts: a row with an unreadable optional cell is still staged and still
+ * contributes, so calling it "failed" would overstate the damage. When the batch
+ * as a whole fails, nothing reaches the facts regardless, which the outcome
+ * already says.
+ */
+export interface FeedRowSummary {
+  feed: string;
+  filename: string;
+  rowsRead: number;
+  rowsWithError: number;
+  rowsAccepted: number;
+  /** null when the file's headers matched no template at all. */
+  matched: boolean;
+}
+
 export type IngestOutcome =
-  | { outcome: 'published'; batchId: number; datasetVersionId: number; findings: Finding[] }
-  | { outcome: 'ready'; batchId: number; datasetVersionId: number; findings: Finding[] }
-  | { outcome: 'failed'; batchId: number; reason: string; findings: Finding[] }
+  | {
+    outcome: 'published'; batchId: number; datasetVersionId: number;
+    findings: Finding[]; rowSummary: FeedRowSummary[];
+  }
+  | {
+    outcome: 'ready'; batchId: number; datasetVersionId: number;
+    findings: Finding[]; rowSummary: FeedRowSummary[];
+  }
+  | {
+    outcome: 'failed'; batchId: number; reason: string;
+    findings: Finding[]; rowSummary: FeedRowSummary[];
+  }
   | { outcome: 'noop_unchanged'; batchId: number | null }
-  | { outcome: 'incomplete_bundle'; missing: Feed[] }
-  | { outcome: 'source_unavailable'; path: string };
+  | {
+      outcome: 'incomplete_bundle';
+      missing: Feed[];
+      /**
+       * Every file that was read, and what its columns identified it as.
+       *
+       * Reported out of the pipeline because this is the only moment anyone
+       * holds them: an incomplete bundle never creates a batch, so nothing is
+       * written to ingest.batch_file and there is nothing to look up later.
+       *
+       * All files, not only the unrecognised ones, because a feed can be
+       * missing while its file sits right there — if that file's columns
+       * identified it as a DIFFERENT feed. "Found it, but it looks like a PO
+       * export" is a different problem from "found it, recognised nothing",
+       * and the operator should not have to guess which happened.
+       */
+      filesRead: { displayName: string; sheetName: string; headers: string[]; feed: Feed | null }[];
+    }
+  | { outcome: 'source_unavailable'; path: string }
+  /**
+   * The pickup folder is empty because a previous run filed its contents away,
+   * and the next exports have not landed yet. The normal state between exports
+   * once after-run filing is on — NOT a fault, which is the whole point of
+   * separating it from `incomplete_bundle`.
+   */
+  | { outcome: 'awaiting_exports'; filedBatchId: number; filedAt: string; hoursAgo: number };
+
+/**
+ * How long an empty pickup folder stays "waiting" before it becomes "overdue".
+ *
+ * Four days, because the exports are daily and the gap that matters is a long
+ * weekend: Friday's run files Friday's exports away, and the next set may not
+ * land until Monday or Tuesday. Past that, an empty folder is worth an email
+ * again — the point of this outcome is to stop crying wolf between exports, not
+ * to go quiet when the exports really have stopped.
+ *
+ * Overridable in rule_config so a site with a weekly cadence can widen it
+ * without a deployment.
+ */
+const DEFAULT_AWAITING_GRACE_HOURS = 96;
+
+async function awaitingGraceHours(): Promise<number> {
+  const raw = (await loadRuleSnapshot())['ingest.awaiting_grace_hours'];
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_AWAITING_GRACE_HOURS;
+}
+
+/** The most recent run that moved its own source files out of the pickup folder. */
+async function lastFiling(): Promise<
+  { filedBatchId: number; filedAt: string; hoursAgo: number } | null
+> {
+  try {
+    const r = await queryOne<{ batch_id: string; filed_at: string; hours: string }>(
+      `SELECT batch_id, filed_at::text AS filed_at,
+              (EXTRACT(EPOCH FROM (now() - filed_at)) / 3600)::text AS hours
+         FROM ops.ingest_filing ORDER BY filed_at DESC LIMIT 1`,
+    );
+    if (!r) return null;
+    return {
+      filedBatchId: Number(r.batch_id),
+      filedAt: r.filed_at,
+      hoursAgo: Math.round(Number(r.hours)),
+    };
+  } catch {
+    // ops.ingest_filing absent (pre-024): fall back to the old behaviour rather
+    // than claiming a filing that cannot be proven.
+    return null;
+  }
+}
 
 export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const log = opts.onProgress ?? (() => undefined);
@@ -65,7 +165,18 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   }
 
   if (discovered.length === 0) {
-    return { outcome: 'incomplete_bundle', missing: [...REQUIRED_FEEDS] };
+    // An empty folder has two very different causes and they look identical on
+    // disk: either a previous run filed the exports away and the next ones have
+    // not arrived, or the exports stopped coming. ops.ingest_filing is the
+    // record of the first, written only when a run actually moved files.
+    const filed = await lastFiling();
+    if (filed !== null && filed.hoursAgo <= (await awaitingGraceHours())) {
+      return { outcome: 'awaiting_exports', ...filed };
+    }
+    // No filing on record, or one old enough that the next export is genuinely
+    // overdue. Either way this is worth an alert, so it keeps the outcome it
+    // always had.
+    return { outcome: 'incomplete_bundle', missing: [...REQUIRED_FEEDS], filesRead: [] };
   }
 
   // ── read, gate, classify ──
@@ -120,11 +231,31 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     }
   }
 
-  // ── completeness: a partial set does not start a batch ──
+  // ── completeness ──
+  //
+  // Merging (035, the default): an upload adds to what is already loaded, so
+  // it needs at least ONE of the five SAP exports, and the ones it lacks are
+  // carried forward unchanged. Without a base to merge into - the first load
+  // ever, merging switched off, or a base whose rows were pruned - an upload
+  // is a full load as before and must carry all five.
   const foundFeeds = new Set(prepared.map((p) => p.cls.feed).filter((f): f is Feed => f !== null));
+  const merging = await mergeEnabled();
+  const base = merging ? await mergeBaseAvailable() : false;
   const missing = REQUIRED_FEEDS.filter((f) => !foundFeeds.has(f));
-  if (missing.length > 0) {
-    return { outcome: 'incomplete_bundle', missing };
+  const incomplete = base
+    ? !REQUIRED_FEEDS.some((f) => foundFeeds.has(f))
+    : missing.length > 0;
+  if (incomplete) {
+    return {
+      outcome: 'incomplete_bundle',
+      missing,
+      filesRead: prepared.map((p) => ({
+        displayName: p.displayName,
+        sheetName: p.sheetName,
+        headers: p.headers,
+        feed: p.cls.feed,
+      })),
+    };
   }
 
   // ── create the batch ──
@@ -148,6 +279,13 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   };
 
   const findings: Finding[] = [];
+  /**
+   * Declared out here, not inside the try, because the catch below can be
+   * reached before parsing has run at all — a read failure, a safety-gate
+   * rejection. An empty summary is then the truthful answer rather than a
+   * reference error hiding the real cause.
+   */
+  let rowSummary: FeedRowSummary[] = [];
 
   try {
     // prior row counts, for the ±60% drift warning
@@ -160,6 +298,10 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     // ── PARSING ──
     await setState('PARSING');
     const parseStart = Date.now();
+    // Rows (not cells) carrying at least one unreadable value, per feed. Counted
+    // here rather than queried later so the number reported to the operator is
+    // the one this run actually produced.
+    const rowErrorCounts: Record<string, number> = {};
 
     for (const p of prepared) {
       const fileIns = await queryOne<{ id: string }>(
@@ -183,7 +325,10 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
           unexpectedHeaders: p.cls.unexpectedHeaders,
           healedFields: p.cls.healedFields,
           rowCount: p.rows.length,
-          priorRowCount: p.cls.feed ? (priorCounts[p.cls.feed] ?? null) : null,
+          // Not when merging: a file may now carry one month on purpose, and
+          // its size says nothing about the population. The merge summary
+          // reports what actually changed instead.
+          priorRowCount: base ? null : p.cls.feed ? (priorCounts[p.cls.feed] ?? null) : null,
         }),
       );
 
@@ -192,9 +337,28 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       log('parsing', `${p.cls.feed}: ${p.rows.length} rows`);
 
       const feed = p.cls.feed;
-      const staged: unknown[][] = p.rows.map((raw, idx) => [
-        batchId, fileId, feed, idx + 2, JSON.stringify(extractRow(feed, p.cls, raw)),
-      ]);
+      /**
+       * Extract and collect per-cell errors in the same pass.
+       *
+       * source_row is idx + 2 because the header is row 1 — the same number the
+       * operator sees in Excel, which is the only number that makes an error
+       * report actionable.
+       */
+      const staged: unknown[][] = [];
+      const rowErrors: unknown[][] = [];
+      p.rows.forEach((raw, idx) => {
+        const sourceRow = idx + 2;
+        const { row, errors } = extractRowChecked(feed, p.cls, raw);
+        staged.push([batchId, fileId, feed, sourceRow, JSON.stringify(row)]);
+        for (const e of errors) {
+          rowErrors.push([
+            batchId, feed, sourceRow, e.field, e.header,
+            e.rawValue.slice(0, 500), e.ruleId, e.reason,
+          ]);
+        }
+      });
+      rowErrorCounts[feed] = (rowErrorCounts[feed] ?? 0)
+        + new Set(rowErrors.map((r) => r[2])).size;
 
       const client = await pool.connect();
       try {
@@ -206,6 +370,15 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
           staged,
           1000,
         );
+        if (rowErrors.length > 0) {
+          await insertMany(
+            client,
+            'ingest.row_error',
+            ['batch_id', 'feed', 'source_row', 'field', 'header', 'raw_value', 'rule_id', 'reason'],
+            rowErrors,
+            1000,
+          );
+        }
         await client.query('COMMIT');
       } catch (e) {
         await client.query('ROLLBACK');
@@ -215,6 +388,21 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       }
     }
     timings.parsing = (Date.now() - parseStart) / 1000;
+
+    // The per-feed tally, assembled from this run's own numbers rather than
+    // re-queried, so what the operator is told is what actually happened.
+    rowSummary = prepared.map((p) => {
+      const feed = p.cls.feed;
+      const withError = feed === null ? 0 : (rowErrorCounts[feed] ?? 0);
+      return {
+        feed: feed ?? '(unrecognised)',
+        filename: p.displayName,
+        rowsRead: p.rows.length,
+        rowsWithError: withError,
+        rowsAccepted: feed === null ? 0 : p.rows.length - withError,
+        matched: feed !== null,
+      };
+    });
 
     // ── VALIDATING (pre-transform) ──
     await setState('VALIDATING');
@@ -227,7 +415,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       await persistFindings(batchId, findings);
       const reason = blockerReason(findings);
       await setState('FAILED', reason);
-      return { outcome: 'failed', batchId, reason, findings };
+      return { outcome: 'failed', batchId, reason, findings, rowSummary };
     }
 
     // ── TRANSFORMING ──
@@ -237,7 +425,30 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     const rules: RuleSnapshot = await loadRuleSnapshot();
 
     const result = await transaction(async (client) => {
+      // Write this upload's records into the store, on top of the version
+      // being served (035). Same transaction as the transform: a load that
+      // fails anywhere below leaves the store as it was.
+      let parentBatchId: number | null = null;
+      if (base) {
+        const par = await resolveParent(client);
+        parentBatchId = par.parentBatchId;
+        if (par.bootstrapped) log('merging', `recorded base batch ${parentBatchId}`);
+      }
+      log('merging');
+      const merge = await recordSourceRows(client, batchId, parentBatchId);
+
       const tr = await runTransform(client, batchId, rules);
+      // The PR Release order guards now run where the continuation rows are
+      // filled - when they are stored - and describe THIS upload's file.
+      const fill = merge.prelFill;
+      tr.metrics.continuationRowsAttached = fill?.continuationRowsAttached ?? 0;
+      tr.metrics.continuationOrderViolations = fill?.continuationOrderViolations ?? 0;
+      tr.metrics.continuationDuplicateKeys = fill?.continuationDuplicateKeys ?? 0;
+      tr.metrics.l2BeforeL1 = fill?.l2BeforeL1 ?? 0;
+
+      findings.push(...mergeFindings(merge, parentBatchId));
+      if (parentBatchId !== null) findings.push(...(await carriedCaveats(client, parentBatchId, merge)));
+
       const postFindings = checkMetrics(tr.metrics, rules);
       findings.push(...postFindings);
 
@@ -281,18 +492,24 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       );
       await setState('PUBLISHED');
       await pruneOldVersions();
-      return { outcome: 'published', batchId, datasetVersionId: result.datasetVersionId, findings };
+      return {
+        outcome: 'published', batchId,
+        datasetVersionId: result.datasetVersionId, findings, rowSummary,
+      };
     }
 
     timings.total = (Date.now() - t0) / 1000;
     await setState('READY');
-    return { outcome: 'ready', batchId, datasetVersionId: result.datasetVersionId, findings };
+    return {
+      outcome: 'ready', batchId,
+      datasetVersionId: result.datasetVersionId, findings, rowSummary,
+    };
   } catch (err) {
     const reason =
       err instanceof BlockerError ? err.message : err instanceof Error ? err.message : String(err);
     await persistFindings(batchId, findings).catch(() => undefined);
     await setState('FAILED', reason).catch(() => undefined);
-    return { outcome: 'failed', batchId, reason, findings };
+    return { outcome: 'failed', batchId, reason, findings, rowSummary };
   }
 }
 
@@ -306,6 +523,115 @@ class BlockerError extends Error {
 function blockerReason(findings: readonly Finding[]): string {
   const blockers = findings.filter((f) => f.severity === 'BLOCKER');
   return `${blockers.length} blocker(s): ${blockers.map((b) => `${b.ruleId} ${b.message}`).join(' | ')}`;
+}
+
+/** Rule `ingest.merge_enabled`, default ON. OFF restores full-replace loads. */
+async function mergeEnabled(): Promise<boolean> {
+  const v = (await loadRuleSnapshot())['ingest.merge_enabled'];
+  return !(v === false || v === 'false');
+}
+
+/** Whether the version being served can be built on (see resolveParent). */
+async function mergeBaseAvailable(): Promise<boolean> {
+  const r = await queryOne<{ ok: boolean }>(
+    `SELECT (b.source_recorded OR EXISTS (
+               SELECT 1 FROM staging.raw_row s WHERE s.batch_id = b.id)) AS ok
+       FROM core.dataset_pointer p
+       JOIN core.dataset_version v ON v.id = p.current_version_id
+       JOIN ingest.batch b ON b.id = v.batch_id
+      WHERE p.id = 1`,
+  );
+  return r?.ok === true;
+}
+
+const FEED_NAMES: Record<MergeFeed, string> = {
+  pr: 'PR List', prel: 'PR Release', po: 'PO List', por: 'PO Release', gr: 'GR List',
+};
+
+const fmt = (n: number): string => n.toLocaleString('en-US');
+
+/**
+ * What the merge did, per feed - the operator's answer to "what did this file
+ * change?". INFO for a feed that came with the upload; WARNING for one that did
+ * not, because its figures are now as old as the upload that last carried it.
+ */
+function mergeFindings(m: MergeSummary, parentBatchId: number | null): Finding[] {
+  const out: Finding[] = [];
+  for (const feed of MERGE_FEEDS) {
+    const f = m[feed];
+    if (f.inFile > 0) {
+      const extra = [
+        f.replacedSteps > 0 ? `${fmt(f.replacedSteps)} release step(s) no longer listed were replaced` : '',
+        f.duplicates > 0 ? `${fmt(f.duplicates)} repeated row(s) ignored` : '',
+        f.unkeyed > 0 ? `${fmt(f.unkeyed)} row(s) without a key skipped` : '',
+      ].filter((x) => x !== '');
+      const tail = extra.length > 0 ? `; ${extra.join('; ')}` : '';
+      out.push({
+        ruleId: 'V-I02',
+        severity: 'INFO',
+        feed,
+        message: parentBatchId === null
+          ? `${FEED_NAMES[feed]}: full load of ${fmt(f.total)} record(s)${tail}.`
+          : `${FEED_NAMES[feed]}: ${fmt(f.inFile)} row(s) in the file - ${fmt(f.inserted)} new, `
+            + `${fmt(f.updated)} updated, ${fmt(f.unchanged)} unchanged. `
+            + `${fmt(f.total)} record(s) in total after the merge${tail}.`,
+        affectedRows: f.inserted + f.updated,
+        measured: { ...f },
+        disablesKpis: [],
+        drillPredicate: null,
+      });
+    } else {
+      out.push({
+        ruleId: 'V-I03',
+        severity: 'WARNING',
+        feed,
+        message: `No ${FEED_NAMES[feed]} file in this upload: its ${fmt(f.total)} record(s) were carried forward `
+          + `unchanged from earlier uploads. Figures that depend on it are as current as the last ${FEED_NAMES[feed]} file.`,
+        affectedRows: f.total,
+        measured: { ...f },
+        disablesKpis: [],
+        drillPredicate: null,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Data caveats raised on a feed this upload did not carry. The checks that
+ * raise them read the upload's own file, so without this a caveated measure
+ * (V-M01's need-by date, for one) would be switched back ON by any upload that
+ * happened to omit the file - while the data it was raised on is still the
+ * data being shown.
+ */
+async function carriedCaveats(
+  client: import('pg').PoolClient,
+  parentBatchId: number,
+  m: MergeSummary,
+): Promise<Finding[]> {
+  const absent = MERGE_FEEDS.filter((f) => m[f].inFile === 0);
+  if (absent.length === 0) return [];
+  const r = await client.query<{
+    rule_id: string; feed: Feed; message: string; affected_rows: number | null;
+    measured: Record<string, unknown> | null; disables_kpis: string[];
+  }>(
+    `SELECT rule_id, feed, message, affected_rows, measured, disables_kpis
+       FROM ingest.validation_finding
+      WHERE batch_id = $1 AND severity = 'CAVEAT' AND feed = ANY($2)`,
+    [parentBatchId, absent],
+  );
+  return r.rows.map((x) => ({
+    ruleId: x.rule_id,
+    severity: 'CAVEAT' as const,
+    feed: x.feed,
+    message: x.message.includes('(carried forward')
+      ? x.message
+      : `${x.message} (carried forward: this upload had no ${FEED_NAMES[x.feed as MergeFeed] ?? x.feed} file)`,
+    affectedRows: x.affected_rows,
+    measured: x.measured,
+    disablesKpis: x.disables_kpis ?? [],
+    drillPredicate: null,
+  }));
 }
 
 async function persistFindings(batchId: number, findings: readonly Finding[]): Promise<void> {

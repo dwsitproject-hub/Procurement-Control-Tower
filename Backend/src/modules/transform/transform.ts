@@ -23,6 +23,8 @@ import {
   isSto,
   isTokenPrice,
   materialCategory,
+  sizeBandSql,
+  spendCategoryWithPlantSql,
   priorityLabel,
   isZeroPriceAnomaly,
   lookupMovement,
@@ -45,7 +47,9 @@ import {
 } from '@pct/rules';
 import { insertMany, query } from '../../db/client.js';
 import { PLANT_AREA } from './area_map.js';
+import { applyDimOverrides, applyFxOverrides } from '../master/edit.js';
 import type { RuleSnapshot } from '../admin/rules.js';
+import { loadEffective } from '../ingest/merge.js';
 
 // ─────────────────────────────────────────────────────────────────── typing
 
@@ -96,10 +100,21 @@ export interface TransformMetrics {
   l2BeforeL1: number;
   unregisteredMovementTypes: string[];
   fxCurrencies: number;
+  /** Did THIS bundle carry a rate table, or were rates carried forward? */
+  fxSuppliedByBundle: boolean;
+  /** Rate pairs the version ended up with, from either source. */
+  fxRatePairs: number;
   fxYearResolved: number | null;
   unratedCurrencies: string[];
   excludedPoLines: number;
   excludedPrItems: number;
+  /** Rows dropped because their key repeated in the export; the first was kept. */
+  duplicatePrItems: number;
+  duplicatePoLines: number;
+  duplicateGrPostings: number;
+  /** Approval steps dropped with their excluded requisition / order. */
+  excludedPrReleaseRows: number;
+  excludedPoReleaseRows: number;
   /** PO lines whose FX period came from a Coupa invoice date (basis rule). */
   invoiceDatedFxLines: number;
   /** Shared FX pair store (010): pair-months in use per source. */
@@ -130,14 +145,23 @@ export async function runTransform(
   batchId: number,
   rules: RuleSnapshot,
 ): Promise<TransformResult> {
-  const [prRows, prelRows, poRows, porRows, grRows, fxRows] = await Promise.all([
-    loadStaged(batchId, 'pr'),
-    loadStaged(batchId, 'prel'),
-    loadStaged(batchId, 'po'),
-    loadStaged(batchId, 'por'),
-    loadStaged(batchId, 'gr'),
-    loadStaged(batchId, 'fx'),
-  ]);
+  /*
+   * The five transactional feeds come from the merged store (035): the newest
+   * copy of every document across this batch's lineage, so a file that carries
+   * one month updates that month and leaves the rest as it was. The pipeline
+   * has already written this batch's records there. Read on the transaction's
+   * own client - those records are not committed yet.
+   *
+   * Sequential, not Promise.all: one client runs one query at a time.
+   */
+  const prRows = (await loadEffective(client, batchId, 'pr')) as StagedRow[];
+  const prelRows = (await loadEffective(client, batchId, 'prel')) as StagedRow[];
+  const poRows = (await loadEffective(client, batchId, 'po')) as StagedRow[];
+  const porRows = (await loadEffective(client, batchId, 'por')) as StagedRow[];
+  const grRows = (await loadEffective(client, batchId, 'gr')) as StagedRow[];
+  // The rate table is not merged here: ops.fx_rate_source is already the
+  // accumulating store for it (buildFx).
+  const fxRows = await loadStaged(batchId, 'fx');
 
   // Category overrides are reference data an administrator can extend, so they
   // are read from the database rather than hardcoded as v1 did.
@@ -154,9 +178,113 @@ export async function runTransform(
   const exDocTypes = new Set(((rules['exclusions.doc_types'] as string[] | undefined) ?? []).map(String));
   const exPurchGroups = new Set(((rules['exclusions.purch_groups'] as string[] | undefined) ?? []).map(String));
   const exPurchOrgs = new Set(((rules['exclusions.purch_orgs'] as string[] | undefined) ?? []).map(String));
+  /**
+   * Held POs and intercompany vendors (user request 31 Aug 2026), excluded
+   * app-wide rather than only on the Executive Summary card that prompted it —
+   * the reader chose one definition of committed value over a page that
+   * disagrees with the Overview.
+   *
+   * Both default OFF, so an upgrade changes no number until someone turns them
+   * on and recomputes.
+   *
+   * The vendor test is a CODE PREFIX, not a name match. "INTERCO" as a substring
+   * of the name also matches INTERCON TERMINAL INDONESIA, a genuine third-party
+   * supplier in this data, and silently dropping a real vendor's orders is worse
+   * than not excluding anything.
+   */
+  const exHoldPos = rules['exclusions.hold_pos'] === true || rules['exclusions.hold_pos'] === 'true';
+  /**
+   * Deleted documents (requested 7 Oct 2026: "PR & PO with Status contain
+   * 'Deleted' shall not included in any calculation in any chart, card or
+   * pages"). Excluded here, like the rules above, because that is the only
+   * place that reaches EVERY page by construction - one forgotten
+   * `NOT is_deleted` in one query was how a deleted USD 516 M order line (PO
+   * 1012014225 item 1, about Rp 8.7 T) kept appearing on Vendor 360.
+   *
+   * A requisition's deletion follows to its orders, as its org exclusion does:
+   * such a line's status is PR-Deleted. ON by default; the rule switches it
+   * off for an audit of what was deleted.
+   */
+  const exDeleted = !(rules['exclusions.deleted_docs'] === false || rules['exclusions.deleted_docs'] === 'false');
+  const exIntercoPrefixes = ((rules['exclusions.interco_vendor_prefixes'] as string[] | undefined) ?? [])
+    .map((x) => String(x).trim().toUpperCase())
+    .filter((x) => x !== '');
+  const isInterco = (code: string | null): boolean =>
+    code !== null && exIntercoPrefixes.some((pre) => code.toUpperCase().startsWith(pre));
   let excludedPoLines = 0;
   let excludedPrItems = 0;
+  /**
+   * Rows whose key has already been seen in this bundle. The FIRST is kept.
+   *
+   * The release facts have always had this guard; the three main facts did not,
+   * so one repeated row in the PR, PO or GR export reached the database insert
+   * and failed the whole load on a primary-key violation - after parsing and
+   * validating had both passed, with an error that named a partition rather
+   * than a row. Two loads on 25 Sep 2026 failed that way and the dashboard
+   * stayed on the previous day's data. A repeated row is a data question worth
+   * reporting; it is not a reason to publish nothing.
+   */
+  let duplicatePrItems = 0;
+  let duplicatePoLines = 0;
+  let duplicateGrPostings = 0;
+  const seenPrItem = new Set<string>();
+  const seenPoLine = new Set<string>();
+  const seenGrPosting = new Set<string>();
   const excludedPoKeys = new Set<string>();
+  const excludedPrKeys = new Set<string>();
+  /**
+   * Header-level bookkeeping for the release feeds, which are keyed by document
+   * rather than by line.
+   *
+   * Doc type, purchasing group and purchasing org are all PO HEADER attributes
+   * in SAP (EKKO), repeated on every line of the export — so in practice every
+   * line of a document shares the exclusion verdict. `kept` is still tracked
+   * rather than assumed: if an export ever disagrees with itself, a document
+   * with even one surviving line keeps its approval steps, which errs towards
+   * showing data rather than silently dropping approvals.
+   */
+  const excludedPoNos = new Set<string>();
+  const keptPoNos = new Set<string>();
+  const excludedPrNos = new Set<string>();
+  const keptPrNos = new Set<string>();
+  /** [kind, docNo, docItem, reason] — persisted for the Coupa store (014). */
+  const excludedDocRows: unknown[][] = [];
+
+  /**
+   * Why a requisition is excluded, or null. ONE predicate, used by the
+   * requisition pass below and by the order pass that follows a requisition's
+   * exclusion through to its orders.
+   */
+  const prExclusionOf = (p: StagedRow['payload']): string | null => {
+    const prDocType = s(p.docType);
+    return exDeleted && (s(p.deletionIndicator) ?? '').toLowerCase() === 'true' ? 'deleted'
+      : prDocType !== null && exDocTypes.has(prDocType) ? `doc_type=${prDocType}`
+      : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+        : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+          : null;
+  };
+
+  /**
+   * An order leaves with its requisition (decided 25 Sep 2026: "leave out
+   * everything that started in PRO2").
+   *
+   * Each document used to be judged by its OWN purchasing organization. A
+   * requisition raised under an excluded org and ordered under one that is not
+   * - PRO2 raised, PUR1 bought, on 1,987 lines of staging's data - was dropped
+   * while its order was kept, so the order counted in committed value while its
+   * origin had been excluded, and could not be found in the detail view either.
+   *
+   * Computed BEFORE the order pass because that pass runs first. The receipts
+   * follow automatically: a receipt is skipped when its order is excluded.
+   */
+  const excludedPrReason = new Map<string, string>();
+  for (const r of prRows) {
+    const prNo = s(r.payload.prNo);
+    const prItem = i(r.payload.prItem);
+    if (prNo === null || prItem === null) continue;
+    const why = prExclusionOf(r.payload);
+    if (why !== null) excludedPrReason.set(`${prNo}|${prItem}`, why);
+  }
 
   const stoSuffix = rules['sto.doctype_suffix'] as string;
   const fxPolicy = rules['fx.policy'] as FxPolicy;
@@ -212,6 +340,13 @@ export async function runTransform(
   await client.query('SELECT core.create_version_partitions($1)', [versionId]);
 
   // ── PR release: continuation-row fill with guards ──
+  // Rows from the merged store were filled when they were stored (merge.ts),
+  // so the fill below finds no continuation rows in them; the flag it would
+  // have set travels in the payload instead.
+  const storedContinuation = new Set(
+    prelRows.filter((r) => r.payload['_continuation'] === true)
+      .map((r) => `${s(r.payload.prNo)}|${i(r.payload.prItem)}|${i(r.payload.relSeq)}`),
+  );
   const releaseRaw: ReleaseRowRaw[] = prelRows.map((r) => ({
     rowNumber: r.source_row,
     prNo: s(r.payload.prNo),
@@ -310,8 +445,49 @@ export async function runTransform(
     prByKey.set(k, r.payload);
   }
 
-  // ── linkage (PO side authoritative) ──
+  /**
+   * Why an order line is excluded, or null: its own document type, group,
+   * org or deletion; the requisition it was raised from; then the line-level
+   * rules (held, intercompany). Used to keep excluded lines out of the PR/PO
+   * linkage, which is built before the order pass; the order pass applies the
+   * same tests in the same order (header-level, then line-level by status).
+   *
+   * The linkage used to be built from EVERY order line, excluded or not, so a
+   * requisition whose only order had been excluded still counted that order
+   * (po_line_count, its status, split sourcing) although the order was not in
+   * the facts. Harmless while exclusions were a few org codes; with deleted
+   * documents excluded (7 Oct 2026) it would have left 3,720 deleted order
+   * lines' requisitions looking ordered.
+   *
+   * HOLD is decided here from the inputs rowStatus decides it from - not
+   * deleted, requisition not deleted, incomplete flag set - because the
+   * linkage is needed before statuses exist.
+   */
+  const poExclusionOf = (p: StagedRow['payload']): string | null => {
+    const docType = s(p.docType);
+    const own = exDeleted && (s(p.deletionIndicator) ?? '').trim().toUpperCase() === 'L' ? 'deleted'
+      : docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
+        : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+          : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+            : null;
+    if (own !== null) return own;
+    const prKey = `${s(p.prNo)}|${i(p.prItem)}`;
+    const fromRequisition = excludedPrReason.get(prKey);
+    if (fromRequisition !== undefined) return `requisition ${fromRequisition}`;
+    const code = splitSupplier(p.supplierRaw).code;
+    if (isInterco(code)) return `interco_vendor=${code}`;
+    if (exHoldPos && (s(p.incomplete) ?? '').trim().toUpperCase() === 'X') {
+      const poDel = (s(p.deletionIndicator) ?? '').trim().toUpperCase() === 'L';
+      const pr = prByKey.get(prKey);
+      const prDel = pr !== undefined && (s(pr.deletionIndicator) ?? '').toLowerCase() === 'true';
+      if (!poDel && !prDel) return 'status=HOLD PO';
+    }
+    return null;
+  };
+
+  // ── linkage (PO side authoritative), over the order lines that survive ──
   const poLinkRefs: PoLinkRef[] = poRows
+    .filter((r) => poExclusionOf(r.payload) === null)
     .map((r) => ({
       poNo: s(r.payload.poNo) ?? '',
       poItem: i(r.payload.poItem) ?? 0,
@@ -380,18 +556,29 @@ export async function runTransform(
     const poItem = i(p.poItem);
     if (poNo === null || poItem === null) continue;
     const key = `${poNo}|${poItem}`;
+    if (seenPoLine.has(key)) { duplicatePoLines += 1; continue; }
+    seenPoLine.add(key);
 
     const docType = s(p.docType);
 
-    if (
-      (docType !== null && exDocTypes.has(docType)) ||
-      exPurchGroups.has(s(p.purchGroup) ?? '') ||
-      exPurchOrgs.has(s(p.purchOrg) ?? '')
-    ) {
+    // Same tests, in the same order, as poExclusionOf above.
+    const ownExclusion = exDeleted && (s(p.deletionIndicator) ?? '').trim().toUpperCase() === 'L' ? 'deleted'
+      : docType !== null && exDocTypes.has(docType) ? `doc_type=${docType}`
+      : exPurchGroups.has(s(p.purchGroup) ?? '') ? `purch_group=${s(p.purchGroup)}`
+        : exPurchOrgs.has(s(p.purchOrg) ?? '') ? `purch_org=${s(p.purchOrg)}`
+          : null;
+    // The order's own org first, then the requisition it was raised from.
+    const fromRequisition = excludedPrReason.get(`${s(p.prNo)}|${i(p.prItem)}`);
+    const poExclusion = ownExclusion
+      ?? (fromRequisition !== undefined ? `requisition ${fromRequisition}` : null);
+    if (poExclusion !== null) {
       excludedPoLines += 1;
       excludedPoKeys.add(key);
+      excludedPoNos.add(poNo);
+      excludedDocRows.push(['po', poNo, poItem, poExclusion]);
       continue;
     }
+    keptPoNos.add(poNo);
 
     const sto = isSto(docType, stoSuffix);
     if (sto) {
@@ -433,7 +620,7 @@ export async function runTransform(
     // rate. No rate for the period => NULL (strict, never a blended guess).
     const idrRate = fx.table.toUsd(1, 'IDR', fxDate, fxPolicy).resolution.usdPerUnit;
     const toIdr = (raw: number | null, usd: number | null): number | null => {
-      if (ccy === 'IDR') return raw;
+      if (ccy === 'IDR' || raw === 0) return raw;
       if (usd === null || idrRate === null || idrRate === 0) return null;
       return Math.round((usd / idrRate) * 100) / 100;
     };
@@ -481,6 +668,33 @@ export async function runTransform(
       },
       releasePolicy,
     );
+
+    /**
+     * Held and intercompany lines, dropped here rather than in the header-level
+     * block above for two different reasons.
+     *
+     * HOLD is tested on the DERIVED status, not on the raw `incomplete` flag.
+     * They are not the same set: 264 rows carry the flag but only 241 resolve to
+     * HOLD PO, because deletion takes precedence in rowStatus. Excluding on the
+     * flag would drop 23 lines the reader would call deleted, not held.
+     *
+     * INTERCO needs supplier.code, which is parsed from the export's combined
+     * supplier field further up this loop.
+     *
+     * The document is NOT added to excludedPoNos, so the release feeds keep its
+     * approval steps — the same bias the header-level exclusions take, stated
+     * there: a document with any surviving line keeps its approvals rather than
+     * silently losing them.
+     */
+    const lineExclusion = exHoldPos && st.status === 'HOLD PO' ? 'status=HOLD PO'
+      : isInterco(supplier.code) ? `interco_vendor=${supplier.code}`
+        : null;
+    if (lineExclusion !== null) {
+      excludedPoLines += 1;
+      excludedPoKeys.add(key);
+      excludedDocRows.push(['po', poNo, poItem, lineExclusion]);
+      continue;
+    }
 
     const deliveryDate = s(p.deliveryDate);
     const receiptDate = agg?.receiptDate ?? null;
@@ -591,11 +805,22 @@ export async function runTransform(
     const prItem = i(p.prItem);
     if (prNo === null || prItem === null) continue;
     const key = `${prNo}|${prItem}`;
+    if (seenPrItem.has(key)) { duplicatePrItems += 1; continue; }
+    seenPrItem.add(key);
 
-    if (exPurchGroups.has(s(p.purchGroup) ?? '') || exPurchOrgs.has(s(p.purchOrg) ?? '')) {
+    // Document type is tested here too. The PR export carries its own Document
+    // Type column, and excluding a type used to drop only the PO lines while
+    // every requisition of that type stayed on the PR, Open Items and
+    // Governance pages — so the same setting produced two different scopes.
+    const prExclusion = prExclusionOf(p);
+    if (prExclusion !== null) {
       excludedPrItems += 1;
+      excludedPrKeys.add(key);
+      excludedPrNos.add(prNo);
+      excludedDocRows.push(['pr', prNo, prItem, prExclusion]);
       continue;
     }
+    keptPrNos.add(prNo);
 
     const appr = derivePrApproval(releaseByPrItem.get(key) ?? []);
     const deleted = (s(p.deletionIndicator) ?? '').toLowerCase() === 'true';
@@ -686,6 +911,12 @@ export async function runTransform(
     const postingDate = s(p.postingDate);
     if (mvt === null || poNo === null || poItem === null || matDoc === null || matDocItem === null) continue;
     if (postingDate === null) continue;
+    // The YEAR is part of the key: see material_doc_year below. Without it, the
+    // same number in two fiscal years would be counted here as a duplicate and
+    // one genuine receipt silently dropped.
+    const grKey = `${postingDate.slice(0, 4)}|${matDoc}|${matDocItem}`;
+    if (seenGrPosting.has(grKey)) { duplicateGrPostings += 1; continue; }
+    seenGrPosting.add(grKey);
 
     const rule = lookupMovement(mvt);
     if (rule === null) continue; // already recorded as a BLOCKER
@@ -716,14 +947,56 @@ export async function runTransform(
       s(p.postedBy),
       r.batch_file_id,
       r.source_row,
+      // SAP numbers material documents per FISCAL YEAR (MJAHR), so a document
+      // number and item repeat across years. The first multi-year extract, on
+      // 25 Sep 2026, carried 217 of them - document 5190005034 item 1 posted
+      // both 2 Jan 2026 and 7 Jan 2025 - and the load failed on the old key.
+      // The export has no year column; the posting date's year IS the fiscal
+      // year for these calendar-year companies, and every row has one (a row
+      // without a posting date is skipped above).
+      Number(postingDate.slice(0, 4)),
     ]);
   }
 
   // ── release facts ──
   const prRelRows: unknown[][] = [];
   const seenPrRel = new Set<string>();
+  let excludedPrRelRows = 0;
   for (const r of filled.rows) {
     if (r.prNo === null || r.prItem === null || r.relSeq === null) continue;
+
+    // Approval steps of an excluded requisition must go with it. Without this
+    // the release facts kept every step, so an excluded purchasing group still
+    // appeared in Pending PR Approvals, the approver-bottleneck table and the
+    // approval cycle times — the exclusion was honoured everywhere except the
+    // pages built from this feed.
+    //
+    // Second clause: a release row whose requisition is absent from the PR feed
+    // entirely (the two exports need not cover the same window) is judged on
+    // its own columns instead. This feed carries no purchasing group, so only
+    // document type and purchasing org can be tested.
+    if (
+      // (a) this exact requisition item was excluded
+      excludedPrKeys.has(`${r.prNo}|${r.prItem}`)
+      // (b) the requisition was excluded and NO item of it survived. Needed
+      // because the two exports do not agree on item numbers: 189 of the
+      // reference PRs carry approval steps against item numbers absent from
+      // the PR export, so matching on the exact item left 378 approval steps
+      // behind for a requisition that had been fully excluded.
+      || (excludedPrNos.has(r.prNo) && !keptPrNos.has(r.prNo))
+      // (c) the requisition is unknown to the PR export — judge it on its own
+      // columns. This feed carries no purchasing group, so only document type
+      // and purchasing org can be tested.
+      || (
+        !keptPrNos.has(r.prNo) && !excludedPrNos.has(r.prNo)
+        && ((r.docType !== null && exDocTypes.has(r.docType))
+          || exPurchOrgs.has(r.purchOrg ?? ''))
+      )
+    ) {
+      excludedPrRelRows += 1;
+      continue;
+    }
+
     const k = `${r.prNo}|${r.prItem}|${r.relSeq}`;
     if (seenPrRel.has(k)) continue; // guard against duplicate keys after fill
     seenPrRel.add(k);
@@ -738,7 +1011,7 @@ export async function runTransform(
       r.status,
       r.approveDate,
       r.approveTime,
-      r.wasContinuation,
+      r.wasContinuation || storedContinuation.has(k),
       r.plant,
       (r.plant ?? '').slice(0, 2) || null,
       r.purchOrg,
@@ -750,12 +1023,28 @@ export async function runTransform(
 
   const poRelRows: unknown[][] = [];
   const seenPoRel = new Set<string>();
+  let excludedPoRelRows = 0;
   for (const r of porRows) {
     const p = r.payload;
     const poNo = s(p.poNo);
     const relSeq = i(p.relSeq);
     const relCode = s(p.relCode);
     if (poNo === null || relSeq === null || relCode === null) continue;
+
+    // Same reasoning as the PR release feed: drop the approval steps of an
+    // excluded order. A document is only dropped when NO line of it survived,
+    // and one absent from the PO feed is judged on its own purchasing org (the
+    // only exclusion attribute this export carries).
+    if (
+      (excludedPoNos.has(poNo) && !keptPoNos.has(poNo))
+      || (
+        !keptPoNos.has(poNo) && !excludedPoNos.has(poNo)
+        && exPurchOrgs.has(s(p.purchOrg) ?? '')
+      )
+    ) {
+      excludedPoRelRows += 1;
+      continue;
+    }
     const k = `${poNo}|${relSeq}|${relCode}`;
     if (seenPoRel.has(k)) continue;
     seenPoRel.add(k);
@@ -817,6 +1106,18 @@ export async function runTransform(
   await insertMany(client, 'core.fact_pr_release', PREL_COLS, prRelRows);
   await insertMany(client, 'core.fact_po_release', POR_COLS, poRelRows);
   await insertMany(client, 'core.bridge_pr_po', BRIDGE_COLS, bridgeRows);
+
+  // What the exclusion config dropped (014). The Coupa store is polled
+  // continuously and is not rebuilt per version, so its invoice and payment
+  // queries cannot re-derive this — they read it from here. Writing it in the
+  // same transaction as the facts keeps the two consistent.
+  if (excludedDocRows.length > 0) {
+    await insertMany(
+      client, 'core.excluded_doc',
+      ['dataset_version_id', 'kind', 'doc_no', 'doc_item', 'reason'],
+      excludedDocRows.map((r) => [versionId, ...r]),
+    );
+  }
 
   // Derived columns that need the facts in place: sourcing days and retro POs.
   await client.query(
@@ -900,6 +1201,98 @@ export async function runTransform(
     [versionId],
   );
 
+  // ── reference / master data (018) ──
+  // The four SAP master exports. Kept separate from the conformed dimensions
+  // above because those are DERIVED FROM THE FACTS of this version, while these
+  // come from their own files and describe what a code means today.
+  //
+  // Global and last-writer-wins, matching dim_company / dim_purch_group. Nothing
+  // here can move a published figure: every attribute a number depends on is
+  // already denormalised onto the facts at this point.
+  //
+  // Each is skipped silently when its feed is absent from the bundle — that is
+  // the whole point of them being optional, and a bundle of six files must not
+  // wipe reference data loaded by an earlier bundle of ten.
+  await upsertReferenceData(client, batchId);
+
+  // Administrator edits to master data (032), re-imposed HERE: after every SAP
+  // write to the dimensions above, and before anything below reads them to
+  // stamp a figure. Earlier and this run's SAP values would win over the edit;
+  // later and the spend-category stamp below would use the SAP category. Most
+  // of these tables are rewritten by every sync, which is the whole reason
+  // edits are stored as overrides rather than written in place.
+  const overrides = await applyDimOverrides(client);
+  if (overrides.failed > 0) {
+    console.warn(`master overrides: ${overrides.applied} applied, ${overrides.failed} could not be`);
+  }
+
+  // ── Executive Summary attributes (020) ──
+  // Stamped onto the fact, not joined at read time, for the reason stated in the
+  // migration: a chart point and its drill predicate must filter the same
+  // column, and the parity sweep checks that they agree. A category that lived
+  // only in a join could not be a drill filter at all.
+  //
+  // ORDER MATTERS AND IS LOAD-BEARING. The resolution order below reads
+  // dim_material_master, which upsertReferenceData() populates from THIS
+  // bundle — so this must run after that call, and it now does.
+  //
+  // This was wrong once and shipped, because the failure only appears on a
+  // FIRST run. Any environment that had transformed before already had a
+  // populated dim_material_master from an earlier version, so the join found
+  // rows and the ordering bug was invisible; on staging's first run the table
+  // was still empty inside the transaction and 68% of committed value resolved
+  // to '(unmapped)'. Hence the coverage check below rather than trust.
+  await client.query(
+    `UPDATE core.fact_po_line f
+        SET size_band = ${sizeBandSql('f.net_order_value_idr')},
+            -- Generated from packages/rules so the Materials master resolves
+            -- every material the same way this stamps the facts. Two queries
+            -- over two populations that must not disagree.
+            spend_category = ${spendCategoryWithPlantSql('f.material_code', 'f.material_group', 'f.plant')}
+      WHERE f.dataset_version_id = $1`,
+    [versionId],
+  );
+
+  // The same stamp on the REQUISITION side (031). A requisition has a category
+  // of its own - through its material - and filtering by the derived expression
+  // cost about a second a query, so it is stored here exactly as the order side
+  // above is. Same generator, so a requisition and the order raised against it
+  // resolve identically wherever they both appear.
+  await client.query(
+    `UPDATE core.fact_pr_item f
+        SET spend_category = ${spendCategoryWithPlantSql('f.material_code', 'f.material_group', 'f.plant')}
+      WHERE f.dataset_version_id = $1`,
+    [versionId],
+  );
+
+  // Coverage check. Not a blocker — a low mapping rate is a data question, not a
+  // reason to refuse a dataset whose figures are otherwise correct — but it is
+  // loud, because "everything is unmapped" is indistinguishable from "the page
+  // is broken" when you are looking at the page.
+  {
+    const cov = await client.query<{ unmapped: string; total: string; master: string }>(
+      `SELECT
+         COALESCE(sum(net_order_value_idr) FILTER (WHERE spend_category = '(unmapped)'), 0)::text AS unmapped,
+         COALESCE(sum(net_order_value_idr), 0)::text AS total,
+         (SELECT count(*) FROM core.dim_material_master)::text AS master
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
+      [versionId],
+    );
+    const row = cov.rows[0];
+    if (row) {
+      const total = Number(row.total);
+      const share = total > 0 ? (Number(row.unmapped) / total) * 100 : 0;
+      if (share > 20) {
+        console.warn(
+          `spend_category: ${share.toFixed(1)}% of committed value is '(unmapped)' `
+          + `with ${row.master} rows in dim_material_master. Either the material master `
+          + 'does not cover these codes, or it was written after this stamp ran.',
+        );
+      }
+    }
+  }
+
   await client.query(
     `ANALYZE core.fact_pr_item_v${versionId};
      ANALYZE core.fact_po_line_v${versionId};
@@ -922,6 +1315,9 @@ export async function runTransform(
     directPoLines: linkage.directPoCount,
     danglingPrRefs: linkage.dangling.length,
     grOrphans,
+    duplicatePrItems,
+    duplicatePoLines,
+    duplicateGrPostings,
     stoLines,
     stoPos: stoPoSet.size,
     tokenPriceLinesNonSto: tokenLines,
@@ -939,10 +1335,14 @@ export async function runTransform(
     l2BeforeL1: filled.l2BeforeL1,
     unregisteredMovementTypes: [...unregistered],
     fxCurrencies: new Set(fx.rates.map((r) => r.currency)).size,
+    fxSuppliedByBundle: fxRows.length > 0,
+    fxRatePairs: fx.rates.length,
     fxYearResolved: fx.yearResolved,
     unratedCurrencies: [...unrated],
     excludedPoLines,
     excludedPrItems,
+    excludedPrReleaseRows: excludedPrRelRows,
+    excludedPoReleaseRows: excludedPoRelRows,
     invoiceDatedFxLines: invoiceDatedLines,
     fxSourceSap: fx.sourceCounts.sap,
     fxSourceCoupa: fx.sourceCounts.coupa,
@@ -960,6 +1360,142 @@ export async function runTransform(
   );
 
   return { datasetVersionId: versionId, asOfDate, metrics };
+}
+
+/**
+ * Load the four SAP reference exports into their dimension tables.
+ *
+ * Each feed is independent: a bundle may carry all four, one, or none. An absent
+ * feed is a no-op rather than a delete — reference data persists across bundles
+ * that do not re-supply it.
+ */
+async function upsertReferenceData(client: pg.PoolClient, batchId: number): Promise<void> {
+  // ── Purchasing groups ──
+  // is_ho is recomputed here with 017's rule rather than trusted from the file,
+  // which carries no such column: a desk is Head Office when its code starts
+  // '@', or its description starts "HO", or contains "HO-".
+  const pgrp = await loadStaged(batchId, 'pgrp');
+  if (pgrp.length > 0) {
+    const rows = pgrp
+      .map((r) => {
+        const code = s(r.payload['code']);
+        const description = s(r.payload['description']);
+        return { code, description };
+      })
+      .filter((r): r is { code: string; description: string } => r.code !== null && r.code !== '');
+    if (rows.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_purch_group (code, description, is_ho, source)
+         SELECT c, d,
+                (c LIKE '@%' OR d LIKE 'HO%' OR d LIKE '%HO-%'),
+                'sap_export'
+           FROM unnest($1::text[], $2::text[]) AS t(c, d)
+         ON CONFLICT (code) DO UPDATE
+           SET description = EXCLUDED.description,
+               is_ho       = EXCLUDED.is_ho,
+               source      = EXCLUDED.source`,
+        [rows.map((r) => r.code), rows.map((r) => r.description ?? '')],
+      );
+    }
+  }
+
+  // ── Purchasing organisations ──
+  const porg = await loadStaged(batchId, 'porg');
+  if (porg.length > 0) {
+    const codes: string[] = [];
+    const descs: string[] = [];
+    for (const r of porg) {
+      const code = s(r.payload['code']);
+      if (code === null || code === '') continue;
+      codes.push(code);
+      descs.push(s(r.payload['description']) ?? '');
+    }
+    if (codes.length > 0) {
+      // is_ho is derived here rather than trusted from the file, which carries no
+      // such column — the same arrangement as dim_purch_group (017), and the
+      // same rule shape. See migration 021 for the eleven organisations this
+      // classifies today and the two judgement calls in it.
+      await client.query(
+        `INSERT INTO core.dim_purch_org (code, description, is_ho)
+         SELECT c, d, (d LIKE 'HQ%' OR d LIKE 'HO %' OR d LIKE 'HO-%')
+           FROM unnest($1::text[], $2::text[]) AS t(c, d)
+         ON CONFLICT (code) DO UPDATE
+           SET description = EXCLUDED.description,
+               is_ho       = EXCLUDED.is_ho`,
+        [codes, descs],
+      );
+    }
+  }
+
+  // ── Material master ──
+  // The export has a handful of duplicate material codes (11,134 rows for
+  // 11,131 codes), so the same statement would hit "cannot affect row a second
+  // time". DISTINCT ON keeps the last occurrence, matching the file's own order.
+  const matm = await loadStaged(batchId, 'matm');
+  if (matm.length > 0) {
+    const codes: string[] = [];
+    const descs: (string | null)[] = [];
+    const cats: (string | null)[] = [];
+    for (const r of matm) {
+      const code = s(r.payload['materialCode']);
+      if (code === null || code === '') continue;
+      codes.push(code);
+      descs.push(s(r.payload['description']));
+      cats.push(s(r.payload['category']));
+    }
+    if (codes.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_material_master (material_code, description, category)
+         SELECT DISTINCT ON (c) c, d, k
+           FROM unnest($1::text[], $2::text[], $3::text[]) WITH ORDINALITY AS t(c, d, k, n)
+          ORDER BY c, n DESC
+         ON CONFLICT (material_code) DO UPDATE
+           SET description = EXCLUDED.description,
+               category    = EXCLUDED.category`,
+        [codes, descs, cats],
+      );
+    }
+  }
+
+  // ── SAP users ──
+  // display_name is precomputed because either part can be blank (background
+  // jobs have no first name), so it is not simply first || ' ' || last. When
+  // both are blank the id itself is the label — never an empty string, which
+  // would render as a gap in a table with no way to tell what it meant.
+  const zuser = await loadStaged(batchId, 'zuser');
+  if (zuser.length > 0) {
+    const clients: string[] = [];
+    const ids: string[] = [];
+    const firsts: (string | null)[] = [];
+    const lasts: (string | null)[] = [];
+    const displays: string[] = [];
+    for (const r of zuser) {
+      const userId = s(r.payload['userId']);
+      if (userId === null || userId === '') continue;
+      const first = s(r.payload['firstName']);
+      const last = s(r.payload['lastName']);
+      const display = [first, last].filter((x) => x !== null && x !== '').join(' ').trim();
+      clients.push(s(r.payload['client']) ?? '');
+      ids.push(userId);
+      firsts.push(first);
+      lasts.push(last);
+      displays.push(display === '' ? userId : display);
+    }
+    if (ids.length > 0) {
+      await client.query(
+        `INSERT INTO core.dim_sap_user (client, user_id, first_name, last_name, display_name)
+         SELECT DISTINCT ON (cl, u) cl, u, f, l, dn
+           FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+                WITH ORDINALITY AS t(cl, u, f, l, dn, n)
+          ORDER BY cl, u, n DESC
+         ON CONFLICT (client, user_id) DO UPDATE
+           SET first_name   = EXCLUDED.first_name,
+               last_name    = EXCLUDED.last_name,
+               display_name = EXCLUDED.display_name`,
+        [clients, ids, firsts, lasts, displays],
+      );
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────── FX
@@ -1071,7 +1607,11 @@ async function buildFx(
     console.warn('fx_rate_source unavailable, excel-only FX:', err instanceof Error ? err.message : err);
   }
 
-  const rates = buildFxTable(raw);
+  // Manual rates (032) replace what SAP or Coupa supplied for that currency and
+  // month. Applied to the rate table as it is BUILT, never to a published
+  // core.fx_rate: a published version is immutable, so a manual rate is valued
+  // from this recompute on.
+  const rates = await applyFxOverrides(buildFxTable(raw));
   return { table: new FxTable(rates), rates, yearResolved: anchor.ambiguous ? null : year, sourceCounts };
 }
 
@@ -1116,7 +1656,7 @@ const GR_COLS = [
   'dataset_version_id', 'material_doc', 'material_doc_item', 'po_no', 'po_item', 'movement_type',
   'posting_class', 'counts_as_receipt', 'posting_date', 'entry_date', 'qty_entry_raw', 'signed_qty',
   'unit_of_entry', 'amount_local', 'material_code', 'material_desc', 'plant', 'company_code',
-  'vendor_code', 'posted_by', 'source_file_id', 'source_row',
+  'vendor_code', 'posted_by', 'source_file_id', 'source_row', 'material_doc_year',
 ] as const;
 
 const PREL_COLS = [

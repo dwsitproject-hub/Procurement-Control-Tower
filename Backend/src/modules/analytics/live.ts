@@ -8,13 +8,15 @@
 
 import { pool } from '../../db/client.js';
 import { PARITY_KPIS, PARITY_CHARTS } from './mart_parity.js';
+import { cycleKpis, inlineKpis } from './mart.js';
+import { loadRuleSnapshot } from '../admin/rules.js';
 import {
   buildFilterClause, injectFilter, mergeIntoPredicate, type FactKind, type GlobalFilter,
 } from './globalfilter.js';
 
 export interface LiveKpi {
   kpiId: string;
-  status: 'ok' | 'unavailable';
+  status: 'ok' | 'unavailable' | 'insufficient_sample' | 'disabled';
   value: number | null;
   numerator: number | null;
   denominator: number | null;
@@ -47,13 +49,19 @@ const JOINED_ALIAS: Record<string, { kind: FactKind; alias: string }> = {
   single_source_spend_idr: { kind: 'po_line', alias: 'p.' },
   urgent_po_before_pr: { kind: 'po_line', alias: 'pol.' },
   pr_approval_lead_time: { kind: 'pr_item', alias: 'i.' },
+  // Joins fact_pr_release r to fact_pr_item i; both carry plant and
+  // company_code, so an unqualified clause is an ambiguous-column error. The
+  // requisition side is the right one to filter: it is where plant, company and
+  // the month basis live.
+  worst_approver_gap: { kind: 'pr_item', alias: 'i.' },
 };
 
 function targetOf(id: string, grain: string | undefined): { kind: FactKind; alias: string } {
   const joined = JOINED_ALIAS[id];
   if (joined) return joined;
   const kind: FactKind =
-    grain === 'pr_item' ? 'pr_item' : grain === 'gr_posting' ? 'gr_posting' : 'po_line';
+    grain === 'pr_item' || grain === 'gr_posting' || grain === 'pr_release' || grain === 'po_release'
+      ? grain : 'po_line';
   return { kind, alias: '' };
 }
 
@@ -97,10 +105,10 @@ export async function computeLiveKpis(
       continue;
     }
 
-    let row: { value?: unknown; numerator?: unknown; denominator?: unknown; sample?: unknown } = {};
+    let row: Record<string, unknown> = {};
     try {
       const r = await pool.query(sql, [versionId, ...clause.params]);
-      row = (r.rows[0] ?? {}) as typeof row;
+      row = (r.rows[0] ?? {}) as Record<string, unknown>;
     } catch (err) {
       out.push({
         kpiId: spec.id, status: 'unavailable', value: null, numerator: null, denominator: null,
@@ -115,28 +123,68 @@ export async function computeLiveKpis(
     }
 
     const value =
-      row.value === null || row.value === undefined || Number.isNaN(Number(row.value))
+      row['value'] === null || row['value'] === undefined || Number.isNaN(Number(row['value']))
         ? null
-        : Number(row.value);
+        : Number(row['value']);
+
+    /**
+     * Every extra column the spec returned, exactly as buildParityMart does for
+     * the precomputed path.
+     *
+     * This used to be `spec.entityUnit ? { entityUnit } : null`, which threw the
+     * rest away — including `value_idr`, the currency twin KpiCard reads. So
+     * under ANY global filter, on ANY page, every money card lost its IDR figure
+     * and fell back to USD captioned "IDR view unavailable (unrated period)"
+     * while the very same card still said "all currencies rated". Two
+     * contradictory statements on one card, and the toggle looked broken.
+     *
+     * It surfaced on the Executive Summary's focus panel because that panel is
+     * ALWAYS filtered, so it never once showed rupiah — but the fault was in the
+     * shared live path, not the panel.
+     */
+    const CORE_COLS = new Set(['value', 'numerator', 'denominator', 'sample']);
+    const detail: Record<string, unknown> = spec.entityUnit ? { entityUnit: spec.entityUnit } : {};
+    for (const [k, v] of Object.entries(row)) {
+      if (CORE_COLS.has(k) || v === null || v === undefined) continue;
+      detail[k] = Number.isNaN(Number(v)) ? v : Number(v);
+    }
 
     out.push({
       kpiId: spec.id,
       status: value === null ? 'unavailable' : 'ok',
       value,
-      numerator: row.numerator === null || row.numerator === undefined ? null : Number(row.numerator),
-      denominator:
-        row.denominator === null || row.denominator === undefined ? null : Number(row.denominator),
-      sampleSize: row.sample === null || row.sample === undefined ? null : Number(row.sample),
+      numerator: row['numerator'] === null || row['numerator'] === undefined
+        ? null : Number(row['numerator']),
+      denominator: row['denominator'] === null || row['denominator'] === undefined
+        ? null : Number(row['denominator']),
+      sampleSize: row['sample'] === null || row['sample'] === undefined
+        ? null : Number(row['sample']),
       unit: spec.unit,
       currencyBasis: spec.currencyBasis ?? null,
       severity: severityOf(value, spec.worseWhenHigh, spec.worseWhenLow),
       statusReason: value === null ? 'No qualifying rows under the active filter.' : null,
-      detail: spec.entityUnit ? { entityUnit: spec.entityUnit } : null,
+      detail: Object.keys(detail).length > 0 ? detail : null,
       // The drill must carry the same global filter, or the card and its drill
       // would disagree the moment a filter is applied.
       drillPredicate: mergeIntoPredicate(spec.drill, filter),
     });
   }
+
+  /*
+   * The cycle times: the mart's own function with the filter passed in. The
+   * sample floor is the rule in force, and a KPI a data caveat disabled in the
+   * mart stays disabled here - a filter narrows a population, it cannot make a
+   * caveated measure trustworthy.
+   */
+  const rules = await loadRuleSnapshot();
+  const disabled = new Set((await pool.query<{ kpi_id: string }>(
+    `SELECT kpi_id FROM mart.kpi_value WHERE dataset_version_id = $1 AND status = 'disabled'`,
+    [versionId],
+  )).rows.map((r) => r.kpi_id));
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>
+    (await pool.query<T>(sql, params)).rows;
+  out.push(...await inlineKpis(q, versionId, rules, disabled, filter));
+  out.push(...await cycleKpis(q, versionId, Number(rules['kpi.min_sample'] ?? 30), disabled, filter));
 
   return out;
 }
@@ -158,6 +206,41 @@ export interface LiveChart {
   points: LiveChartPoint[];
 }
 
+/**
+ * Compute EVERY series of a chart under the filter.
+ *
+ * The single-spec version below was the only entry point, and it used find()
+ * rather than filter() — so a filtered multi-series chart silently lost all but
+ * its first series. Unfiltered the mart holds them all, so the panel looked
+ * complete until someone touched the filter bar and half of it vanished with no
+ * error. aging_by_priority, po_bracket_* and the Executive Summary's Open/Closed
+ * splits were all affected.
+ *
+ * A series whose SQL legitimately returns nothing is DROPPED rather than
+ * returned empty: under "Open only" there are no Delivered rows, and an empty
+ * "Closed" series in the response would draw a legend entry for something that
+ * cannot exist in that slice.
+ */
+export async function computeLiveChartSeries(
+  versionId: number,
+  chartId: string,
+  filter: GlobalFilter,
+): Promise<LiveChart[] | null> {
+  const specs = PARITY_CHARTS.filter((c) => c.chartId === chartId);
+  if (specs.length === 0) return null;
+
+  const out: LiveChart[] = [];
+  for (const spec of specs) {
+    const one = await computeLiveChartFor(spec, versionId, chartId, filter);
+    // A null here means the filter cannot be honoured for this spec at all; that
+    // is a property of the chart, not of one series, so the caller falls back to
+    // the precomputed chart with its "filter not applied" note.
+    if (one === null) return null;
+    if (one.points.length > 0) out.push(one);
+  }
+  return out;
+}
+
 export async function computeLiveChart(
   versionId: number,
   chartId: string,
@@ -165,15 +248,42 @@ export async function computeLiveChart(
 ): Promise<LiveChart | null> {
   const spec = PARITY_CHARTS.find((c) => c.chartId === chartId);
   if (!spec) return null;
+  return computeLiveChartFor(spec, versionId, chartId, filter);
+}
 
-  // Chart specs embed their own grain in the drill jsonb; infer from the SQL's
-  // driving table instead, which is unambiguous.
-  const kind: FactKind = spec.sql.includes('fact_pr_item') && !spec.sql.includes('fact_po_line')
-    ? 'pr_item'
-    : spec.sql.includes('fact_gr_posting')
-      ? 'gr_posting'
-      : 'po_line';
-  const alias = JOINED_ALIAS[chartId]?.alias ?? '';
+async function computeLiveChartFor(
+  spec: {
+    chartId: string; seriesKey: string; seriesLabel: string; unit: string; sql: string;
+    filterAlias?: string;
+    filterKind?: FactKind;
+  },
+  versionId: number,
+  chartId: string,
+  filter: GlobalFilter,
+): Promise<LiveChart | null> {
+
+  /*
+   * The grain the global filter applies at.
+   *
+   * Inferred from the SQL's table names, which is right for the great majority
+   * of specs and WRONG for any PR-grain spec that merely mentions the order
+   * table - a subquery resolving each requisition's purchase order, say. Such a
+   * spec was read as po_line and the filter then wrote `spend_category` against
+   * fact_pr_item, which has no such column: three charts answered HTTP 500 for
+   * every request carrying an Executive Summary dimension.
+   *
+   * So a spec may now STATE its grain, and the inference remains the default.
+   * Stated beats inferred wherever the two can disagree.
+   */
+  const kind: FactKind = spec.filterKind
+    ?? (spec.sql.includes('fact_pr_item') && !spec.sql.includes('fact_po_line')
+      ? 'pr_item'
+      : spec.sql.includes('fact_gr_posting')
+        ? 'gr_posting'
+        : 'po_line');
+  // Per-series alias first: a chart can have one single-table series and one
+  // joined series, and only the series itself knows which it is.
+  const alias = spec.filterAlias ?? JOINED_ALIAS[chartId]?.alias ?? '';
 
   // A scope toggle on a GR-grain chart cannot be honored; returning null makes
   // the route fall back to the precomputed chart with its explicit
@@ -242,10 +352,15 @@ export async function globalFilterOptions(versionId: number): Promise<{
   plant: { value: string; label: string }[];
   purchOrg: { value: string; label: string }[];
   monthKey: { value: string; label: string }[];
+  year: { value: string; label: string }[];
 }> {
   const co = await pool.query<{ value: string; label: string }>(
     `SELECT DISTINCT pol.company_code AS value,
-            COALESCE(dc.legal_name, pol.company_code) AS label
+            -- '(blank)' rather than an empty string: 119 lines carry an empty
+            -- company_code, and as a nameless row the option was invisible in
+            -- the dropdown. The VALUE stays '' so it still filters, and so
+            -- select-all continues to cover the whole population.
+            COALESCE(NULLIF(dc.legal_name, ''), NULLIF(pol.company_code, ''), '(blank)') AS label
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_company dc ON dc.company_code = pol.company_code
       WHERE pol.dataset_version_id = $1 ORDER BY 1`,
@@ -253,14 +368,14 @@ export async function globalFilterOptions(versionId: number): Promise<{
   );
   const pl = await pool.query<{ value: string; label: string }>(
     `SELECT DISTINCT pol.plant AS value,
-            COALESCE(dp.plant_name, pol.plant) AS label
+            COALESCE(NULLIF(dp.plant_name, ''), NULLIF(pol.plant, ''), '(blank)') AS label
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
       WHERE pol.dataset_version_id = $1 ORDER BY 1`,
     [versionId],
   );
   const po = await pool.query<{ value: string; label: string }>(
-    `SELECT DISTINCT purch_org AS value, purch_org AS label
+    `SELECT DISTINCT purch_org AS value, COALESCE(NULLIF(purch_org, ''), '(blank)') AS label
        FROM core.fact_po_line WHERE dataset_version_id = $1 AND purch_org <> '' ORDER BY 1`,
     [versionId],
   );
@@ -271,5 +386,18 @@ export async function globalFilterOptions(versionId: number): Promise<{
       WHERE dataset_version_id = $1 AND document_date IS NOT NULL ORDER BY 1`,
     [versionId],
   );
-  return { company: co.rows, plant: pl.rows, purchOrg: po.rows, monthKey: mo.rows };
+  // Years from BOTH feeds: the requisition extract reaches further back than
+  // the order extract, and a year holding only requisitions is still a year
+  // the Requisition pages can be filtered to.
+  const yr = await pool.query<{ value: string; label: string }>(
+    `SELECT DISTINCT y AS value, y AS label FROM (
+       SELECT to_char(document_date, 'YYYY') AS y FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND document_date IS NOT NULL
+       UNION
+       SELECT to_char(requisition_date, 'YYYY') FROM core.fact_pr_item
+        WHERE dataset_version_id = $1 AND requisition_date IS NOT NULL
+     ) t ORDER BY 1`,
+    [versionId],
+  );
+  return { company: co.rows, plant: pl.rows, purchOrg: po.rows, monthKey: mo.rows, year: yr.rows };
 }

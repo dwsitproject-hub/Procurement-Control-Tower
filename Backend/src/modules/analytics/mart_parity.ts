@@ -9,7 +9,12 @@
  */
 
 import type pg from 'pg';
+import {
+  AGE_BANDS, ageBandCaseSql, ageBandOrderSql, ageBandPredicateSql,
+} from '@pct/rules';
+import { sizeBandLabelSql, spendCategoryWithPlantSql } from '@pct/rules';
 import { insertMany } from '../../db/client.js';
+import type { FactKind } from './globalfilter.js';
 
 // Statuses v1 treats as "open".
 const OPEN = `('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`;
@@ -38,6 +43,30 @@ interface KpiSpec {
 }
 
 const PRI = 'core.fact_pr_item';
+/**
+ * Spend category for a PR item, derived rather than stored.
+ *
+ * fact_pr_item has material_code, material_group and plant — everything the
+ * rule needs — but no spend_category column of its own. Deriving it here keeps
+ * the Material Group page on the same categories as the Executive Summary
+ * without a migration and without a recompute, so it works against datasets
+ * that were published before this change.
+ */
+/*
+ * Qualified with the table alias, and that is load-bearing rather than tidy.
+ *
+ * The generator embeds subqueries over core.dim_spend_category sc_, which has
+ * its own material_code and material_group columns. An UNQUALIFIED outer
+ * reference binds to the inner table instead — `sc_.material_code =
+ * material_code` becomes `sc_.material_code = sc_.material_code`, true for
+ * every row, and the subquery returns thousands. The recompute fails with
+ * "more than one row returned by a subquery used as an expression", which
+ * names the symptom and not the cause. Every caller must pass alias-qualified
+ * column names.
+ */
+const PR_SPEND_CAT = spendCategoryWithPlantSql(
+  'pri.material_code', 'pri.material_group', 'pri.plant',
+);
 const POL = 'core.fact_po_line';
 
 export const PARITY_KPIS: KpiSpec[] = [
@@ -431,6 +460,149 @@ export const PARITY_KPIS: KpiSpec[] = [
     drill: { grain: 'po_line', filters: { notSto: true } },
   },
 
+  // ── Executive Summary (020) ──
+  //
+  // The page makes two claims and these KPIs are those claims, computed rather
+  // than asserted in prose. The reference design stated them as static text
+  // ("top 5 = 70%", "72% of lines < Rp 25 Jt = 4% of value"), which is how a
+  // slide goes stale silently.
+  //
+  // Every one uses the same purchase population as total_po_amount — NOT is_sto
+  // AND NOT is_deleted — so a tile and the value chart beside it can never
+  // disagree about what "committed value" counts.
+  {
+    id: 'active_purch_groups',
+    entityUnit: 'desks',
+    unit: 'count',
+    sql: `SELECT count(DISTINCT purch_group)::int AS value FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND purch_group IS NOT NULL AND btrim(purch_group) <> ''`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    // How few desks hold most of the value. This replaces the reference design's
+    // "HO 92% of value" panel, which cannot be reproduced here: NO Head-Office
+    // purchasing group appears in this entity's orders at all, so an HO/UNIT
+    // split computes to 2%/98% and would tell the reader the opposite of the
+    // truth. Desk concentration carries the same strategic point — a few desks
+    // control the money, many run the paperwork — and is measurable.
+    id: 'desks_for_80pct_value',
+    entityUnit: 'desks',
+    unit: 'count',
+    sql: `WITH d AS (
+            SELECT purch_group, sum(net_order_value_idr) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND purch_group IS NOT NULL AND btrim(purch_group) <> ''
+             GROUP BY 1
+          ), c AS (
+            SELECT sum(v) OVER (ORDER BY v DESC NULLS LAST
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                   / NULLIF((SELECT sum(v) FROM d), 0) AS cum
+              FROM d
+          )
+          SELECT (count(*) FILTER (WHERE cum < 0.8) + 1)::int AS value,
+                 count(*)::int AS sample FROM c`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'vendors_for_80pct_value',
+    entityUnit: 'vendors',
+    unit: 'count',
+    sql: `WITH d AS (
+            SELECT vendor_code, sum(net_order_value_idr) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND vendor_code IS NOT NULL
+             GROUP BY 1
+          ), c AS (
+            SELECT sum(v) OVER (ORDER BY v DESC NULLS LAST
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                   / NULLIF((SELECT sum(v) FROM d), 0) AS cum
+              FROM d
+          )
+          SELECT (count(*) FILTER (WHERE cum < 0.8) + 1)::int AS value,
+                 count(*)::int AS sample FROM c`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'top5_category_share_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `WITH c AS (
+            SELECT spend_category, sum(net_order_value_idr) AS v FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+             GROUP BY 1
+          ), r AS (
+            SELECT v, row_number() OVER (ORDER BY v DESC NULLS LAST) AS rn FROM c
+          )
+          SELECT 100.0 * COALESCE(sum(v) FILTER (WHERE rn <= 5), 0)
+                 / NULLIF(sum(v), 0) AS value, count(*)::int AS sample FROM r`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    // The fragmentation pair. Two KPIs rather than one sentence, because the
+    // whole argument is that these two numbers are far apart: a large share of
+    // the lines carries a tiny share of the value. Bands 5, 6 and 7 are
+    // everything below Rp 25 Jt (packages/rules/src/size_band.ts).
+    id: 'lines_under_25jt_pct',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE size_band IN ('5','6','7'))
+                 / NULLIF(count(*), 0) AS value, count(*)::int AS sample
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND size_band IS NOT NULL`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'value_under_25jt_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `SELECT 100.0 * COALESCE(sum(net_order_value_idr)
+                   FILTER (WHERE size_band IN ('5','6','7')), 0)
+                 / NULLIF(sum(net_order_value_idr), 0) AS value, count(*)::int AS sample
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND size_band IS NOT NULL`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+
+  {
+    // The reference design's "control versus execution": Head Office holds the
+    // money, sites run the paperwork.
+    //
+    // Keyed on purchasing ORGANISATION, not purchasing group. 020 checked it on
+    // dim_purch_group.is_ho, got 2% against 98%, concluded the split could not be
+    // measured here and dropped the panel. That was the wrong column: the group
+    // is the buyer's desk, the organisation is the HQ-versus-site distinction.
+    // On the right column it is 98.3% of value and 73% of lines, matching the
+    // design's 92% / 51% in shape and magnitude.
+    //
+    // LEFT JOIN with COALESCE(false): an organisation missing from the master is
+    // counted as non-HQ rather than dropped, so the two shares always sum with
+    // the whole population and cannot quietly exclude rows.
+    id: 'ho_share_value_pct',
+    unit: 'percent',
+    currencyBasis: 'idr_based',
+    sql: `SELECT 100.0 * COALESCE(sum(f.net_order_value_idr)
+                   FILTER (WHERE COALESCE(o.is_ho, false)), 0)
+                 / NULLIF(sum(f.net_order_value_idr), 0) AS value,
+                 count(*)::int AS sample
+            FROM ${POL} f
+            LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
+           WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+  {
+    id: 'ho_share_lines_pct',
+    unit: 'percent',
+    sql: `SELECT 100.0 * count(*) FILTER (WHERE COALESCE(o.is_ho, false))
+                 / NULLIF(count(*), 0) AS value, count(*)::int AS sample
+            FROM ${POL} f
+            LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
+           WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
+    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+  },
+
   // ── G6.3: the v1-only registry KPIs, promoted (decision 3 Aug 2026) ──
   {
     // v1 'Tail Spend % (IDR)': share of IDR spend in the bottom 80% of PO
@@ -587,22 +759,28 @@ export const PARITY_KPIS: KpiSpec[] = [
     // name rides in the detail jsonb via the extra-column mechanism.
     id: 'worst_approver_gap',
     unit: 'days',
-    sql: `WITH g AS (
+    // One population CTE, read twice. It used to scan the facts a SECOND time for
+    // `sample`, under its own version anchor — and injectFilter patches exactly
+    // one — so under a filter the value was filtered while the sample size next
+    // to it was not. The new guard in injectFilter refuses that shape outright,
+    // which turned the card into "cannot be filtered"; this makes it genuinely
+    // filterable instead, with both numbers drawn from the same rows.
+    sql: `WITH pop AS (
             SELECT r.pic_release,
-                   percentile_cont(0.5) WITHIN GROUP (ORDER BY (r.approve_date - i.requisition_date)) AS med,
-                   count(*)::int AS n
+                   (r.approve_date - i.requisition_date) AS gap
               FROM core.fact_pr_release r
               JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
                            AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
              WHERE r.dataset_version_id = $1
                AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL
-             GROUP BY r.pic_release HAVING count(*) >= 30)
+          ), g AS (
+            SELECT pic_release,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) AS med,
+                   count(*)::int AS n
+              FROM pop GROUP BY pic_release HAVING count(*) >= 30
+          )
           SELECT max(med) AS value,
-                 (SELECT count(*)::int FROM core.fact_pr_release r
-                    JOIN ${PRI} i ON i.dataset_version_id = r.dataset_version_id
-                                 AND i.pr_no = r.pr_no AND i.pr_item = r.pr_item
-                   WHERE r.dataset_version_id = $1
-                     AND r.approve_date IS NOT NULL AND i.requisition_date IS NOT NULL) AS sample,
+                 (SELECT count(*)::int FROM pop) AS sample,
                  (SELECT pic_release FROM g ORDER BY med DESC LIMIT 1) AS worst_pic
             FROM g`,
     drill: { grain: 'pr_release', filters: { gapEvaluable: true } },
@@ -692,7 +870,137 @@ interface ChartSpec {
   unit: string;
   /** Must return bucket_key, bucket_label, value, row_count, drill (jsonb). */
   sql: string;
+  /**
+   * Table alias the global-filter clause must qualify, when this SERIES joins two
+   * facts. Per-series, not per-chart: aging_by_priority's first series is a
+   * single-table query on fact_pr_item (no alias) while its second joins pol to
+   * pri and needs 'pol.'. A chart-level alias cannot be right for both, and
+   * before all series were computed under a filter only the first ever ran, so
+   * the mismatch was invisible.
+   */
+  filterAlias?: string;
+  /**
+   * The grain the global filter applies at, when the SQL's tables would say
+   * otherwise. A PR-grain spec that resolves each requisition's order in a
+   * subquery mentions fact_po_line and would be inferred as po_line.
+   */
+  filterKind?: FactKind;
 }
+
+/**
+ * Requisition flow by month - incoming against outgoing.
+ *
+ * Replaces a plain count of requisitions raised (an inline builder in mart.ts,
+ * so it could never be recomputed under a filter). Requested 22 Sep 2026: a
+ * count of what arrived says nothing about whether the desk is keeping up,
+ * which is the question the page is opened with.
+ *
+ *   IN    carried_in  requisitions still waiting when the month opened
+ *         new_pr      requisitions raised during the month
+ *   OUT   to_po       requisitions that became a purchase order
+ *         cancelled   requisitions since deleted, by the month they were raised
+ *
+ * The four balance exactly, month to month:
+ *
+ *   carried_in(M+1) = carried_in(M) + new_pr(M) - to_po(M) - cancelled(M)
+ *
+ * verified across all 24 transitions in the reference dataset.
+ *
+ * -- One spine, four series ------------------------------------------------
+ *
+ * Every series selects from the SAME month list and LEFT JOINs its own phase
+ * onto it. Not tidiness: the chart endpoint merges buckets by key and keeps the
+ * ordinal of the first series that mentioned each one, while every series
+ * numbers its own buckets from 1. A series spanning 7 months beside one
+ * spanning 25 therefore assigns two different ordinals to the same month and
+ * the x-axis scrambles - 2026-01 sorted to the front, ahead of 2023-12. Shared
+ * buckets also mean a month with no conversions draws a zero bar instead of a
+ * gap the eye reads as missing data.
+ *
+ * The spine is raise months UNION conversion months, so a month in which
+ * nothing was raised but something converted still appears.
+ *
+ * -- Retro POs -------------------------------------------------------------
+ *
+ * A conversion month is never earlier than the raise month. 57 of this
+ * dataset's 10,228 converted requisitions carry an order dated before the
+ * requisition, and taken literally they drain a month they had not yet
+ * entered - six months were out of balance by 1 to 28 before the floor was
+ * applied. The CASE around GREATEST is load-bearing: GREATEST ignores NULL, so
+ * without it every requisition that never converted counts as converted on
+ * arrival, and the balance then passes degenerately with carried_in at zero.
+ *
+ * -- What this data cannot do ----------------------------------------------
+ *
+ * The SAP export carries a deletion FLAG and no deletion DATE, so "cancelled in
+ * March" does not exist here. `cancelled` is bucketed by the month the
+ * requisition was RAISED - "raised in March, since cancelled" - which the
+ * chart's note says out loud rather than leaving a reader to assume the outflow
+ * is timed. It is also the only bucketing under which the balance above holds.
+ *
+ * -- Why carried_in is a stock ---------------------------------------------
+ *
+ * A requisition raised in January and converted in April is counted in
+ * February, March and April. That is the point - it was waiting in all three -
+ * but it means those bars must never be added up. Stated in the chart's notes,
+ * where a reader will meet it.
+ */
+const PR_FLOW_BASE = `WITH pr AS (
+    SELECT pri.pr_no, pri.pr_item, pri.is_deleted, pri.requisition_date AS rd,
+           to_char(pri.requisition_date, 'YYYY-MM') AS rm,
+           (SELECT CASE WHEN min(pl.document_date) IS NULL THEN NULL
+                        ELSE GREATEST(to_char(min(pl.document_date), 'YYYY-MM'),
+                                      to_char(pri.requisition_date, 'YYYY-MM')) END
+              FROM ${POL} pl
+             WHERE pl.dataset_version_id = pri.dataset_version_id
+               AND pl.pr_no = pri.pr_no AND pl.pr_item = pri.pr_item) AS pm
+      FROM ${PRI} pri
+     WHERE pri.dataset_version_id = $1 /*F*/
+       AND pri.requisition_date IS NOT NULL
+  ),
+  spine AS (
+    SELECT rm AS mk FROM pr WHERE rm IS NOT NULL
+    UNION
+    SELECT pm      FROM pr WHERE pm IS NOT NULL
+  )`;
+
+/**
+ * One series of the flow chart: the spine, its phase, and its own drill. `band`
+ * narrows the brought-forward stock to one age band (below).
+ */
+const prFlowSeries = (phase: string, joinOn: string, band?: string): string =>
+  `${PR_FLOW_BASE}
+   SELECT s.mk AS bucket_key,
+          to_char(to_date(s.mk, 'YYYY-MM'), 'Mon YYYY') AS bucket_label,
+          count(pr.pr_no)::int AS value,
+          count(pr.pr_no)::int AS row_count,
+          jsonb_build_object('grain','pr_item','filters',
+            jsonb_build_object('prFlow',
+              jsonb_build_object('phase','${phase}','month', s.mk${band === undefined ? '' : `, 'band', '${band}'`}))) AS drill
+     FROM spine s
+     LEFT JOIN pr ON ${joinOn}
+    GROUP BY 1,2 ORDER BY 1`;
+
+/**
+ * The brought-forward stock split by how long each requisition had been
+ * waiting WHEN THE MONTH OPENED (requested 7 Oct 2026, for the waterfall): the
+ * same six bands as Open Items, measured from the raise date to the 1st of the
+ * month. The six add up to `carried_in` exactly - every brought-forward
+ * requisition was raised before the month, so its age is at least one day and
+ * falls in exactly one band.
+ */
+const CARRIED_IN_BAND_SERIES: ChartSpec[] = AGE_BANDS.map((b, idx) => ({
+  chartId: 'pr_by_month',
+  seriesKey: `carried_in_b${idx}`,
+  filterKind: 'pr_item' as const,
+  filterAlias: 'pri.',
+  seriesLabel: `Brought forward ${b.label}`,
+  unit: 'count',
+  sql: prFlowSeries('carried_in',
+    `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk
+     AND ${ageBandPredicateSql(`(to_date(s.mk, 'YYYY-MM') - pr.rd)`, b.key)}`,
+    b.key),
+}));
 
 /** Six PO-approval bands (user decision 4 Aug 2026), same-day first. */
 const APPR6_BUCKET = `CASE WHEN d <= 0 THEN '0d' WHEN d <= 3 THEN '1-3d' WHEN d <= 7 THEN '4-7d'
@@ -701,6 +1009,16 @@ const APPR6_ORDER = `CASE WHEN d <= 0 THEN 1 WHEN d <= 3 THEN 2 WHEN d <= 7 THEN
                           WHEN d <= 14 THEN 4 WHEN d <= 30 THEN 5 ELSE 6 END`;
 
 /** v1's four Open-Items age bands, ordered oldest-first like v1. */
+/**
+ * The six bands (23 Sep 2026), over the facts' own aging column. Generated from
+ * @pct/rules, which is also where the drill compiler and the detail table's
+ * filter get theirs - a boundary that moved in one and not the others is a bar
+ * that opens rows it did not count.
+ */
+const AGE6_BUCKET = ageBandCaseSql('aging_days');
+const AGE6_ORDER = ageBandOrderSql('aging_days');
+
+/** The four bands those replaced. Still read by charts not yet migrated. */
 const AGE4_BUCKET = `CASE WHEN aging_days > 90 THEN '>90' WHEN aging_days > 30 THEN '31-90'
                           WHEN aging_days > 15 THEN '15-30' ELSE '0-15' END`;
 const AGE4_ORDER = `CASE WHEN aging_days > 90 THEN 1 WHEN aging_days > 30 THEN 2
@@ -712,7 +1030,666 @@ const DIST_BUCKETS = `CASE WHEN d <= 3 THEN '0-3' WHEN d <= 7 THEN '4-7' WHEN d 
 const DIST_ORDER = `CASE WHEN d <= 3 THEN 1 WHEN d <= 7 THEN 2 WHEN d <= 14 THEN 3
                          WHEN d <= 30 THEN 4 WHEN d <= 60 THEN 5 ELSE 6 END`;
 
+/**
+ * v1's PO value brackets — ch-po-brkval / ch-po-brkcnt. "JT" = juta, million IDR.
+ *
+ * The bracket is a property of the DOCUMENT, not of the line and not of the
+ * slice: v1's renderPOBrackets sums a PO's IDR lines and brackets that total,
+ * and the drill's `poDocBracket` predicate re-aggregates the same way. So under
+ * a global filter the bracket stays the WHOLE document's total while the
+ * measures — the amount, the document count, and the lines the drill opens —
+ * cover only the surviving lines. A 30 Jt PO with 4 Jt still open is a
+ * "25 - 100 JT" document with 4 Jt open, not a "0 - 5 JT" one.
+ *
+ * Bracketing on the filtered total instead would put the same PO in different
+ * brackets on different toggles, and would disagree with the drill by a few
+ * dozen lines in each direction under scope=open (user decision, 20 Aug 2026).
+ */
+const PO_BRACKETS: { key: string; lo: number; hi: number | null }[] = [
+  { key: '0 - 5 JT', lo: 0, hi: 5_000_000 },
+  { key: '5 - 25 JT', lo: 5_000_000, hi: 25_000_000 },
+  { key: '25 - 100 JT', lo: 25_000_000, hi: 100_000_000 },
+  { key: '100 - 500 JT', lo: 100_000_000, hi: 500_000_000 },
+  { key: '>500 JT', lo: 500_000_000, hi: null },
+];
+
+// `slice` is the filtered population — one row per PO of the lines that survive
+// the global filter. `total` is deliberately a SECOND, UNFILTERED pass over the
+// same lines, because it supplies the bracket rather than a measure; the join
+// then drops it if the document is not worth anything, exactly as the drill's
+// `_t.total > 0` does.
+//
+// The injection point is pinned with /*F*/ rather than left to injectFilter's
+// "first dataset_version_id = $1 wins" rule, because here the two anchors mean
+// different things and landing on the wrong one is silent.
+//
+// NOTE: do not write the anchor text itself in a SQL comment in this file.
+// injectFilter searches the raw SQL string, so a comment that mentions it
+// becomes the first match and the filter clause is appended INSIDE the comment -
+// silently dropped, while its bind parameter is still supplied. That surfaces as
+// a 'bind message supplies 2 parameters' error, nowhere near the real cause.
+//
+// row_count is the LINES behind the bar, which is what the drill opens — the
+// same entity-vs-row convention the PO Hold card uses.
+function poBracketSql(
+  b: { key: string; lo: number; hi: number | null },
+  metric: 'amount' | 'documents',
+): string {
+  const range = b.hi === null ? `d.total >= ${b.lo}` : `d.total >= ${b.lo} AND d.total < ${b.hi}`;
+  const bucket = metric === 'amount' ? 'Amount in Local Currency' : 'PO Count';
+  const value = metric === 'amount'
+    ? `(SELECT sum(d.amount) FROM docs d WHERE ${range})::numeric`
+    : `(SELECT count(*)::numeric FROM docs d WHERE ${range})`;
+  return `WITH slice AS (
+               SELECT po_no, sum(net_order_value) AS amount, count(*) AS lines
+                 FROM ${POL}
+                WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                  AND NOT is_sto AND NOT is_deleted /*F*/
+                GROUP BY 1),
+             docs AS (
+               SELECT s.amount, s.lines, t.total
+                 FROM slice s
+                 JOIN (SELECT po_no, sum(net_order_value) AS total
+                         FROM ${POL}
+                        WHERE dataset_version_id = $1 AND currency_code = 'IDR'
+                          AND NOT is_sto AND NOT is_deleted
+                        GROUP BY 1 HAVING sum(net_order_value) > 0) t ON t.po_no = s.po_no)
+           SELECT '${bucket}' AS bucket_key, '${bucket}' AS bucket_label,
+                  ${value} AS value,
+                  (SELECT COALESCE(sum(d.lines), 0)::int FROM docs d WHERE ${range}) AS row_count,
+                  jsonb_build_object('grain','po_line','filters',
+                    jsonb_build_object('poDocBracket','${b.key}','currencyIs','IDR',
+                                       'notSto',true,'notDeleted',true)) AS drill`;
+}
+
 export const PARITY_CHARTS: ChartSpec[] = [
+  /**
+   * v1's 'Open items by aging band', on the shared six bands.
+   *
+   * Inline in mart.ts until 23 Sep 2026, where it carried its own cut -
+   * 0-30/31-60/61-90/91-180/180+ - which matched no other aging figure on the
+   * page: two charts side by side, both called aging bands, neither
+   * comparable. Here it uses the one definition and gains live filtering.
+   */
+  {
+    chartId: 'aging_bands', seriesKey: 'lines', seriesLabel: 'Open PO lines', unit: 'count',
+    sql: `SELECT ${ageBandCaseSql('aging_days')} AS bucket_key,
+                 ${ageBandCaseSql('aging_days')} AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('open', true,
+                     'ageBand', ${ageBandCaseSql('aging_days')})) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 /*F*/
+             AND aging_days IS NOT NULL
+             AND status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')
+           GROUP BY 1, 2, ${ageBandOrderSql('aging_days')}
+           ORDER BY ${ageBandOrderSql('aging_days')}`,
+  },
+
+  {
+    chartId: 'pr_by_month', seriesKey: 'carried_in',
+    filterKind: 'pr_item', filterAlias: 'pri.',
+    seriesLabel: 'Brought forward (still open)', unit: 'count',
+    sql: prFlowSeries('carried_in',
+      `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk`),
+  },
+  {
+    chartId: 'pr_by_month', seriesKey: 'new_pr',
+    filterKind: 'pr_item', filterAlias: 'pri.',
+    seriesLabel: 'Newly raised', unit: 'count',
+    sql: prFlowSeries('new', `pr.rm = s.mk`),
+  },
+  {
+    chartId: 'pr_by_month', seriesKey: 'to_po',
+    filterKind: 'pr_item', filterAlias: 'pri.',
+    seriesLabel: 'Became PO', unit: 'count',
+    sql: prFlowSeries('to_po', `NOT pr.is_deleted AND pr.pm = s.mk`),
+  },
+  {
+    chartId: 'pr_by_month', seriesKey: 'cancelled',
+    filterKind: 'pr_item', filterAlias: 'pri.',
+    seriesLabel: 'Cancelled (by month raised)', unit: 'count',
+    sql: prFlowSeries('cancelled', `pr.is_deleted AND pr.rm = s.mk`),
+  },
+  ...CARRIED_IN_BAND_SERIES,
+
+  // ── Executive Summary charts (022) ──
+  //
+  // These exist HERE, not only in mart.ts, because a chart is only filterable if
+  // it has a live spec: liveChartAvailable() consults this registry, and without
+  // an entry the global filter bar silently does nothing to the panel. That was
+  // the state on the Executive Summary until now.
+  //
+  // Each category and each size band splits into OPEN (status <> 'Delivered')
+  // and CLOSED (status = 'Delivered'). Stacked, the two segments still sum to the
+  // bucket's total, so the ranking and the share the panel is read for survive
+  // the split rather than being replaced by it.
+  //
+  // The percentage denominators use window functions over the SAME filtered CTE,
+  // so under a filter the shares are shares OF THE FILTERED POPULATION. Taking
+  // them from the precomputed total instead would make a filtered panel's bars
+  // sum to something other than 100% with no indication why.
+  {
+    chartId: 'exec_txn_size', seriesKey: 'open_value', seriesLabel: 'Open — % of value', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS part,
+                   count(*) FILTER (WHERE status <> 'Delivered')::int AS n,
+                   sum(sum(v)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_v > 0 THEN 100.0 * part / total_v ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'closed_value', seriesLabel: 'Closed — % of value', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS part,
+                   count(*) FILTER (WHERE status = 'Delivered')::int AS n,
+                   sum(sum(v)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_v > 0 THEN 100.0 * part / total_v ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'open_lines', seriesLabel: 'Open — % of lines', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   count(*) FILTER (WHERE status <> 'Delivered')::numeric AS part,
+                   count(*) FILTER (WHERE status <> 'Delivered')::int AS n,
+                   sum(sum(1)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_n > 0 THEN 100.0 * part / total_n ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  {
+    chartId: 'exec_txn_size', seriesKey: 'closed_lines', seriesLabel: 'Closed — % of lines', unit: 'percent',
+    sql: `WITH b AS (
+            SELECT size_band, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND size_band IS NOT NULL
+          ), g AS (
+            SELECT size_band,
+                   count(*) FILTER (WHERE status = 'Delivered')::numeric AS part,
+                   count(*) FILTER (WHERE status = 'Delivered')::int AS n,
+                   sum(sum(1)) OVER () AS total_v,
+                   sum(count(*)) OVER () AS total_n
+              FROM b GROUP BY 1
+          )
+          SELECT size_band AS bucket_key,
+                 ${sizeBandLabelSql('size_band')} AS bucket_label,
+                 CASE WHEN total_n > 0 THEN 100.0 * part / total_n ELSE 0 END AS value,
+                 n AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('sizeBand', size_band,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM g ORDER BY size_band`,
+  },
+  // USD siblings of the two series below. The catalogue's convention is a base
+  // series plus an `*_idr` twin over the SAME rows with the SAME drill, and the
+  // frontend switches between them on the currency toggle — without these the
+  // panel showed rupiah no matter what the header said.
+  //
+  // Plain sum(net_order_value_usd), matching po_value_by_category: an unrated
+  // line contributes null and is skipped. That is the catalogue's existing
+  // behaviour for chart money, and the strict-FX treatment stays where it
+  // belongs, on the KPI cards that declare a currencyBasis.
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'open', seriesLabel: 'Open (USD)', unit: 'usd',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_usd AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'closed', seriesLabel: 'Closed (USD)', unit: 'usd',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_usd AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'open_idr', seriesLabel: 'Open (IDR)', unit: 'idr',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status <> 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
+  /**
+   * PO-LINE COUNTS per spend category, beside the value series.
+   *
+   * Requested 1 Sep 2026, matching what the transaction-size panel already does:
+   * value alone hides the shape of the work. METHANOL is the largest category by
+   * a distance on value and a rounding error on line count, and a page that
+   * shows only money makes the desk that raises it look like the busiest.
+   */
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'open_lines', seriesLabel: 'Open — PO lines', unit: 'count',
+    sql: `SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS value,
+                 count(*) FILTER (WHERE status <> 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', spend_category,
+                                      'delivered', false,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND spend_category IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'closed_lines', seriesLabel: 'Closed — PO lines', unit: 'count',
+    sql: `SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', spend_category,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND spend_category IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+
+  /**
+   * Managed by HO or Site — who raised the order, by month.
+   *
+   * Requested 1 Sep 2026. The desk that RAISES an order is the SAP user in
+   * `created_by`, and whether that person sits at Head Office or at a site comes
+   * from the business file loaded in 026 (core.dim_user_purch_org.ho_unit).
+   *
+   * ── Two things stated rather than hidden ────────────────────────────────────
+   *
+   * A user can act for several purchasing orgs, but never with a conflicting
+   * HO/Unit — no user in the file disagrees with themselves — so min() picks the
+   * one value rather than fabricating a tie-break.
+   *
+   * A creator who is NOT in the file becomes '(unmapped)' rather than being
+   * dropped or quietly counted as Site. That is 2,384 lines from 2 users on the
+   * current dataset, and folding them into either side would misstate the split
+   * the panel exists to show.
+   *
+   * The bucket carries month and band as `YYYY-MM|BAND`, the same composite the
+   * monthly-category panel uses and for the same reason: the bands are data, and
+   * a ChartSpec's series are static SQL.
+   */
+  {
+    chartId: 'exec_ho_site', seriesKey: 'value', seriesLabel: 'PO value (USD)', unit: 'usd',
+    sql: `WITH u AS (
+            SELECT user_id, min(ho_unit) AS ho_unit
+              FROM core.dim_user_purch_org GROUP BY user_id
+          ), b AS (
+            SELECT to_char(f.document_date,'YYYY-MM') AS mk,
+                   to_char(f.document_date,'Mon YYYY') AS ml,
+                   COALESCE(u.ho_unit, '(unmapped)') AS band,
+                   f.net_order_value_usd AS v
+              FROM ${POL} f LEFT JOIN u ON u.user_id = f.created_by
+             WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted /*F*/
+               AND f.document_date IS NOT NULL
+          )
+          SELECT mk || '|' || band AS bucket_key,
+                 ml || '|' || band AS bucket_label,
+                 sum(v)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', mk,
+                                      'createdByHoUnit', band,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY mk, ml, band ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_ho_site', seriesKey: 'value_idr', seriesLabel: 'PO value (IDR)', unit: 'idr',
+    sql: `WITH u AS (
+            SELECT user_id, min(ho_unit) AS ho_unit
+              FROM core.dim_user_purch_org GROUP BY user_id
+          ), b AS (
+            SELECT to_char(f.document_date,'YYYY-MM') AS mk,
+                   to_char(f.document_date,'Mon YYYY') AS ml,
+                   COALESCE(u.ho_unit, '(unmapped)') AS band,
+                   f.net_order_value_idr AS v
+              FROM ${POL} f LEFT JOIN u ON u.user_id = f.created_by
+             WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted /*F*/
+               AND f.document_date IS NOT NULL
+          )
+          SELECT mk || '|' || band AS bucket_key,
+                 ml || '|' || band AS bucket_label,
+                 sum(v)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', mk,
+                                      'createdByHoUnit', band,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY mk, ml, band ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_ho_site', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
+    sql: `WITH u AS (
+            SELECT user_id, min(ho_unit) AS ho_unit
+              FROM core.dim_user_purch_org GROUP BY user_id
+          ), b AS (
+            SELECT to_char(f.document_date,'YYYY-MM') AS mk,
+                   to_char(f.document_date,'Mon YYYY') AS ml,
+                   COALESCE(u.ho_unit, '(unmapped)') AS band
+              FROM ${POL} f LEFT JOIN u ON u.user_id = f.created_by
+             WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted /*F*/
+               AND f.document_date IS NOT NULL
+          )
+          SELECT mk || '|' || band AS bucket_key,
+                 ml || '|' || band AS bucket_label,
+                 count(*)::int AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', mk,
+                                      'createdByHoUnit', band,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY mk, ml, band ORDER BY 1`,
+  },
+  /**
+   * Outstanding PR by aging, day by day.
+   *
+   * Requested 1 Sep 2026. Every other aging figure on this dashboard is measured
+   * ONCE, at the dataset's as-of date. This one reconstructs history: for each
+   * calendar day it asks which requisitions had been raised and did not yet have
+   * a purchase order, and how old they were ON THAT DAY.
+   *
+   * That is why it needs its own drill filter (prOutstandingOn). A predicate
+   * built from `aging_days` would select the set as measured today, not as it
+   * stood on 3 June, and the parity sweep would catch the difference — which is
+   * exactly the check that makes this panel trustworthy rather than decorative.
+   *
+   * ── Window ──────────────────────────────────────────────────────────────────
+   *
+   * Current month and the one before it, from the DATASET's as-of date rather
+   * than the wall clock. The same published version has to draw the same chart
+   * tomorrow, and an extract that ends in July should not show an empty August.
+   *
+   * ── One version anchor ──────────────────────────────────────────────────────
+   *
+   * The PO lookup joins on `pr.dataset_version_id` instead of repeating `$1`.
+   * injectFilter patches exactly one `dataset_version_id = $1` anchor and throws
+   * on a second, so a two-CTE shape that names the version twice cannot be
+   * filtered at all.
+   */
+  {
+    chartId: 'exec_pr_outstanding', seriesKey: 'items', seriesLabel: 'Outstanding PR items', unit: 'count',
+    filterKind: 'pr_item',
+    sql: `WITH pr AS (
+            SELECT p.dataset_version_id, p.pr_no, p.pr_item,
+                   p.requisition_date::date AS req
+              FROM ${PRI} p
+             WHERE p.dataset_version_id = $1 /*F*/
+               AND NOT p.is_deleted AND p.requisition_date IS NOT NULL
+          ), po AS (
+            SELECT o.pr_no, o.pr_item, min(o.document_date)::date AS po_date
+              FROM core.fact_po_line o
+              JOIN pr ON pr.pr_no = o.pr_no AND pr.pr_item = o.pr_item
+                     AND o.dataset_version_id = pr.dataset_version_id
+             WHERE o.document_date IS NOT NULL
+             GROUP BY 1, 2
+          ), win AS (
+            SELECT generate_series(
+                     date_trunc('month', v.as_of_date - interval '1 month')::date,
+                     v.as_of_date::date,
+                     interval '1 day')::date AS d
+              FROM core.dataset_version v
+             WHERE v.id = (SELECT min(dataset_version_id) FROM pr)
+          ), x AS (
+            SELECT win.d,
+                   -- Re-banded 16 Sep 2026 (was <7 / 8-14 / 15-21 / 22-30 / >31).
+                   -- 61-90 is not in the requested list, which named <7, 8-30,
+                   -- 31-60, 91-150 and >150 and so left days 61 to 90 with
+                   -- nowhere to go. A band that matches nothing does not drop
+                   -- quietly out of a stacked chart -- it drops the ROWS, and
+                   -- the column silently stops adding up to the backlog. It is
+                   -- carried here as its own band so every outstanding item is
+                   -- still counted; collapse it into 91-150 by deleting this
+                   -- line and widening the next, if that was the intent.
+                   CASE WHEN (win.d - pr.req) > 150 THEN '>150'
+                        WHEN (win.d - pr.req) >= 91 THEN '91-150'
+                        WHEN (win.d - pr.req) >= 61 THEN '61-90'
+                        WHEN (win.d - pr.req) >= 31 THEN '31-60'
+                        WHEN (win.d - pr.req) >= 8  THEN '8-30'
+                        ELSE '<7' END AS band
+              FROM win
+              JOIN pr ON pr.req <= win.d
+              LEFT JOIN po ON po.pr_no = pr.pr_no AND po.pr_item = pr.pr_item
+             WHERE po.po_date IS NULL OR po.po_date > win.d
+          )
+          SELECT to_char(d, 'YYYY-MM-DD') || '|' || band AS bucket_key,
+                 to_char(d, 'DD Mon') || '|' || band AS bucket_label,
+                 count(*)::int AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object(
+                     'prOutstandingOn', jsonb_build_object(
+                       'asOf', to_char(d, 'YYYY-MM-DD'), 'band', band),
+                     'notDeleted', true)) AS drill
+            FROM x GROUP BY d, band ORDER BY d, band`,
+    filterAlias: 'p.',
+  },
+  /**
+   * Committed value and PO lines per month — the source of the headline tiles'
+   * YTD and current-month figures.
+   *
+   * Why a chart and not four more KPIs: a KPI spec's `drill` is a static object
+   * literal, so it cannot express "the months of the as-of year" or "the as-of
+   * month" — those depend on the dataset's own dates. A chart builds its drill in
+   * SQL, so every month point carries a monthKey predicate the parity sweep can
+   * check, and the tiles add up the months they need. One definition, no
+   * hand-maintained date arithmetic in two places.
+   *
+   * CURRENT MONTH MEANS THE AS-OF MONTH, not the wall clock. The dataset is an
+   * extract with its own end date; reading the server's calendar would make the
+   * tile go blank on the 1st of a month in which no data exists yet, and would
+   * make the same published version report different numbers on different days.
+   *
+   * Same population as total_po_amount and po_line_items — NOT is_sto, NOT
+   * is_deleted — so the tiles' parts and their total come from one definition.
+   */
+  {
+    chartId: 'exec_committed_by_month', seriesKey: 'value', seriesLabel: 'Committed (USD)', unit: 'usd',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_committed_by_month', seriesKey: 'value_idr', seriesLabel: 'Committed (IDR)', unit: 'idr',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_committed_by_month', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 count(*)::int AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  /**
+   * Monthly Spend Category — DELIVERED value only, stacked by category.
+   *
+   * Closed only, by request: the panel answers "what did we actually take
+   * delivery of each month", which an open commitment would inflate with value
+   * that has not landed. `exec_value_by_category` remains the open-and-closed
+   * view of the same population.
+   *
+   * ── Why one series and a composite bucket ────────────────────────────────
+   *
+   * The natural shape is a series per category and a bucket per month, but a
+   * ChartSpec's series are STATIC SQL rows and the categories are data — a
+   * mapping file the business supplies can add one at any time, and a chart
+   * whose stacks were hardcoded would silently drop it. So the bucket carries
+   * both dimensions as `YYYY-MM|CATEGORY` and the panel pivots.
+   *
+   * The month is fixed-width, so the frontend splits at offset 7 rather than on
+   * the separator: a category containing a pipe would otherwise cut in the
+   * wrong place.
+   *
+   * Each point keeps its own drill on all three dimensions, so the parity sweep
+   * checks every month/category cell individually.
+   */
+  {
+    chartId: 'exec_monthly_category', seriesKey: 'closed', seriesLabel: 'Delivered (USD)', unit: 'usd',
+    sql: `SELECT to_char(document_date,'YYYY-MM') || '|' || spend_category AS bucket_key,
+                 to_char(document_date,'Mon YYYY') || '|' || spend_category AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'spendCategory', spend_category,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND spend_category IS NOT NULL AND document_date IS NOT NULL
+             AND status = 'Delivered'
+           -- Grouped on the UNDERLYING expressions, not on output positions:
+           -- the drill needs the bare month, and GROUP BY 1,2 groups only the
+           -- concatenated bucket, which Postgres rejects.
+           GROUP BY to_char(document_date,'YYYY-MM'),
+                    to_char(document_date,'Mon YYYY'),
+                    spend_category
+           ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_monthly_category', seriesKey: 'closed_idr', seriesLabel: 'Delivered (IDR)', unit: 'idr',
+    sql: `SELECT to_char(document_date,'YYYY-MM') || '|' || spend_category AS bucket_key,
+                 to_char(document_date,'Mon YYYY') || '|' || spend_category AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'spendCategory', spend_category,
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND spend_category IS NOT NULL AND document_date IS NOT NULL
+             AND status = 'Delivered'
+           -- Grouped on the UNDERLYING expressions, not on output positions:
+           -- the drill needs the bare month, and GROUP BY 1,2 groups only the
+           -- concatenated bucket, which Postgres rejects.
+           GROUP BY to_char(document_date,'YYYY-MM'),
+                    to_char(document_date,'Mon YYYY'),
+                    spend_category
+           ORDER BY 1`,
+  },
+  {
+    chartId: 'exec_value_by_category', seriesKey: 'closed_idr', seriesLabel: 'Closed (IDR)', unit: 'idr',
+    sql: `WITH b AS (
+            SELECT spend_category, status, net_order_value_idr AS v
+              FROM ${POL}
+             WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+               AND spend_category IS NOT NULL
+          )
+          SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 COALESCE(sum(v) FILTER (WHERE status = 'Delivered'), 0)::numeric AS value,
+                 count(*) FILTER (WHERE status = 'Delivered')::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'delivered', true,
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM b GROUP BY 1,2 ORDER BY 1`,
+  },
   {
     chartId: 'items_by_priority', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
     sql: `SELECT COALESCE(priority_label,'(unlabelled)') AS bucket_key,
@@ -737,6 +1714,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'aging_by_priority', seriesKey: 'e2e', seriesLabel: 'E2E', unit: 'days',
+    filterAlias: 'pol.',
     sql: `SELECT COALESCE(pol.priority_label,'(unlabelled)') AS bucket_key,
                  COALESCE(pol.priority_label,'(unlabelled)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric(8,1) AS value,
@@ -801,117 +1779,59 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2, ${DIST_ORDER} ORDER BY ${DIST_ORDER}`,
   },
   {
-    // v1's buckets and v1's order: oldest first (>90d ... 0-15d).
+    // Six bands since 23 Sep 2026, youngest first - v1 ordered oldest first,
+    // which reads backwards next to every other age axis on the page.
     chartId: 'unreleased_aging_buckets', seriesKey: 'items', seriesLabel: 'Unreleased PR items', unit: 'count',
-    sql: `SELECT ${AGE4_BUCKET} AS bucket_key, ${AGE4_BUCKET} || 'd' AS bucket_label,
+    sql: `SELECT ${AGE6_BUCKET} AS bucket_key, ${AGE6_BUCKET} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
                    jsonb_build_object('unreleased',true,'notDeleted',true,
-                     'ageBand4', ${AGE4_BUCKET})) AS drill
+                     'ageBand', ${AGE6_BUCKET})) AS drill
             FROM (SELECT aging_days FROM ${PRI}
                    WHERE dataset_version_id = $1 AND release_final_date IS NULL AND NOT is_deleted
                      AND aging_days IS NOT NULL) x
-           GROUP BY 1,2, ${AGE4_ORDER} ORDER BY ${AGE4_ORDER}`,
+           GROUP BY 1,2, ${AGE6_ORDER} ORDER BY ${AGE6_ORDER}`,
   },
-  // v1's 'Aging Severity by Open Stage': item counts in age bands, one series
-  // per band, grouped by open stage. PR stages count PR items; PO stages count
-  // PO lines — each point's drill carries its own grain.
-  {
-    chartId: 'aging_severity_by_stage', seriesKey: 'b0_15', seriesLabel: '0-15d', unit: 'count',
-    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
-            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
-                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
-                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
-                   count(*)::numeric AS value, count(*)::int AS row_count,
-                   jsonb_build_object('grain','pr_item','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '0-15')) AS drill
-              FROM ${PRI} WHERE dataset_version_id = $1
-               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days <= 15
-             GROUP BY status
-            UNION ALL
-            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
-                   count(*)::numeric, count(*)::int,
-                   jsonb_build_object('grain','po_line','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '0-15'))
-              FROM ${POL} WHERE dataset_version_id = $1
-               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days <= 15
-             GROUP BY status
-          ) s ORDER BY s.ord`,
-  },
-  {
-    chartId: 'aging_severity_by_stage', seriesKey: 'b15_30', seriesLabel: '15-30d', unit: 'count',
-    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
-            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
-                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
-                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
-                   count(*)::numeric AS value, count(*)::int AS row_count,
-                   jsonb_build_object('grain','pr_item','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '15-30')) AS drill
-              FROM ${PRI} WHERE dataset_version_id = $1
-               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days > 15 AND aging_days <= 30
-             GROUP BY status
-            UNION ALL
-            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
-                   count(*)::numeric, count(*)::int,
-                   jsonb_build_object('grain','po_line','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '15-30'))
-              FROM ${POL} WHERE dataset_version_id = $1
-               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days > 15 AND aging_days <= 30
-             GROUP BY status
-          ) s ORDER BY s.ord`,
-  },
-  {
-    chartId: 'aging_severity_by_stage', seriesKey: 'b31_90', seriesLabel: '31-90d', unit: 'count',
-    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
-            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
-                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
-                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
-                   count(*)::numeric AS value, count(*)::int AS row_count,
-                   jsonb_build_object('grain','pr_item','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '31-90')) AS drill
-              FROM ${PRI} WHERE dataset_version_id = $1
-               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days > 30 AND aging_days <= 90
-             GROUP BY status
-            UNION ALL
-            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
-                   count(*)::numeric, count(*)::int,
-                   jsonb_build_object('grain','po_line','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '31-90'))
-              FROM ${POL} WHERE dataset_version_id = $1
-               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days > 30 AND aging_days <= 90
-             GROUP BY status
-          ) s ORDER BY s.ord`,
-  },
-  {
-    chartId: 'aging_severity_by_stage', seriesKey: 'b90p', seriesLabel: '>90d', unit: 'count',
-    sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
-            SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
-                   CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
-                   CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
-                   count(*)::numeric AS value, count(*)::int AS row_count,
-                   jsonb_build_object('grain','pr_item','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '>90')) AS drill
-              FROM ${PRI} WHERE dataset_version_id = $1
-               AND status IN ('Unapproved PR','PR Approved-No PO') AND aging_days > 90
-             GROUP BY status
-            UNION ALL
-            SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
-                   CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
-                   count(*)::numeric, count(*)::int,
-                   jsonb_build_object('grain','po_line','filters',
-                     jsonb_build_object('status', status, 'ageBand4', '>90'))
-              FROM ${POL} WHERE dataset_version_id = $1
-               AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND aging_days > 90
-             GROUP BY status
-          ) s ORDER BY s.ord`,
-  },
+  /*
+   * v1's 'Aging Severity by Open Stage': item counts in age bands, one series
+   * per band, grouped by open stage. PR stages count PR items; PO stages count
+   * PO lines - each point's drill carries its own grain, which is why this
+   * chart is in MIXED_GRAIN_CHARTS and its filter is injected twice.
+   *
+   * GENERATED, one series per band, since the cut went from four bands to six
+   * on 23 Sep 2026. Four near-identical 20-line specs were already a place for
+   * a boundary to be edited in three of them; six would have been worse.
+   */
+  ...AGE_BANDS.map((band): ChartSpec => {
+    const where = ageBandPredicateSql('aging_days', band.key);
+    return {
+      chartId: 'aging_severity_by_stage',
+      seriesKey: `b_${band.key.replace(/[^0-9a-z]/gi, '_')}`,
+      seriesLabel: band.label,
+      unit: 'count',
+      sql: `SELECT s.bucket_key, s.bucket_label, s.value, s.row_count, s.drill FROM (
+              SELECT CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_key,
+                     CASE status WHEN 'Unapproved PR' THEN 'PR Not Appr' ELSE 'No PO' END AS bucket_label,
+                     CASE status WHEN 'Unapproved PR' THEN 1 ELSE 2 END AS ord,
+                     count(*)::numeric AS value, count(*)::int AS row_count,
+                     jsonb_build_object('grain','pr_item','filters',
+                       jsonb_build_object('status', status, 'ageBand', '${band.key}')) AS drill
+                FROM ${PRI} WHERE dataset_version_id = $1
+                 AND status IN ('Unapproved PR','PR Approved-No PO') AND ${where}
+               GROUP BY status
+              UNION ALL
+              SELECT CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                     CASE status WHEN 'HOLD PO' THEN 'PO Hold' WHEN 'PO-Not Approved' THEN 'PO Not Appr' ELSE 'No GR' END,
+                     CASE status WHEN 'HOLD PO' THEN 3 WHEN 'PO-Not Approved' THEN 4 ELSE 5 END,
+                     count(*)::numeric, count(*)::int,
+                     jsonb_build_object('grain','po_line','filters',
+                       jsonb_build_object('status', status, 'ageBand', '${band.key}'))
+                FROM ${POL} WHERE dataset_version_id = $1
+                 AND status IN ('HOLD PO','PO-Not Approved','PO-No GR') AND ${where}
+               GROUP BY status
+            ) s ORDER BY s.ord`,
+    };
+  }),
   {
     chartId: 'monthly_pr_no_po', seriesKey: 'items', seriesLabel: 'PR items with no PO', unit: 'count',
     sql: `SELECT to_char(requisition_date,'YYYY-MM') AS bucket_key,
@@ -1111,51 +2031,203 @@ export const PARITY_CHARTS: ChartSpec[] = [
            WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
   },
+  /*
+   * The three items_by_category series group by SPEND category, not by the
+   * material-group-range category they used to.
+   *
+   * Asked for on 15 Sep 2026 so the Material Group page reads in the same
+   * categories as the Executive Summary's "Where the value is". The two
+   * dimensions genuinely differ: material_category is derived from material
+   * group NUMBER RANGES in code, while spend category comes from the business
+   * mapping file (material code, code prefix, then material group) with the
+   * CAPEX OPS/PROJ split by plant. A page that showed "Chemical" beside an
+   * Executive Summary showing "CHEMICAL REFINERY" invited the question of
+   * which one was right.
+   *
+   * The PR grain has no spend_category column, so it is derived inline from
+   * the shared generator — the same expression the transform uses to fill
+   * fact_po_line.spend_category, and the same one ownSpendCategory filters
+   * with, which is what keeps the bars and their drills in agreement.
+   */
+  /*
+   * status_mix and po_value_by_month, moved out of mart.ts on 16 Sep 2026.
+   *
+   * Nothing about the numbers changes — the SQL below is the inline SQL, and
+   * the drill filters are the same ones. What changes is that a spec in this
+   * registry can be RECOMPUTED under a filter, which the inline builders could
+   * not be: liveChartAvailable() consults this registry, so both charts used
+   * to render the whole dataset with a "Global filter NOT applied" warning
+   * however the page was sliced.
+   *
+   * That was most wrong inside the spend-category focus panel, where every
+   * figure is supposed to describe the clicked category, and these two
+   * described everything.
+   *
+   * Being live also fixes the drill: computeLiveChartSeries merges the active
+   * filter into each point's predicate, so clicking a month in the panel now
+   * opens that month WITHIN the category rather than the month across all
+   * spend.
+   */
   {
-    chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    chartId: 'status_mix', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
+    // No is_sto / is_deleted filter, deliberately: this chart counts every
+    // document by the state it is in, and an excluded line is still in a
+    // state. The drill carries the same single filter, so the two agree.
+    sql: `SELECT status AS bucket_key, status AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('status', min(status))) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 /*F*/
+           GROUP BY 1, 2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'po_value_by_month', seriesKey: 'value', seriesLabel: 'Net order value (USD)', unit: 'usd',
+    sql: `SELECT to_char(document_date, 'YYYY-MM') AS bucket_key,
+                 to_char(document_date, 'Mon YYYY') AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date, 'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  {
+    chartId: 'po_value_by_month', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
+    // The IDR twin reports NOTHING for a month containing a line with a value
+    // but no rate, rather than a total that silently omits it. Same rows, same
+    // drill, same rule the rest of the application applies to IDR sums.
+    sql: `SELECT to_char(document_date, 'YYYY-MM') AS bucket_key,
+                 to_char(document_date, 'Mon YYYY') AS bucket_label,
+                 CASE WHEN count(*) FILTER (
+                             WHERE net_order_value IS NOT NULL
+                               AND net_order_value_idr IS NULL) > 0
+                      THEN NULL ELSE sum(net_order_value_idr) END::numeric AS value,
+                 count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date, 'YYYY-MM'),
+                                      'notSto', true, 'notDeleted', true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted /*F*/
+             AND document_date IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  /*
+   * Open backlog by the month the requisition was raised. Requested by the
+   * Open Items redesign (16 Sep 2026) for the Management view's question, "is
+   * this getting better or worse".
+   *
+   * ── Why requisitions only, and why "month raised" ───────────────────────
+   *
+   * Two constraints, both worth stating because the obvious chart is not the
+   * one that can be built:
+   *
+   * A month bucket spanning BOTH grains cannot hold drill parity. The PR and
+   * PO grains would each contribute a row for the same month — a duplicate
+   * bucket key, which the mart's unique key rejects — and folding them
+   * together first leaves one bucket that no single drill token can open,
+   * because a token carries exactly one grain. So this chart is PR-grain: the
+   * two requisition stages, which hold 13,482 of the 19,516 open lines and all
+   * of the bottleneck.
+   *
+   * And it is a COHORT, not a time series. A true "backlog as it stood each
+   * month" has to be reconstructed day by day from the raise date and the
+   * first PO date, the way exec_pr_outstanding does. That is a different and
+   * larger chart. Grouping by the month raised answers a narrower question
+   * honestly — which months' demand is still unmet — and the title and notes
+   * say so rather than letting it be read as a trend line.
+   */
+  {
+    chartId: 'open_backlog_by_month', seriesKey: 'open', seriesLabel: 'Open requisitions', unit: 'count',
+    sql: `SELECT to_char(requisition_date, 'YYYY-MM') AS bucket_key,
+                 to_char(requisition_date, 'Mon YYYY') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+                   jsonb_build_object('monthKey', to_char(requisition_date, 'YYYY-MM'),
+                                      'statusIn', jsonb_build_array('Unapproved PR','PR Approved-No PO'),
+                                      'notDeleted', true)) AS drill
+            FROM ${PRI}
+           WHERE dataset_version_id = $1 AND NOT is_deleted /*F*/
+             AND status IN ('Unapproved PR','PR Approved-No PO')
+             AND requisition_date IS NOT NULL
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  {
+    chartId: 'open_backlog_by_month', seriesKey: 'over150', seriesLabel: 'Of those, over 150 days', unit: 'count',
+    // The same population narrowed by age, so the second series is always a
+    // subset of the first and the two can be read against each other.
+    sql: `SELECT to_char(requisition_date, 'YYYY-MM') AS bucket_key,
+                 to_char(requisition_date, 'Mon YYYY') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('monthKey', to_char(requisition_date, 'YYYY-MM'),
+                                      'statusIn', jsonb_build_array('Unapproved PR','PR Approved-No PO'),
+                                      'ageBand', '>150',
+                                      'notDeleted', true)) AS drill
+            FROM ${PRI}
+           WHERE dataset_version_id = $1 AND NOT is_deleted /*F*/
+             AND status IN ('Unapproved PR','PR Approved-No PO')
+             AND requisition_date IS NOT NULL AND aging_days > 150
+           GROUP BY 1, 2 ORDER BY 1`,
+  },
+  {
+    chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
+    filterAlias: 'pri.',
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'notDeleted',true)) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   // Annotation series (label_*): not drawn as bars - the per-category PR
   // valuation rides in the bar labels and tooltips, in both currencies so the
   // display toggle picks the right one (user ask 5 Aug 2026).
   {
-    chartId: 'items_by_category', seriesKey: 'label_amount', seriesLabel: 'Value (USD)', unit: 'usd',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
-                 sum(total_value_usd)::numeric AS value, count(*)::int AS row_count,
+    chartId: 'items_by_category', seriesKey: 'label_amount',
+    filterAlias: 'pri.', seriesLabel: 'Value (USD)', unit: 'usd',
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
+                 sum(pri.total_value_usd)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'notDeleted',true)) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
            GROUP BY 1,2 ORDER BY count(*) DESC`,
   },
   {
-    chartId: 'items_by_category', seriesKey: 'label_amount_idr', seriesLabel: 'Value (IDR)', unit: 'idr',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
-                 sum(total_value_idr)::numeric AS value, count(*)::int AS row_count,
+    chartId: 'items_by_category', seriesKey: 'label_amount_idr',
+    filterAlias: 'pri.', seriesLabel: 'Value (IDR)', unit: 'idr',
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
+                 sum(pri.total_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'notDeleted',true)) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'notDeleted',true)) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
            GROUP BY 1,2 ORDER BY count(*) DESC`,
   },
   {
     chartId: 'e2e_by_category', seriesKey: 'days', seriesLabel: 'Avg E2E (days)', unit: 'days',
     // Grouped by the PO line's own category (not the PR's) so the po_line-grain
-    // drill opens exactly the aggregated rows. The two categories agree on all
-    // but a handful of lines, and self-consistency wins over that nuance.
-    // Average basis like v1's ch-mge2 (5 Aug 2026).
-    sql: `SELECT COALESCE(pol.material_category,'Other') AS bucket_key,
-                 COALESCE(pol.material_category,'Other') AS bucket_label,
+    // drill opens exactly the aggregated rows. Average basis like v1's ch-mge2
+    // (5 Aug 2026); moved to SPEND category 15 Sep 2026 to match the rest of
+    // the Material Group page. This grain needs no inline derivation — 020
+    // materialised spend_category on fact_po_line, filled by the same
+    // generator, so the stored column and the PR-grain expression agree.
+    sql: `SELECT COALESCE(pol.spend_category,'(unmapped)') AS bucket_key,
+                 COALESCE(pol.spend_category,'(unmapped)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(pol.material_category),
+                   jsonb_build_object('ownSpendCategory', min(COALESCE(pol.spend_category,'(unmapped)')),
                                       'hasReceipt',true,'hasPr',true)) AS drill
             FROM ${POL} pol JOIN ${PRI} pri
               ON pri.dataset_version_id = pol.dataset_version_id
@@ -1205,6 +2277,229 @@ export const PARITY_CHARTS: ChartSpec[] = [
                    jsonb_build_object('areaIs', COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${POL}.plant), plant),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
+  },
+  // ── v1's Outstanding-PR family (ch-pr-outco / outpic / outporg) ──
+  //
+  // "Outstanding" is v1's word for an active requisition item that has not yet
+  // produced a PO — its `!deleted && !PO_No`, which is `po_line_count = 0` here.
+  {
+    chartId: 'pr_outstanding_by_company', seriesKey: 'items', seriesLabel: 'Outstanding PR items', unit: 'count',
+    sql: `SELECT company_code AS bucket_key, company_code AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('companyCode', company_code,'notDeleted',true,'prNoPo',true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_porg', seriesKey: 'items', seriesLabel: 'Outstanding PR items', unit: 'count',
+    sql: `SELECT purch_org AS bucket_key, purch_org AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchOrg', purch_org,'notDeleted',true,'prNoPo',true)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '< 7', seriesLabel: '< 7', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','< 7')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '< 7'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '8 sd 14', seriesLabel: '8 sd 14', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','8 sd 14')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '8 sd 14'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '15 sd 21', seriesLabel: '15 sd 21', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','15 sd 21')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '15 sd 21'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '22 sd 30', seriesLabel: '22 sd 30', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','22 sd 30')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '22 sd 30'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'pr_outstanding_by_pgrp', seriesKey: '> 31', seriesLabel: '> 31', unit: 'count',
+    // Grouped by purchasing-group CODE and labelled with its description. v1
+    // groups by description, which silently merges the codes that share one
+    // (@14 and @21 are both "HO-PCH-7"); keeping the code distinct is what lets
+    // each bar drill to exactly its own rows.
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${PRI}.purch_group), NULLIF(${PRI}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notDeleted',true,'prNoPo',true,
+                                      'prAgeBracket','> 31')) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND NOT is_deleted AND po_line_count = 0 AND aging_days IS NOT NULL
+              AND CASE WHEN aging_days <= 7 THEN '< 7' WHEN aging_days <= 14 THEN '8 sd 14' WHEN aging_days <= 21 THEN '15 sd 21' WHEN aging_days <= 30 THEN '22 sd 30' ELSE '> 31' END = '> 31'
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-pr-area: every PR item by area, the shape of demand ──
+  {
+    chartId: 'pr_items_by_area', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
+    sql: `SELECT COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${PRI}.plant), ${PRI}.plant) AS bucket_key,
+                 COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${PRI}.plant), ${PRI}.plant) AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('areaIs', COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${PRI}.plant), ${PRI}.plant))) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-prl1: how long the FIRST approval layer takes ──
+  {
+    chartId: 'pr_layer1_aging_by_priority', seriesKey: 'days', seriesLabel: 'Layer-1 aging (days)', unit: 'days',
+    sql: `SELECT COALESCE(priority_label,'(none)') AS bucket_key,
+                 COALESCE(priority_label,'(none)') AS bucket_label,
+                 avg(release_l1_date - requisition_date)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('priorityLabel', min(priority_label),'l1Evaluable',true)) AS drill
+            FROM ${PRI}
+           WHERE dataset_version_id = $1 AND release_l1_date IS NOT NULL AND requisition_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  // ── v1's ch-po-brkval / ch-po-brkcnt: PO value brackets ──
+  //
+  // Brackets belong to the DOCUMENT, not the line: v1 sums each PO's IDR lines
+  // and brackets the total ("JT" = juta, million IDR). Restricted to
+  // IDR-currency lines exactly as v1 does, so the figure is a native-currency
+  // total and not an FX conversion.
+  //
+  // `value` is the metric the bar shows (billions of IDR, then document count);
+  // `row_count` is the LINES behind it, which is what the drill opens — the same
+  // entity-vs-row convention the PO Hold card uses.
+  //
+  // Two CTEs, and which one the global filter lands on is the whole point:
+  //
+  //   `docs`  sizes each document over ALL its IDR lines and is deliberately
+  //           NOT filtered. A 300 JT order does not become a small order
+  //           because you are looking at only its open lines, and the drill's
+  //           poDocBracket brackets on that same unfiltered document total —
+  //           re-bracketing on the filtered subset would put chart and drill on
+  //           two different definitions of "0 - 5 JT".
+  //   `lines` is the line population the bar measures, and IS filtered. It
+  //           carries the /*F*/ marker because the spec's FIRST
+  //           dataset_version_id anchor belongs to `docs`; without it
+  //           injectFilter would filter the sizing and leave the measurement
+  //           alone, which is exactly backwards.
+  //
+  // `value` and `row_count` both read off `lines`, so the bar, its count and the
+  // rows the drill opens can never be three different populations.
+  //
+  // Keep the anchor text out of any -- comment INSIDE these template literals.
+  // injectFilter scans the raw SQL string, so a comment that spells the anchor
+  // out becomes the first match and the clause is appended inside the comment:
+  // silently dropped, bind parameter still supplied, and it surfaces as a "bind
+  // message supplies 2 parameters" error nowhere near the cause.
+  // Value first, then count, per bracket — the order the two panels draw their
+  // stacked series in. Generated rather than written ten times: the SQL is
+  // identical apart from the range and the metric, and ten hand-maintained
+  // copies is precisely how the row_count half of them came to be filtered
+  // differently from the value half.
+  ...PO_BRACKETS.flatMap((b): ChartSpec[] => [
+    {
+      chartId: 'po_bracket_value', seriesKey: b.key, seriesLabel: b.key, unit: 'idr',
+      sql: poBracketSql(b, 'amount'),
+    },
+    {
+      chartId: 'po_bracket_count', seriesKey: b.key, seriesLabel: b.key, unit: 'count',
+      sql: poBracketSql(b, 'documents'),
+    },
+  ]),
+  // ── v1's ch-po-issued: Head Office desks vs site UNITs ──
+  {
+    chartId: 'po_issued_by', seriesKey: 'documents', seriesLabel: 'PO documents', unit: 'count',
+    // Documents, so a multi-line PO counts once; the drill opens its lines.
+    sql: `SELECT b.k AS bucket_key, b.k AS bucket_label,
+                 count(DISTINCT p.po_no)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('issuedBy', b.k,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} p
+            CROSS JOIN LATERAL (
+              SELECT CASE
+                       WHEN p.purch_group IS NULL OR p.purch_group = '' THEN 'Unassigned'
+                       WHEN EXISTS (SELECT 1 FROM core.dim_purch_group _d
+                                     WHERE _d.code = p.purch_group AND _d.is_ho) THEN 'HO'
+                       ELSE 'UNIT' END AS k) b
+           WHERE p.dataset_version_id = $1 AND NOT p.is_sto AND NOT p.is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-po-picitems: PO lines per buyer desk ──
+  {
+    chartId: 'po_items_by_pgrp', seriesKey: 'items', seriesLabel: 'PO line items', unit: 'count',
+    sql: `SELECT purch_group AS bucket_key,
+                 COALESCE((SELECT max(_dg.description) FROM core.dim_purch_group _dg WHERE _dg.code = ${POL}.purch_group), NULLIF(${POL}.purch_group,''), 'Unassigned') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('purchGroup', purch_group,'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  // ── v1's ch-po-catcnt: lines AND documents per material category ──
+  {
+    chartId: 'po_count_by_category', seriesKey: 'items', seriesLabel: 'PO line items', unit: 'count',
+    sql: `SELECT COALESCE(material_category,'(uncategorised)') AS bucket_key,
+                 COALESCE(material_category,'(uncategorised)') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
+  },
+  {
+    chartId: 'po_count_by_category', seriesKey: 'documents', seriesLabel: 'PO count', unit: 'count',
+    sql: `SELECT COALESCE(material_category,'(uncategorised)') AS bucket_key,
+                 COALESCE(material_category,'(uncategorised)') AS bucket_label,
+                 count(DISTINCT po_no)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+           GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   // ── v1's ch-po-matval: PO Amount by Material Category ──
   {
@@ -1278,6 +2573,66 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM r WHERE rk > 8
           HAVING count(*) > 0
           ORDER BY 3 DESC NULLS LAST`,
+  },
+  // ── Four charts moved here from mart.ts buildCharts (7 Oct 2026) ──
+  //
+  // As inline builders they could not be recomputed under the global filter,
+  // and showed every year with a "filter NOT applied" note - which, with the
+  // Year filter now on by default, was the Delivery page's first impression.
+  // Same SQL and drills as before, written as specs.
+  {
+    chartId: 'delivery_ordered_vs_received', seriesKey: 'ordered', seriesLabel: 'PO lines', unit: 'count',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    chartId: 'delivery_ordered_vs_received', seriesKey: 'received', seriesLabel: 'Lines with GR', unit: 'count',
+    sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
+                 to_char(document_date,'Mon YYYY') AS bucket_label,
+                 count(*) FILTER (WHERE receipt_date IS NOT NULL)::numeric AS value,
+                 count(*) FILTER (WHERE receipt_date IS NOT NULL)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
+                                      'hasReceipt',true,'notDeleted',true)) AS drill
+            FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
+           GROUP BY 1,2 ORDER BY 1`,
+  },
+  {
+    // Pending release STEPS by the person they wait on. Filtered, like every
+    // PR-release figure, by the year/month the requisition was raised.
+    chartId: 'pending_pr_by_pic', seriesKey: 'pending', seriesLabel: 'Pending', unit: 'count',
+    filterKind: 'pr_release',
+    sql: `SELECT COALESCE(pic_release, '?') AS bucket_key,
+                 COALESCE(pic_release, '(unknown)') AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_release','filters',
+                   jsonb_build_object('picRelease', pic_release,'pending',true)) AS drill
+            FROM core.fact_pr_release WHERE dataset_version_id = $1 AND approve_date IS NULL
+           GROUP BY pic_release ORDER BY 3 DESC LIMIT 20`,
+  },
+  {
+    chartId: 'wbs_by_plant', seriesKey: 'violations', seriesLabel: 'Violations', unit: 'count',
+    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','pr_item','filters',
+                   jsonb_build_object('wbsStatus','violation','plant', plant)) AS drill
+            FROM ${PRI} WHERE dataset_version_id = $1 AND wbs_status = 'violation'
+           GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20`,
+  },
+  {
+    chartId: 'movement_mix', seriesKey: 'postings', seriesLabel: 'Postings', unit: 'count',
+    filterKind: 'gr_posting',
+    sql: `SELECT movement_type AS bucket_key, movement_type || ' (' || posting_class || ')' AS bucket_label,
+                 count(*)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','gr_posting','filters',
+                   jsonb_build_object('movementType', movement_type)) AS drill
+            FROM core.fact_gr_posting WHERE dataset_version_id = $1
+           GROUP BY movement_type, posting_class ORDER BY 3 DESC`,
   },
 ];
 

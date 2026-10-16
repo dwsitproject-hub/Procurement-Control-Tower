@@ -7,8 +7,13 @@
  */
 
 import type { Router } from 'express';
+import { ROLE_RANK, PAGE_ACCESS, PAGE_KEYS } from '@pct/contracts';
+import argon2 from 'argon2';
 import { queryOne, query } from '../db/client.js';
 import { recordAudit } from '../modules/audit/audit.js';
+import {
+  addRow, editRow, EditError, editSpecFor, hideRow, overridesFor, pendingFxOverrides, revertRow,
+} from '../modules/master/edit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
 import { sessionFingerprint } from '../modules/auth/session.js';
 import {
@@ -16,7 +21,8 @@ import {
   topMaterialsSpend, vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
 } from '../modules/analytics/entity.js';
 import {
-  exclusionOptions, fxTable, loadExclusions, mappingStatus, saveExclusions, saveMapping,
+  coupaExclusionOptions, exclusionOptions, fxTable, loadExclusions, mappingStatus,
+  saveExclusions, saveMapping,
 } from '../modules/admin/steward.js';
 import {
   computeCustomChart, computeCustomKpi, customVocabulary, validateSpec,
@@ -24,8 +30,24 @@ import {
 } from '../modules/analytics/custom.js';
 import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
-import { COUPA_OBJECTS, coupaSyncInFlight, runCoupaSync } from '../modules/coupa/sync.js';
+import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync } from '../modules/coupa/sync.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
+import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
+import { loadMasterPage, masterIndex } from '../modules/analytics/master.js';
+import { testBody } from '../modules/notify/messages.js';
+import {
+  FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastArchive,
+  shareLastResult,
+} from '../modules/ingest/share_poller.js';
+import { loadEnv } from '../config/env.js';
+import { parseGlobalFilter } from '../modules/analytics/globalfilter.js';
+
+/** `?sort=<key>&dir=asc|desc` from a table header; the callee whitelists the key. */
+function sortOf(q: Record<string, unknown>): { key: string; dir: 'asc' | 'desc' } | null {
+  if (q['sort'] === undefined || String(q['sort']).trim() === '') return null;
+  return { key: String(q['sort']).slice(0, 40), dir: String(q['dir']) === 'asc' ? 'asc' : 'desc' };
+}
+import { storageBasePath, storageHealth } from '../config/storage.js';
 
 // Injected from routes.ts so both files share one implementation.
 export interface RouteHelpers {
@@ -40,6 +62,19 @@ export interface RouteHelpers {
 
 const FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr', 'fx'];
 
+/**
+ * The folder the container resolved from its environment — informational, not
+ * editable: an admin cannot arrange a mount from a web form.
+ */
+function shareEnvPath(): string {
+  return storageBasePath(loadEnv());
+}
+
+/** Argon2id with the same parameters as the seeder and the login path. */
+async function hashPassword(pw: string): Promise<string> {
+  return argon2.hash(pw, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
+}
+
 export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   const { role, requireScope, currentVersion, HttpProblem } = h;
 
@@ -48,6 +83,89 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
     return v;
   };
+
+  // ── Master data (31 Aug 2026) ────────────────────────────────────────────
+  //
+  // Reference code lists, one page per master. `viewer` rather than `analyst`
+  // because these are the least sensitive data in the system — a plant list
+  // says which plants exist, not what was bought at them — and every figure
+  // derived from them stays scoped exactly as it was. The Master tab itself is
+  // gated by the page-permission matrix like every other page.
+
+  r.get('/api/v1/master', role('viewer', async (_req, res) => {
+    const v = await version();
+    res.json({ datasetVersionId: v.id, pages: await masterIndex(v.id) });
+  }));
+
+  r.get('/api/v1/master/:id', role('viewer', async (req, res, ctx) => {
+    const v = await version();
+    const query = req.query as Record<string, unknown>;
+    const q = String(query['q'] ?? '');
+    const sortKey = String(query['sort'] ?? '').trim();
+    const sort = sortKey === ''
+      ? undefined
+      : { key: sortKey, dir: String(query['dir'] ?? 'asc') === 'desc' ? 'desc' as const : 'asc' as const };
+    // The id selects a fixed query from the registry; it never reaches SQL, so
+    // an unknown id is a 404 rather than a malformed statement. The sort key is
+    // checked against the page's own columns for the same reason.
+    const page = await loadMasterPage(String(req.params.id), v.id, q, sort);
+    if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
+
+    // Only an Admin is told what is editable, and the marks on overridden rows.
+    // Everyone else sees exactly the page they saw before 032: the edit
+    // controls are not merely hidden in the browser, the page never learns of
+    // them.
+    const isAdmin = Math.max(
+      ...(ctx.principal.roles as string[]).map((r2) => ROLE_RANK[r2 as keyof typeof ROLE_RANK] ?? 0), 0,
+    ) >= ROLE_RANK.admin;
+    if (isAdmin) {
+      for (const t of page.tables as unknown as Array<Record<string, unknown>>) {
+        const spec = editSpecFor(String(t['relation']));
+        if (!spec) continue;
+        t['edit'] = {
+          keys: spec.keys, fields: spec.fields, readOnly: spec.readOnly,
+          allowAdd: spec.allowAdd, allowDelete: spec.allowDelete, note: spec.note, fx: spec.fx === true,
+        };
+        t['marks'] = await overridesFor(spec.relation);
+        if (spec.fx) t['pendingFx'] = await pendingFxOverrides();
+      }
+    }
+    res.json({ datasetVersionId: v.id, ...page });
+  }));
+
+  /*
+   * Master data edits (032). Admin only, and every one audited: reference data
+   * decides what a code is CALLED on every page, and for a few fields what it
+   * is COUNTED as, so who changed it and when has to be answerable.
+   *
+   * The relation in the body is matched against the registry in
+   * modules/master/edit.ts and never reaches SQL on its own; the values are
+   * coerced to each column's declared type there.
+   */
+  const masterEdit = (
+    verb: string,
+    fn: (relation: string, input: Record<string, unknown>, actor: string) => Promise<void>,
+  ) => role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as { relation?: unknown; values?: unknown };
+    const relation = String(b.relation ?? '');
+    const values = (b.values && typeof b.values === 'object' ? b.values : {}) as Record<string, unknown>;
+    try {
+      await fn(relation, values, ctx.principal.email);
+    } catch (e) {
+      if (e instanceof EditError) throw new HttpProblem(400, 'invalid-edit', e.message);
+      throw e;
+    }
+    await recordAudit({
+      action: `master.${verb}`, actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome: 'success', detail: { relation, values }, ip: req.ip,
+    });
+    res.json({ ok: true });
+  });
+
+  r.post('/api/v1/admin/master/rows', masterEdit('add', addRow));
+  r.patch('/api/v1/admin/master/rows', masterEdit('edit', editRow));
+  r.post('/api/v1/admin/master/rows/hide', masterEdit('hide', hideRow));
+  r.post('/api/v1/admin/master/rows/revert', masterEdit('revert', revertRow));
 
   // ── W3: entity views ─────────────────────────────────────────────────────
 
@@ -60,6 +178,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       String(req.query.q ?? ''),
       Math.min(Number(req.query.limit ?? 50), 200),
       Math.max(Number(req.query.offset ?? 0), 0),
+      parseGlobalFilter(req.query as Record<string, unknown>),
+      sortOf(req.query as Record<string, unknown>),
     );
     res.json({ datasetVersionId: v.id, asOfDate: v.asOfDate, ...out });
   }));
@@ -109,6 +229,514 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         ),
       },
     });
+  }));
+
+  // ── Notifications: recipients, event toggles, log, test send ──────────────
+  //
+  // The SMTP server and its password come from the environment (a password must
+  // never live in a table an API can read); everything an operator changes day
+  // to day lives in rule_config.
+
+  r.get('/api/v1/admin/notify', role('steward', async (_req, res) => {
+    const cfg = await loadNotifyConfig();
+    res.json({ ...cfg, recent: await recentNotifications(15) });
+  }));
+
+  r.put('/api/v1/admin/notify', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const raw = Array.isArray(b['recipients'])
+      ? (b['recipients'] as unknown[]).map(String)
+      : String(b['recipients'] ?? '').split(/[,;\s]+/);
+    const recipients: string[] = [];
+    for (const one of raw.map((x) => x.trim()).filter(Boolean)) {
+      if (!isEmail(one)) throw new HttpProblem(400, 'invalid-body', `Not a valid email: ${one}`);
+      if (!recipients.includes(one)) recipients.push(one);
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [key, value] of [
+      ['notify.recipients', recipients],
+      ['notify.on_ingest_success', b['onIngestSuccess'] === true],
+      ['notify.on_ingest_failure', b['onIngestFailure'] === true],
+      ['notify.on_coupa_error', b['onCoupaError'] === true],
+    ] as const) {
+      await query(
+        `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
+         VALUES ($1, $2::jsonb, $3, 'Notifications panel', $4)
+         ON CONFLICT (rule_key, effective_from)
+           DO UPDATE SET rule_value = EXCLUDED.rule_value, note = EXCLUDED.note,
+                         created_by = EXCLUDED.created_by`,
+        [key, JSON.stringify(value), today, ctx.principal.userId],
+      );
+    }
+    await recordAudit({
+      action: 'admin.notify.config', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { recipients, ...b }, ip: req.ip,
+    });
+    res.json(await loadNotifyConfig());
+  }));
+
+  // Test send: goes to the saved recipients (or an address supplied for the
+  // test) and ignores the event toggles, since the point is to prove delivery.
+  r.post('/api/v1/admin/notify/test', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const one = String(b['to'] ?? '').trim();
+    if (one !== '' && !isEmail(one)) {
+      throw new HttpProblem(400, 'invalid-body', `Not a valid email: ${one}`);
+    }
+    const m = testBody();
+    const out = await notify('test', m.subject, m.body, {
+      to: one === '' ? undefined : [one],
+      ignoreToggles: true,
+    });
+    await recordAudit({
+      action: 'admin.notify.test', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email,
+      outcome: out.status === 'sent' ? 'success' : 'failure',
+      detail: { status: out.status, reason: out.reason, recipients: out.recipients }, ip: req.ip,
+    });
+    res.json(out);
+  }));
+
+  // ── SAP Data Sync: the scheduled share-folder ingest ─────────────────────
+  //
+  // The env vars for this existed from the start but nothing read them, so the
+  // "auto sync" never ran. Settings now live in rule_config and the poller
+  // re-reads them every tick, so a change takes effect without a restart.
+
+  /**
+   * The full panel payload. Shared by the GET and the PUT deliberately: when the
+   * PUT answered with only the stored config, a client that used the response as
+   * its new state silently lost `storage` — and the panel, which reads
+   * storage.basePath while rendering, threw and blanked the page on Save.
+   */
+  const ingestConfigPayload = async () => {
+    const cfg = await loadShareConfig();
+    return {
+      ...cfg,
+      // The mount itself is environment-level: the container must be able to
+      // see the path, which an admin cannot arrange from a web form.
+      envPath: shareEnvPath(),
+      // Where that path comes from and whether it is really the NAS. Probing
+      // here rather than trusting the configuration is the point: a missing
+      // bind mount leaves a folder that looks fine and is empty.
+      storage: await storageHealth(),
+      nowInZone: nowInZone().hhmm,
+      lastResult: shareLastResult(),
+      lastArchive: shareLastArchive(),
+      recentRuns: await recentSlotRuns(12),
+    };
+  };
+
+  r.get('/api/v1/admin/ingest/config', role('steward', async (_req, res) => {
+    res.json(await ingestConfigPayload());
+  }));
+
+  r.put('/api/v1/admin/ingest/config', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const enabled = b['enabled'] === true;
+    const incoming = Array.isArray(b['feeds']) ? (b['feeds'] as Record<string, unknown>[]) : [];
+
+    const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    const feeds: Record<string, unknown> = {};
+    for (const meta of FEED_META) {
+      const row = incoming.find((x) => String(x['feed']) === meta.feed);
+      if (!row) continue;
+      const path = String(row['path'] ?? '').trim();
+      if (path === '') {
+        throw new HttpProblem(400, 'invalid-body', `A folder is required for ${meta.label}`);
+      }
+      // Reject a Windows-shaped path here rather than at pickup time. The API
+      // reads a LOCAL filesystem path; it never speaks SMB itself — the host
+      // mounts the NAS and Docker binds it in, so this value must be the path AS
+      // THE CONTAINER SEES IT. A UNC address or a drive letter used to save
+      // cleanly and then fail hours later as an unexplained "not readable",
+      // which is exactly how this reached us.
+      //
+      // The backslash is built with a char code on purpose: a literal one here
+      // is a hazard every time this file is edited by a tool.
+      const BACKSLASH = String.fromCharCode(92);
+      const unc = path.startsWith('//') || path.startsWith(BACKSLASH);
+      // A colon in second position is a drive letter; no POSIX folder starts so.
+      const drive = /^[A-Za-z]:/.test(path);
+      if (unc || drive) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${meta.label}: "${path}" is a ${unc ? 'network (UNC)' : 'Windows'} path. `
+          + 'Enter the folder as this server sees it, not the address you use from File '
+          + `Explorer — the share is already mounted here, so use ${shareEnvPath()} `
+          + '(the resolved folder shown on this page).',
+        );
+      }
+      if (!path.startsWith('/')) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${meta.label}: "${path}" is not an absolute folder — it must start with "/".`,
+        );
+      }
+      const rawSlots = Array.isArray(row['slots']) ? (row['slots'] as unknown[]) : [];
+      const slots: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const v = String(rawSlots[i] ?? '').trim();
+        if (v !== '' && !HHMM.test(v)) {
+          throw new HttpProblem(400, 'invalid-body', `${meta.label}: "${v}" is not a HH:MM time`);
+        }
+        slots.push(v);
+      }
+      feeds[meta.feed] = {
+        path,
+        pattern: String(row['pattern'] ?? meta.defaultPattern).trim(),
+        slots,
+      };
+    }
+
+    /**
+     * Archive settings. The folders are validated exactly like a feed folder —
+     * same reasoning, same failure to avoid: a UNC address saved here would look
+     * fine and then fail at move time, long after anyone was watching.
+     */
+    const ab = (b['archive'] ?? {}) as Record<string, unknown>;
+    const archiveEnabled = ab['enabled'] === true;
+    const archiveDir = (raw: unknown, label: string, fallback: string): string => {
+      const v = String(raw ?? '').trim();
+      if (v === '') return fallback;
+      const BACKSLASH = String.fromCharCode(92);
+      if (v.startsWith('//') || v.startsWith(BACKSLASH) || /^[A-Za-z]:/.test(v)) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${label}: "${v}" is a network or Windows path. Use the folder as this server sees it, `
+          + `for example ${shareEnvPath()}/succeed.`,
+        );
+      }
+      if (!v.startsWith('/')) {
+        throw new HttpProblem(400, 'invalid-body', `${label}: "${v}" must start with "/".`);
+      }
+      return v;
+    };
+    const current = await loadShareConfig();
+    const archive = {
+      enabled: archiveEnabled,
+      succeedDir: archiveDir(ab['succeedDir'], 'Succeeded folder', current.archive.succeedDir),
+      failedDir: archiveDir(ab['failedDir'], 'Failed folder', current.archive.failedDir),
+    };
+    if (archive.succeedDir === archive.failedDir) {
+      throw new HttpProblem(
+        400, 'invalid-body',
+        'The succeeded and failed folders must differ, otherwise a failed run is '
+        + 'indistinguishable from a good one.',
+      );
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [key, value] of [
+      ['ingest.autopoll_enabled', enabled],
+      ['ingest.feeds', feeds],
+      ['ingest.archive_enabled', archive.enabled],
+      ['ingest.archive_succeed_dir', archive.succeedDir],
+      ['ingest.archive_failed_dir', archive.failedDir],
+    ] as const) {
+      await query(
+        `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
+         VALUES ($1, $2::jsonb, $3, 'SAP Data Sync panel', $4)
+         ON CONFLICT (rule_key, effective_from)
+           DO UPDATE SET rule_value = EXCLUDED.rule_value, note = EXCLUDED.note,
+                         created_by = EXCLUDED.created_by`,
+        [key, JSON.stringify(value), today, ctx.principal.userId],
+      );
+    }
+    await recordAudit({
+      action: 'admin.ingest.config', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { enabled, feeds, archive }, ip: req.ip,
+    });
+    res.json(await ingestConfigPayload());
+  }));
+
+  // Preview only — reads directory metadata, never ingests. This is how an
+  // admin confirms each folder, pattern and schedule before switching the
+  // poller on. Scans the values in the FORM, so nothing must be saved first.
+  r.post('/api/v1/admin/ingest/scan', role('steward', async (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const cfg = await loadShareConfig();
+    if (Array.isArray(b['feeds'])) {
+      const incoming = b['feeds'] as Record<string, unknown>[];
+      cfg.feeds = cfg.feeds.map((f) => {
+        const row = incoming.find((x) => String(x['feed']) === f.feed);
+        if (!row) return f;
+        return {
+          ...f,
+          path: String(row['path'] ?? f.path).trim() || f.path,
+          pattern: String(row['pattern'] ?? f.pattern),
+        };
+      });
+    }
+    const out = await scanShare(cfg);
+    res.json({ ...out, timezone: cfg.timezone, nowInZone: nowInZone(cfg.timezone).hhmm });
+  }));
+
+  // ── User Access (011): users, departments, and the page matrix ───────────
+  //
+  // Admin-only. Every mutation is audited. A user's capability tier comes from
+  // their job role (app.job_role.base_role) so the existing route guards keep
+  // enforcing the four-tier model; the matrix adds per-page view/edit.
+
+  r.get('/api/v1/admin/users', role('admin', async (_req, res) => {
+    const users = await query(
+      `SELECT u.id, u.email, u.display_name AS "displayName", u.department, u.job_role AS "jobRole",
+              u.auth_method AS "authMethod", u.is_active AS "isActive",
+              -- Whether a PASSWORD sign-in is possible, which is not implied by
+              -- auth_method: a Hub-provisioned account gains one the moment an
+              -- admin issues it, and an admin needs to see that state.
+              EXISTS (SELECT 1 FROM app.local_credential lc WHERE lc.user_id = u.id) AS "hasPassword",
+              u.must_change_password AS "mustChangePassword",
+              u.last_login_at AS "lastLoginAt",
+              (SELECT array_agg(ur.role_code ORDER BY ur.role_code)
+                 FROM app.user_role ur WHERE ur.user_id = u.id) AS roles,
+              (SELECT count(*)::int FROM app.data_scope ds WHERE ds.user_id = u.id) AS "scopeCount",
+              (SELECT count(*)::int FROM app.data_scope ds
+                WHERE ds.user_id = u.id AND ds.company_code = '*'
+                  AND ds.plant = '*' AND ds.purch_org = '*') AS "scopeAll" 
+         FROM app.app_user u ORDER BY u.display_name`,
+    );
+    const departments = await query(
+      `SELECT code, name FROM app.department WHERE is_active ORDER BY name`,
+    );
+    const jobRoles = await query(
+      `SELECT code, name, rank, base_role AS "baseRole" FROM app.job_role ORDER BY rank`,
+    );
+    const matrix = await query(
+      `SELECT subject_kind AS "subjectKind", subject_code AS "subjectCode",
+              page_key AS "pageKey", access
+         FROM app.page_permission`,
+    );
+    res.json({ users, departments, jobRoles, matrix });
+  }));
+
+  r.post('/api/v1/admin/users', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const email = String(b['email'] ?? '').trim().toLowerCase();
+    const displayName = String(b['displayName'] ?? '').trim();
+    const password = String(b['password'] ?? '');
+    const department = b['department'] === undefined || b['department'] === null || b['department'] === ''
+      ? null : String(b['department']);
+    const jobRole = String(b['jobRole'] ?? '');
+
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      throw new HttpProblem(400, 'invalid-body', 'A valid email is required');
+    }
+    if (displayName.length < 2) throw new HttpProblem(400, 'invalid-body', 'A name is required');
+    if (password.length < 12) {
+      throw new HttpProblem(400, 'invalid-body', 'The default password must be at least 12 characters');
+    }
+    const jr = await queryOne<{ code: string; base_role: string }>(
+      `SELECT code, base_role FROM app.job_role WHERE code = $1`, [jobRole],
+    );
+    if (!jr) throw new HttpProblem(400, 'invalid-body', 'Unknown job role');
+    if (department !== null) {
+      const d = await queryOne(`SELECT code FROM app.department WHERE code = $1`, [department]);
+      if (!d) throw new HttpProblem(400, 'invalid-body', 'Unknown department');
+    }
+    const dupe = await queryOne(`SELECT id FROM app.app_user WHERE email = $1`, [email]);
+    if (dupe) throw new HttpProblem(409, 'conflict', 'A user with that email already exists');
+
+    // must_change_password: the admin-issued default is single-use by design.
+    const ins = await queryOne<{ id: string }>(
+      `INSERT INTO app.app_user
+         (email, display_name, auth_method, is_active, department, job_role, must_change_password)
+       VALUES ($1, $2, 'local', true, $3, $4, true) RETURNING id`,
+      [email, displayName, department, jr.code],
+    );
+    const userId = ins!.id;
+    await query(
+      `INSERT INTO app.local_credential (user_id, password_hash, approval_note)
+       VALUES ($1, $2, 'User Access: admin-issued default, rotation forced')`,
+      [userId, await hashPassword(password)],
+    );
+    await query(
+      `INSERT INTO app.user_role (user_id, role_code) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING`,
+      [userId, jr.base_role],
+    );
+    await recordAudit({
+      action: 'admin.user.create', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { userId, email, jobRole: jr.code, department, baseRole: jr.base_role },
+      ip: req.ip,
+    });
+    // Never echo the password back.
+    res.status(201).json({ id: userId, email, displayName, department, jobRole: jr.code });
+  }));
+
+  r.put('/api/v1/admin/users/:id', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const id = req.params.id;
+    const target = await queryOne<{ id: string; email: string; auth_method: string }>(
+      `SELECT id, email, auth_method FROM app.app_user WHERE id = $1`, [id],
+    );
+    if (!target) throw new HttpProblem(404, 'not-found', 'No such user');
+
+    const detail: Record<string, unknown> = {};
+    if (b['displayName'] !== undefined) {
+      await query(`UPDATE app.app_user SET display_name = $2 WHERE id = $1`,
+        [id, String(b['displayName']).trim()]);
+      detail['displayName'] = b['displayName'];
+    }
+    if (b['department'] !== undefined) {
+      const dep = b['department'] === null || b['department'] === '' ? null : String(b['department']);
+      await query(`UPDATE app.app_user SET department = $2 WHERE id = $1`, [id, dep]);
+      detail['department'] = dep;
+    }
+    if (b['jobRole'] !== undefined) {
+      const jr = await queryOne<{ code: string; base_role: string }>(
+        `SELECT code, base_role FROM app.job_role WHERE code = $1`, [String(b['jobRole'])],
+      );
+      if (!jr) throw new HttpProblem(400, 'invalid-body', 'Unknown job role');
+      await query(`UPDATE app.app_user SET job_role = $2 WHERE id = $1`, [id, jr.code]);
+      // Keep the capability tier in step with the job role.
+      await query(`DELETE FROM app.user_role WHERE user_id = $1`, [id]);
+      await query(`INSERT INTO app.user_role (user_id, role_code) VALUES ($1, $2)`, [id, jr.base_role]);
+      detail['jobRole'] = jr.code;
+      detail['baseRole'] = jr.base_role;
+    }
+    if (b['isActive'] !== undefined) {
+      const active = b['isActive'] === true;
+      // Guard: never deactivate the last active administrator.
+      if (!active) {
+        const admins = await queryOne<{ n: number }>(
+          `SELECT count(*)::int AS n FROM app.app_user u
+             JOIN app.user_role ur ON ur.user_id = u.id AND ur.role_code = 'admin'
+            WHERE u.is_active AND u.id <> $1`, [id],
+        );
+        if ((admins?.n ?? 0) === 0) {
+          throw new HttpProblem(409, 'conflict', 'This is the last active administrator');
+        }
+      }
+      await query(`UPDATE app.app_user SET is_active = $2 WHERE id = $1`, [id, active]);
+      detail['isActive'] = active;
+    }
+    if (typeof b['resetPassword'] === 'string' && b['resetPassword'] !== '') {
+      const pw = String(b['resetPassword']);
+      if (pw.length < 12) {
+        throw new HttpProblem(400, 'invalid-body', 'The default password must be at least 12 characters');
+      }
+      await query(
+        `INSERT INTO app.local_credential (user_id, password_hash, approval_note)
+         VALUES ($1, $2, 'User Access: admin reset, rotation forced')
+         ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash,
+           password_set_at = now(), failed_attempts = 0, locked_until = NULL`,
+        [id, await hashPassword(pw)],
+      );
+      await query(`UPDATE app.app_user SET must_change_password = true WHERE id = $1`, [id]);
+      detail['passwordReset'] = true;
+      // Worth recording explicitly: for a Hub-provisioned account this does not
+      // just rotate a password, it ADDS password sign-in to an account that had
+      // only SSO. The audit trail should show that decision rather than leave it
+      // to be inferred.
+      detail['passwordLoginEnabledFor'] = target.auth_method;
+    }
+
+    await recordAudit({
+      action: 'admin.user.update', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { userId: id, email: target.email, ...detail }, ip: req.ip,
+    });
+    res.json({ ok: true });
+  }));
+
+  // Data scope: a new user has NONE by design (deny by default), so the
+  // registration screen must be able to grant it or the account is useless.
+  // '*' means every value of that dimension.
+  r.put('/api/v1/admin/users/:id/scope', role('admin', async (req, res, ctx) => {
+    const id = req.params.id;
+    const entries = ((req.body ?? {}) as { entries?: unknown[] }).entries ?? [];
+    if (!Array.isArray(entries)) throw new HttpProblem(400, 'invalid-body', 'entries[] required');
+    const target = await queryOne<{ email: string }>(
+      `SELECT email FROM app.app_user WHERE id = $1`, [id],
+    );
+    if (!target) throw new HttpProblem(404, 'not-found', 'No such user');
+
+    // Replace the whole set: the UI always sends the intended final state.
+    await query(`DELETE FROM app.data_scope WHERE user_id = $1`, [id]);
+    for (const raw of entries) {
+      const e = raw as Record<string, unknown>;
+      await query(
+        `INSERT INTO app.data_scope (user_id, company_code, plant, purch_org)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [
+          id,
+          String(e['companyCode'] ?? '*').trim() || '*',
+          String(e['plant'] ?? '*').trim() || '*',
+          String(e['purchOrg'] ?? '*').trim() || '*',
+        ],
+      );
+    }
+    await recordAudit({
+      action: 'admin.user.scope', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { userId: id, email: target.email, entries: entries.length }, ip: req.ip,
+    });
+    res.json({ ok: true, entries: entries.length });
+  }));
+
+  r.put('/api/v1/admin/page-permissions', role('admin', async (req, res, ctx) => {
+    const entries = ((req.body ?? {}) as { entries?: unknown[] }).entries ?? [];
+    if (!Array.isArray(entries)) throw new HttpProblem(400, 'invalid-body', 'entries[] required');
+
+    let written = 0;
+    for (const raw of entries) {
+      const e = raw as Record<string, unknown>;
+      const kind = String(e['subjectKind'] ?? '');
+      const code = String(e['subjectCode'] ?? '');
+      const page = String(e['pageKey'] ?? '');
+      const access = String(e['access'] ?? '');
+      if (kind !== 'job_role' && kind !== 'department') {
+        throw new HttpProblem(400, 'invalid-body', `bad subjectKind: ${kind}`);
+      }
+      if (!(PAGE_KEYS as readonly string[]).includes(page)) {
+        throw new HttpProblem(400, 'invalid-body', `unknown page: ${page}`);
+      }
+      if (!(PAGE_ACCESS as readonly string[]).includes(access)) {
+        throw new HttpProblem(400, 'invalid-body', `bad access: ${access}`);
+      }
+      // The Admin page must stay reachable by the Admin job role, or the next
+      // save could lock every administrator out of this very screen.
+      if (kind === 'job_role' && code === 'admin' && page === 'admin' && access !== 'edit') {
+        throw new HttpProblem(409, 'conflict', "The Admin role must keep 'edit' on the Admin page");
+      }
+      await query(
+        `INSERT INTO app.page_permission (subject_kind, subject_code, page_key, access, updated_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (subject_kind, subject_code, page_key)
+           DO UPDATE SET access = EXCLUDED.access, updated_at = now(),
+                         updated_by = EXCLUDED.updated_by`,
+        [kind, code, page, access, ctx.principal.userId],
+      );
+      written += 1;
+    }
+    await recordAudit({
+      action: 'admin.page_permissions.update', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: { entries: written }, ip: req.ip,
+    });
+    res.json({ ok: true, written });
+  }));
+
+  r.post('/api/v1/admin/departments', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const code = String(b['code'] ?? '').trim().toLowerCase().replace(/\s+/g, '_');
+    const name = String(b['name'] ?? '').trim();
+    if (!code || !name) throw new HttpProblem(400, 'invalid-body', 'code and name are required');
+    await query(
+      `INSERT INTO app.department (code, name) VALUES ($1, $2)
+       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, is_active = true`,
+      [code, name],
+    );
+    await recordAudit({
+      action: 'admin.department.upsert', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success', detail: { code, name }, ip: req.ip,
+    });
+    res.status(201).json({ code, name });
   }));
 
   // ── v1's PO-page top-spend tables (aggregates only, so viewer role) ──
@@ -197,6 +825,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       v.id, ctx.scope, String(req.query.q ?? ''),
       Math.min(Number(req.query.limit ?? 40), 200),
       Math.max(Number(req.query.offset ?? 0), 0),
+      parseGlobalFilter(req.query as Record<string, unknown>),
+      sortOf(req.query as Record<string, unknown>),
     );
     res.json({ datasetVersionId: v.id, asOfDate: v.asOfDate, ...out });
   }));
@@ -232,15 +862,32 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     res.json({
       current: await loadExclusions(),
       options: await exclusionOptions(v.id),
+      coupaOptions: await coupaExclusionOptions(),
       note: 'Changes apply on the next recompute (Admin > Recompute), not instantly.',
+      // The Coupa list is the exception and the UI says so: it is enforced by
+      // views over a continuously-polled store, not by the transform, so it
+      // needs no rebuild.
+      coupaNote: 'Coupa purchasing-group exclusions apply immediately on save — no recompute needed.',
     });
   }));
 
   r.put('/api/v1/admin/exclusions', role('admin', async (req, res, ctx) => {
-    const b = (req.body ?? {}) as { docTypes?: unknown; purchGroups?: unknown; purchOrgs?: unknown };
-    const list = (x: unknown): string[] =>
-      Array.isArray(x) ? x.map(String).map((v2) => v2.trim()).filter((v2) => v2 !== '').slice(0, 50) : [];
-    const next = { docTypes: list(b.docTypes), purchGroups: list(b.purchGroups), purchOrgs: list(b.purchOrgs) };
+    const b = (req.body ?? {}) as {
+      docTypes?: unknown; purchGroups?: unknown; purchOrgs?: unknown; coupaPurchGroups?: unknown;
+      holdPos?: unknown; intercoVendorPrefixes?: unknown;
+    };
+    const list = (x: unknown, cap = 50): string[] =>
+      Array.isArray(x) ? x.map(String).map((v2) => v2.trim()).filter((v2) => v2 !== '').slice(0, cap) : [];
+    const next = {
+      docTypes: list(b.docTypes),
+      purchGroups: list(b.purchGroups),
+      purchOrgs: list(b.purchOrgs),
+      // A larger cap: Coupa carries far more purchasing groups than the SAP
+      // facts do, and the first real request named 16 at once.
+      coupaPurchGroups: list(b.coupaPurchGroups, 300),
+      holdPos: b.holdPos === true || b.holdPos === 'true',
+      intercoVendorPrefixes: list(b.intercoVendorPrefixes),
+    };
 
     const before = await loadExclusions();
     await saveExclusions(next, ctx.principal.userId);
@@ -249,7 +896,15 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       actorEmail: ctx.principal.email, outcome: 'success',
       detail: { before, after: next }, ip: req.ip,
     });
-    res.json({ saved: next, appliesFromNextRecompute: true });
+    // Whether a rebuild is actually needed, so the UI does not spend a minute
+    // recomputing every fact when only the Coupa list moved (that list is
+    // enforced by views and is live the moment it is committed).
+    const sapChanged =
+      JSON.stringify([before.docTypes, before.purchGroups, before.purchOrgs,
+        before.holdPos, before.intercoVendorPrefixes])
+      !== JSON.stringify([next.docTypes, next.purchGroups, next.purchOrgs,
+        next.holdPos, next.intercoVendorPrefixes]);
+    res.json({ saved: next, appliesFromNextRecompute: sapChanged, recomputeRequired: sapChanged });
   }));
 
   r.get('/api/v1/admin/mappings/:feed', role('steward', async (req, res) => {
@@ -284,6 +939,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
          FROM ops.coupa_watermark ORDER BY object`,
     );
     const counts = await queryOne<Record<string, number>>(
+      // RAW tables on purpose, unlike the analytics endpoints below: this is the
+      // sync diagnostic. It answers "did the poller store what Coupa has", so it
+      // must report everything fetched — applying data exclusions here would
+      // make a working sync look like it had lost rows.
       `SELECT (SELECT count(*) FROM ops.coupa_sourcing_event)::int AS sourcing_events,
               (SELECT count(*) FROM ops.coupa_supplier_response)::int AS supplier_responses,
               (SELECT count(*) FROM ops.coupa_po_line)::int AS po_lines,
@@ -343,6 +1002,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     }
     void runCoupaSync('manual')
       .then(async (out) => {
+        await notifyCoupaErrors('manual', out);
         await recordAudit({
           action: 'coupa.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
           outcome: out.outcome === 'error' ? 'failure' : 'success',
@@ -370,7 +1030,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                 FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days,
               sum(planned_savings) FILTER (WHERE currency = 'IDR') AS planned_savings_idr,
               count(*) FILTER (WHERE planned_savings IS NOT NULL AND currency <> 'IDR')::int AS savings_other_ccy
-         FROM ops.coupa_sourcing_event WHERE state <> 'template'`,
+         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'`,
     );
     const [bids] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS responses,
@@ -378,12 +1038,12 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(DISTINCT supplier_name)::int AS suppliers,
               round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event,
               count(*) FILTER (WHERE awarded)::int AS awarded
-         FROM ops.coupa_supplier_response WHERE state = 'submitted'`,
+         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
     );
     const eventsByMonth = await query(
       `SELECT to_char(created_at,'YYYY-MM') AS mk, count(*)::int AS events,
               count(*) FILTER (WHERE state = 'complete')::int AS completed
-         FROM ops.coupa_sourcing_event
+         FROM ops.v_coupa_sourcing_event
         WHERE state <> 'template' AND created_at IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
@@ -395,8 +1055,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*)::int AS awarded_bids,
               sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
               count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
-         FROM ops.coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+         FROM ops.v_coupa_supplier_response r
+         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
         WHERE r.awarded
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
     );
@@ -405,8 +1065,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*)::int AS awarded_bids,
               sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
               count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
-         FROM ops.coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+         FROM ops.v_coupa_supplier_response r
+         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
         WHERE r.awarded AND r.supplier_name IS NOT NULL
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
     );
@@ -416,8 +1076,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
               r.supplier_name, r.awarded, r.submitted_at, r.total_amount,
               COALESCE(NULLIF(r.currency,''), e.currency) AS currency
-         FROM ops.coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+         FROM ops.v_coupa_supplier_response r
+         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
         ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
         LIMIT 200`,
     );
@@ -441,54 +1101,54 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(DISTINCT currency)::int AS currencies,
               avg((payment_date::date - invoice_date)::numeric)
                 FILTER (WHERE paid AND payment_date IS NOT NULL AND invoice_date IS NOT NULL) AS avg_days_to_pay
-         FROM ops.coupa_invoice`,
+         FROM ops.v_coupa_invoice`,
     );
     const [pay] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS payments,
               sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr,
               count(*) FILTER (WHERE p.sap_payment_doc IS NOT NULL)::int AS with_sap_doc
          FROM ops.coupa_payment p
-         JOIN ops.coupa_invoice i ON i.id = p.invoice_id`,
+         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id`,
     );
     const invoicesByMonth = await query(
       `SELECT to_char(invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
               count(*) FILTER (WHERE paid)::int AS paid,
               sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr
-         FROM ops.coupa_invoice WHERE invoice_date IS NOT NULL
+         FROM ops.v_coupa_invoice WHERE invoice_date IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
     const paymentsByMonth = await query(
       `SELECT to_char(p.payment_date,'YYYY-MM') AS mk, count(*)::int AS payments,
               sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr
          FROM ops.coupa_payment p
-         JOIN ops.coupa_invoice i ON i.id = p.invoice_id
+         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
         WHERE p.payment_date IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
     const statusMix = await query(
-      `SELECT status, count(*)::int AS n FROM ops.coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
+      `SELECT status, count(*)::int AS n FROM ops.v_coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
     );
     const topSuppliers = await query(
       `SELECT supplier_name, count(*)::int AS invoices,
               sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr,
               count(*) FILTER (WHERE paid)::int AS paid,
               count(*) FILTER (WHERE currency <> 'IDR')::int AS other_ccy
-         FROM ops.coupa_invoice
+         FROM ops.v_coupa_invoice
         WHERE supplier_name IS NOT NULL
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
     );
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
-              (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
-         FROM ops.coupa_invoice i
+              (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+         FROM ops.v_coupa_invoice i
         ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
     );
     const recentPayments = await query(
       `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc,
               i.invoice_number, i.supplier_name, i.currency
          FROM ops.coupa_payment p
-         JOIN ops.coupa_invoice i ON i.id = p.invoice_id
+         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
         ORDER BY p.payment_date DESC NULLS LAST LIMIT 50`,
     );
     const wm = await query(
@@ -508,13 +1168,13 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*) FILTER (WHERE state = 'complete')::int AS completed,
               percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (end_time - submit_time))/86400.0)
                 FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days
-         FROM ops.coupa_sourcing_event WHERE state <> 'template'`,
+         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'`,
     );
     const [responses] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS responses,
               count(DISTINCT quote_request_id)::int AS events_with_bids,
               round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event
-         FROM ops.coupa_supplier_response WHERE state = 'submitted'`,
+         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
     );
     const [invoice] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS invoices,
@@ -522,25 +1182,25 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               count(*) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft'))::int AS open_count,
               sum(gross_total) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft') AND currency = 'IDR') AS open_idr,
               count(DISTINCT currency)::int AS currencies
-         FROM ops.coupa_invoice`,
+         FROM ops.v_coupa_invoice`,
     );
     const [linkage] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS coupa_po_lines,
               count(*) FILTER (WHERE sap_po_no IS NOT NULL)::int AS with_sap_po,
               count(*) FILTER (WHERE need_by_date IS NOT NULL)::int AS with_need_by
-         FROM ops.coupa_po_line`,
+         FROM ops.v_coupa_po_line`,
     );
     const recentEvents = await query(
       `SELECT id, event_type, state, description, submit_time, end_time, plant, purch_org, sap_pr_no,
               supplier_count, line_count
-         FROM ops.coupa_sourcing_event WHERE state <> 'template'
+         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'
         ORDER BY updated_at DESC NULLS LAST LIMIT 25`,
     );
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.currency, i.supplier_name, i.payment_term,
-              (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
-         FROM ops.coupa_invoice i
+              (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+         FROM ops.v_coupa_invoice i
         ORDER BY i.updated_at DESC NULLS LAST LIMIT 25`,
     );
     const wm = await query(

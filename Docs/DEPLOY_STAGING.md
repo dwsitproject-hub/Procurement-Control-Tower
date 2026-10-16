@@ -96,6 +96,11 @@ First contact prints GitHub's host-key fingerprint — answer `yes`.
 
 ## 2. DB server — 172.28.92.60
 
+> **Superseded 11 Sep 2026.** Staging now runs on ApsaraDB RDS (section 11).
+> This section still applies when building staging from nothing, and the
+> instance it describes is the migration's rollback target — keep it running.
+
+
 Fully self-contained in the PuTTY session on **172.28.92.60** — the compose
 file is written in place (this host has no repo checkout, and pasting beats
 a cross-machine copy):
@@ -201,14 +206,255 @@ Edit `/opt/pct/staging.env` (e.g. `nano staging.env`):
 
 Edit `/opt/pct/secrets.staging.env` with the kpn-test Coupa credentials.
 
+The SMTP block in `staging.env` is pre-filled for **`mail.energi-up.com:465`
+with implicit TLS** (`SMTP_SECURE=tls`, user `noreply.sys@energi-up.com`) —
+**fill `SMTP_PASSWORD`** there, on the server only. Recipients are set later in
+the app (Admin → Notifications), not in this file.
+
+> **Use 465, not 587.** Tested against the live server 6 Aug 2026: port 587
+> offers no STARTTLS (it answers `503 TLS is not allowed`), so mail and
+> credentials would cross the network unencrypted. Port 465 accepts implicit
+> TLS and passes full certificate verification, so it is both the working and
+> the secure choice.
+
 Put the SAP export files in the share stand-in (**workstation**):
 
 ```bash
 pscp "Assets/*.XLSX" "Assets/*.xlsx" root@172.28.92.57:/opt/pct/assets/
 ```
 
-(When the real Synology/CIFS share is available, mount it read-only at
-`/opt/pct/assets` instead — the compose file already mounts it `:ro`.)
+This is the fallback source, used until the NAS is wired up in step 3a.
+
+### 3a. Read the exports from the shared Synology NAS
+
+Do this instead of maintaining `/opt/pct/assets` by hand. The app-side contract
+is in `Docs/SYNOLOGY-INTEGRATION.md`; the mount itself belongs to infra.
+
+**Check the mount FIRST — do not configure the app before this passes.** A
+folder existing proves nothing; only the filesystem type does:
+
+```bash
+findmnt -t cifs,nfs,nfs4,smb3
+stat -f -c '%T  %n' /mnt/synology-apps /mnt/synology-apps/dev
+ls -la /mnt/synology-apps/dev
+```
+
+- `stat -f` says **`cifs`** and the path appears in `findmnt` → it is the NAS.
+- `stat -f` says **`ext2/ext3`** → it is a LOCAL folder on this server's disk,
+  whatever it looks like in a file browser. Stop here.
+
+> **Checked on 172.28.92.57, 7 Aug 2026: it was NOT mounted.**
+> `findmnt` printed nothing and `/mnt/synology-apps`, `/mnt/synology-apps/dev`
+> and `/mnt/synology/eos` were all `ext2/ext3` — plain local directories, with
+> an empty `dev/klip` skeleton left behind. The Synology doc describes the *EOS
+> app server*; this staging BE is a different VM and the share had never been
+> mounted on it. Files dropped in those folders stay on the BE server's disk and
+> never reach File Station.
+
+Mounting the share is infra's job. What it needs (read-only is sufficient — the
+app never writes to the NAS):
+
+> **Status on 172.28.92.57 as of 7 Aug 2026: BLOCKED at the network layer.**
+> The SMB server is **172.30.1.94** (from `/etc/smb-eos.creds`, left behind by an
+> EOS setup that was never completed on this VM — there is no fstab entry). It is
+> **unreachable from the BE server**: `nc -zv 172.30.1.94 445` returns
+> `No route to host` and `smbclient -L` returns `NT_STATUS_HOST_UNREACHABLE`.
+> `172.28.92.x` and `172.30.1.x` are different subnets with no route between them.
+>
+> Credentials are NOT the problem, and neither is the app. What infra must do:
+> allow **TCP 445 from 172.28.92.57 to 172.30.1.94** — on Alibaba Cloud that is
+> usually the NAS's security group plus VPC peering/route if the two sit in
+> different VPCs. Until then leave `STORAGE_*` commented out; staging keeps
+> reading `assets/`, and Admin → SAP Data Upload (manual upload) is unaffected.
+
+First, from infra — none of this can be guessed:
+
+| Needed | Notes |
+|---|---|
+| DSM hostname or IP | Must be reachable from 172.28.92.57 |
+| Share name | `APPs` unless they say otherwise |
+| A service account + password | **Read access is enough** |
+
+If another server already mounts this share, its `/etc/fstab` has all three —
+faster than a ticket.
+
+Write the credentials file with an editor, not a shell one-liner: a pasted
+`<placeholder>` makes bash treat `<` as input redirection and the command dies
+with `No such file or directory`.
+
+```bash
+apt-get install -y cifs-utils
+nano /etc/pct-nas.cred      # two lines: username=... and password=...
+chmod 600 /etc/pct-nas.cred
+```
+
+Then set the host once and mount (edit the first line before pasting):
+
+```bash
+NAS_HOST='10.0.0.5'
+nc -zv "$NAS_HOST" 445
+mount -t cifs "//$NAS_HOST/APPs" /mnt/synology-apps   -o ro,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8
+stat -f -c '%T  %n' /mnt/synology-apps && ls -la /mnt/synology-apps/dev
+```
+
+`stat -f` must now print `cifs`. If it still prints `ext2/ext3`, the mount did
+not happen — read the error rather than continuing.
+
+Two options there are load-bearing:
+
+- **`ro`** — the app only reads the exports, so a read-only mount makes it
+  impossible for an ingest defect to modify or delete a source file.
+- **`uid=1001,gid=1001`** — CIFS ignores the server's POSIX ownership, and the
+  API container runs as uid 1001. Without these the container cannot read the
+  files even though the mount itself is healthy (the same cause as the earlier
+  upload-spool `EACCES`).
+
+Only once that prints `cifs`, persist it — otherwise a reboot silently drops
+back to an empty local folder. Append it as a command (do not paste an fstab
+line into the shell; it is a file format, not a command):
+
+```bash
+printf '//%s/APPs /mnt/synology-apps cifs ro,credentials=/etc/pct-nas.cred,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8,_netdev 0 0
+' "$NAS_HOST" >> /etc/fstab
+mount -a && findmnt /mnt/synology-apps
+```
+
+**The share's layout, read off the mount rather than assumed:**
+
+```text
+APPs/
+  EXIM  JETTYPLANNING  LOGISTIC  PM  SUSTAINABILITY-PORTAL  eos   <- production
+  dev/
+    EXIM  JETTYPLANNING  LOGISTIC  PM  SUSTAINABILITY-PORTAL      <- development
+```
+
+So an app gets a folder at the root for production and one under `dev/` for
+development, and the names are **UPPERCASE** — which matters, because case is
+significant on a cifs mount. There was no `pct` folder in either place as at
+19 Aug 2026; create `APPs/dev/PCT` in **File Station**, since the mount here is
+read-only by design and the server cannot create it.
+
+#### Creating the project folder from Windows Explorer (simplest)
+
+DSM was not reachable from the workstation on 19 Aug 2026, but the SMB share
+was: `\172.30.1.94\APPs` browses fine in Explorer. That is enough, and it
+avoids DSM entirely.
+
+1. Open `\172.30.1.94\APPs` in Explorer (paste it into the address bar).
+2. Double-click **dev**, and check the address bar reads
+   `Network > 172.30.1.94 > APPs > dev`. Creating at the share root instead
+   would produce the PRODUCTION folder.
+3. **New → Folder**, then type `PCT` and press Enter. Uppercase, and no trailing
+   space — Explorer keeps one if it is typed, and cifs treats `PCT ` as a
+   different directory that the app will never find.
+
+The same window is also the delivery route for the SAP exports: whoever produces
+them can drop the six workbooks straight into
+`\172.30.1.94\APPs\dev\PCT`, or a scheduled `robocopy` can mirror them from
+wherever SAP writes them.
+
+#### Creating it in File Station instead
+
+DSM runs on the NAS itself, not on the app servers, so this is done from a
+browser that can reach `172.30.1.94`. Check that first — the app servers sit on
+`172.28.92.x` and needed a routing fix to see the NAS at all, so a workstation
+may not reach DSM either:
+
+```bash
+curl -s -o /dev/null -w 'dsm http  %{http_code}
+' --max-time 6 http://172.30.1.94:5000/
+curl -sk -o /dev/null -w 'dsm https %{http_code}
+' --max-time 6 https://172.30.1.94:5001/
+```
+
+A `200` on either means DSM is reachable at that address. Then:
+
+1. Open DSM (`http://172.30.1.94:5000` or `https://172.30.1.94:5001`) and sign in
+   with an account that can **write** to the `APPs` share. The `app-prj` service
+   account in `/etc/smb-eos.creds` is for mounting, not administration — use a
+   DSM user with write permission on that share.
+2. Open **File Station** from the main menu (the folder icon).
+3. In the left tree, expand the **APPs** shared folder, then click **dev**.
+   Confirm the breadcrumb reads `APPs / dev` before creating anything: a folder
+   made at the share root becomes a PRODUCTION folder instead.
+4. **Create → Create folder**, and name it exactly `PCT` — uppercase, no spaces.
+   Case matters on a cifs mount, so `pct` or `Pct` will not be found.
+5. The new folder inherits the parent's permissions, which is what the mount
+   relies on. Do not narrow them; the app reads as `app-prj`.
+
+Verify from the BE server, which is the only check that proves the mount can see
+it (DSM showing the folder is not the same thing):
+
+```bash
+ls -la /mnt/synology-apps/dev/ | grep -i pct
+docker exec pct-api ls -la /mnt/synology-apps/dev/PCT
+```
+
+The second command matters more than the first: it proves the folder is readable
+as uid 1001 from inside the container, which is the identity that will actually
+read the exports. An empty listing is success here — the folder exists and is
+readable, it just has no files yet.
+
+> **If DSM is unreachable and you cannot wait**, the folder can be created from
+> the BE server by remounting read-write for one command. It writes to a shared
+> NAS using another application's service account, so prefer File Station when
+> there is a choice, and put it straight back to read-only:
+>
+> ```bash
+> umount /mnt/synology-apps
+> mount -t cifs //172.30.1.94/APPs /mnt/synology-apps -o rw,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,dir_mode=0770,file_mode=0660,vers=3.0,iocharset=utf8
+> mkdir -p /mnt/synology-apps/dev/PCT
+> umount /mnt/synology-apps && mount -a && findmnt /mnt/synology-apps | grep -o ' ro,'
+> ```
+>
+> That last `grep` must print ` ro,` — confirmation the share is back to
+> read-only, which is what stops an ingest defect ever modifying a source export.
+
+Then uncomment the four `STORAGE_*` lines in `/opt/pct/staging.env`:
+
+```env
+STORAGE_TYPE=local
+STORAGE_SYNOLOGY_ROOT=/mnt/synology-apps
+STORAGE_DEPLOYMENT=dev
+STORAGE_PROJECT_SLUG=PCT
+```
+
+Resolved folder: `/mnt/synology-apps/dev/PCT`. All three of root/deployment/slug
+must be set together — a partial set is refused at boot on purpose, because
+falling back silently gives you a healthy-looking dashboard reading the wrong
+folder.
+
+If this server mounts the share somewhere else, tell **Compose** (not
+`staging.env` — the bind mount is substituted before the container starts):
+
+```bash
+echo 'STORAGE_HOST_MOUNT=/srv/synology' > /opt/pct/.env
+```
+
+Recreate the container so the bind takes effect, then confirm:
+
+```bash
+cd /opt/pct
+docker compose -f compose.yml up -d --force-recreate api
+docker logs pct-api 2>&1 | grep -iE 'storage|WARNING'
+```
+
+Expect `storage=synology:/mnt/synology-apps/dev/pct` and **no** `WARNING
+storage:` line.
+
+> **Why the API checks this itself.** Docker does not fail when a bind source is
+> missing — it creates an empty folder — so a missing mount looks exactly like
+> "no files found". The API compares the folder's filesystem against the
+> container root at boot and says `WARNING storage: ... is on the container's
+> own filesystem, not a mount` when the bind did not happen. Admin → SAP Data
+> Upload shows the same verdict in the UI.
+
+Last step, and it is easy to miss: **folders already saved in the panel win over
+the environment.** Open Admin → SAP Data Upload. If the six rows still point at
+`/mnt/sap_exports` the page says so ("outside the storage folder") and offers
+**Use the NAS folder for all** — click it, then **Save schedule**, then
+**Test / preview folders** to confirm all six exports are found. The mount is
+bound read-only, so an ingest can never modify a source export.
 
 Start, seed, ingest — **the API migrates its own schema at boot**
 (idempotent, advisory-locked), so there is no separate migrate step:
@@ -285,13 +531,30 @@ docker compose -f compose.yml up -d
    FE→BE→DB end to end, cookies included).
 4. Admin → Coupa: "Sync now" — every object reports `ok` (proves egress to
    kpn-test). Enable the scheduler (5–10 min) and "Save schedule".
-5. Admin → FX rates: `sap` and `coupa` source pills both present.
-6. **Both login paths** (when SSO is enabled): the login page shows
+5. Admin → FX Rates: `sap` and `coupa` source pills both present.
+6. Admin → SAP Data Upload → **SAP Data Sync**: each of the six files has its
+   own folder, name pattern and up to three daily pickup times in
+   **Asia/Jakarta**. Press *Test / preview folders* — every row should show the
+   file it would use (the newest match). Then tick **Scheduled sync** and
+   *Save schedule*. Use *Same folder for all* / *Same times for all* when the
+   exports share one directory. The panel shows the last run and a
+   recent-pickups log. (This scheduler is new as of 6 Aug 2026 — before that
+   the share ingest only ran when someone pressed Sync, which is why auto-sync
+   appeared dead.)
+   Note: a dataset publishes complete or not at all, so a pickup time decides
+   when that file's folder is re-read; each firing assembles the newest file
+   from every folder into one bundle. Unchanged files report `noop_unchanged`.
+7. Admin → **Notifications**: confirm the mail-server rows read
+   `mail.energi-up.com` / `587` / `starttls` and Password = *configured*, add
+   the recipients, then **Send test email** — it must report `sent` and arrive.
+   Failure notices are the ones that matter; a clean Coupa sync is not emailed
+   on purpose (it runs every few minutes).
+8. **Both login paths** (when SSO is enabled): the login page shows
    "Sign in with DWS Hub" above the credential form — test the SP-initiated
    flow (button) AND the IdP-initiated flow (the app's tile in the Hub
    dashboard); both must land signed in. If the button is missing, the Hub was
    unreachable from the BE server (boot log shows the discovery warning).
-7. Full verification from the workstation (card = drill on every figure):
+9. Full verification from the workstation (card = drill on every figure):
    `npx tsx Backend/src/cli/sweep.ts --base http://172.28.92.56:3050`
    — expect `mismatches=0 errors=0` (pass `--password` if you already
    rotated the admin credential).
@@ -327,20 +590,57 @@ If the Hub is down, the login page automatically hides the SSO button
 
 ## 7. Updating staging (each release)
 
+**Three servers, and each command belongs to exactly one of them.** Both hosts
+keep their own `/opt/pct/compose.yml`, copied from a DIFFERENT source file, so
+each knows only its own services: `api` and `redis` on the BE server, `web` on
+the FE server. Running `up -d api web` on either one answers
+`no such service` for whichever half lives elsewhere.
+
 ```bash
 # workstation: push the release
 git push origin sit2
 
-# BE server (PuTTY session)
-cd /opt/pct/src && git pull
+# BE server (172.28.92.57) — services: api, redis
+cd /opt/pct/src && git pull --ff-only
 docker build -f Backend/Dockerfile -t pct-api:staging .
-docker compose -f /opt/pct/compose.yml up -d api   # migrations apply at boot
+docker compose -f /opt/pct/compose.yml up -d --force-recreate api   # migrations apply at boot
+docker logs pct-api 2>&1 | grep -i migration | tail -3
 
-# FE server (PuTTY session)
-cd /opt/pct/src && git pull
+# FE server (172.28.92.56) — services: web
+cd /opt/pct/src && git pull --ff-only
 docker build -f Frontend/Dockerfile -t pct-web:staging .
-docker compose -f /opt/pct/compose.yml up -d web
+docker compose -f /opt/pct/compose.yml up -d --force-recreate web
 ```
+
+`--force-recreate` is not optional after a rebuild. Compose compares the image
+REFERENCE, not its contents, and `pct-api:staging` still points at the same tag,
+so a plain `up -d` reports the container is up to date and leaves the OLD code
+running — a rebuild that appears to deploy and does not. The same applies to a
+changed bind mode, which is fixed at container creation.
+
+> **`docker compose --build` does NOTHING here, and fails silently.** The local
+> `docker-compose.yml` carries `build:` contexts, so `up -d --build api web`
+> works on a workstation. These staging compose files do not: they name
+> prebuilt tags (`image: pct-web:staging`) and nothing else, so `--build` finds
+> no context, skips, and recreates the container from the OLD image. It reports
+> success. This cost a deploy on 14 Sep 2026 — the frontend was "rebuilt" three
+> times and the new button never appeared. The explicit `docker build -f
+> .../Dockerfile -t pct-<svc>:staging .` above is the only thing that produces
+> a new image on these servers.
+
+**Verify the CONTAINER, never the build log.** Both of these must answer:
+
+```bash
+# BE server — the API carries the code you just built
+docker exec pct-api sh -c "ls dist/modules/analytics/<a file from this release>.js"
+
+# FE server — the bundle carries the string you expect
+docker exec pct-web sh -c "grep -rl '<visible text from this release>' /usr/share/nginx/html/assets/ | head -3"
+```
+
+An empty answer means the image did not rebuild, and recreating it again will
+not help. Then hard-reload the browser (Ctrl+Shift+R): `index.html` names a
+hashed bundle, and a cached copy keeps pointing at the previous one.
 
 If a release changed the compose files, env template, or nginx conf, re-copy
 them from `src/deploy/...` (compare first — your filled `staging.env` /
@@ -370,3 +670,497 @@ never rolls back — migrations are additive and dataset versions immutable.
   against production Coupa. Admin → FX rates shows the source per rate.
 - Coupa production credentials are over-scoped (TECH_04 §2) — keep staging on
   the kpn-test client until the read-only production client exists.
+
+---
+
+## 8. Put staging behind http://test-pct.kpndomain.com
+
+No rebuild is involved. The frontend calls the API with relative paths and the
+CSP is entirely `'self'`, so nothing in the bundle knows its own hostname — this
+is DNS, one published port, and three lines of config.
+
+### 8.1 DNS (infra)
+
+An **A record** `test-pct.kpndomain.com` → **172.28.92.56**. That is a private
+address, so it has to be the internal resolver; a public zone cannot answer for
+it usefully. Confirm from a machine that will actually use the dashboard, not
+from the server:
+
+```bash
+nslookup test-pct.kpndomain.com
+```
+
+### 8.2 Port 80 belongs to the host's nginx — proxy, do not take it
+
+Checked on 172.28.92.56 (13 Aug 2026): port 80 is held by a **package-installed
+nginx**, serving its default "Welcome to nginx!" page.
+
+```bash
+ss -ltnp | grep -w ':80'
+# LISTEN [::]:80  users:(("nginx",pid=954429,...),("nginx",pid=954428,...))
+```
+
+Those are nginx worker processes, not `docker-proxy`, so this is the host's own
+nginx rather than a container. **This server also runs klip, slms, eos and
+others** — that nginx is the shared front door for them, so stopping it or
+taking its port would break applications that have nothing to do with this one.
+
+So the dashboard stays on 3050 and the subdomain reaches it through a vhost.
+See first what the host nginx already serves, so the new file cannot collide:
+
+```bash
+nginx -v && systemctl is-enabled nginx
+ls /etc/nginx/conf.d/ /etc/nginx/sites-enabled/ 2>/dev/null
+nginx -T 2>/dev/null | grep -E 'server_name|listen ' | head -40
+```
+
+Then install the vhost from the repo — it is written to be additive, with no
+`default_server`, so an unknown Host keeps reaching whatever answered before:
+
+```bash
+cd /opt/pct/src && git pull
+cp deploy/nginx/host-vhost-test-pct.conf /etc/nginx/conf.d/test-pct.conf
+nginx -t
+systemctl reload nginx
+```
+
+`nginx -t` before the reload is not optional: a syntax error in a shared nginx
+takes every other site on the host down with it.
+
+Make sure the container is up on 3050 (it should already be):
+
+```bash
+cd /opt/pct
+cp src/deploy/staging/fe.compose.yml compose.yml
+cp src/deploy/nginx/staging.conf staging.conf
+docker compose -f compose.yml up -d
+curl -s -o /dev/null -w 'container direct: %{http_code}
+' http://127.0.0.1:3050/
+```
+
+> **Why the vhost sets `client_max_body_size 210m`.** The SAP upload posts six
+> files of up to 60 MB. nginx defaults to 1 MB, and the outer proxy rejects the
+> request with a 413 long before the container's own 210m limit is consulted —
+> so the limit has to be raised in BOTH places.
+
+### 8.3 Tell the backend where it lives (172.28.92.57)
+
+`APP_BASE_URL` is what the backend uses to build absolute links and the OIDC
+redirect, so it must match what the browser typed:
+
+```bash
+cd /opt/pct
+sed -i 's|^APP_BASE_URL=.*|APP_BASE_URL=http://test-pct.kpndomain.com|' staging.env
+grep APP_BASE_URL staging.env
+docker compose -f compose.yml up -d --force-recreate api
+```
+
+### 8.4 Verify
+
+```bash
+curl -s -o /dev/null -w 'root %{http_code}
+' http://test-pct.kpndomain.com/
+curl -s -o /dev/null -w 'deep link %{http_code}
+' http://test-pct.kpndomain.com/po-analysis
+curl -s -o /dev/null -w 'api %{http_code}
+' http://test-pct.kpndomain.com/api/v1/kpi
+```
+
+Expect `200`, `200`, `401`. The 401 is correct — the API is reachable and
+refusing an unauthenticated call. If the root returns the nginx welcome page
+instead, the request reached the host nginx but not the vhost: check
+`server_name` matches the hostname exactly and that `nginx -T` lists the file. Then sign in through the browser and confirm
+the session sticks across a page reload: that exercises the cookie, which is the
+part a hostname change breaks if `proxy_set_header Host $host` were missing (it
+is present).
+
+Existing sessions do NOT carry over — cookies were issued for the old host, so
+everyone signs in once more.
+
+### 8.5 Enable DWS Hub SSO
+
+The Hub runs on the SAME nginx as the dashboard —
+`test-dwshub.kpndomain.com`, found in that host's vhost list — so it is
+reachable from the BE server without any network change.
+
+**1. Confirm the discovery document FROM THE BE SERVER (172.28.92.57).** The
+backend performs the token exchange server-to-server, so the browser reaching
+the Hub proves nothing. Try both schemes; the vhost list shows the Hub on
+port 80, so plain HTTP is the likely answer:
+
+```bash
+for u in https://test-dwshub.kpndomain.com http://test-dwshub.kpndomain.com; do
+  printf '%s -> ' "$u"
+  curl -s -o /dev/null -w '%{http_code}
+' --max-time 8     "$u/api/sso/.well-known/openid-configuration"
+done
+```
+
+Whichever returns `200`, read it and keep the issuer and endpoints:
+
+```bash
+curl -s http://test-dwshub.kpndomain.com/api/sso/.well-known/openid-configuration | head -c 600
+```
+
+**2. Register the dashboard in the Hub** (Admin → Applications):
+
+| Field | Value |
+|---|---|
+| Redirect URI | `http://test-pct.kpndomain.com/auth/oidc/callback` |
+| Client type | **public / PKCE** — no client secret exists |
+
+The Hub matches the redirect URI **byte-exactly**: a trailing slash, `https`
+instead of `http`, or the old `172.28.92.56:3050` form all fail with
+`invalid_grant`. Note the `client_id` it assigns.
+
+**3. Fill the three variables** in `/opt/pct/staging.env` — all three or none,
+which boot validation enforces:
+
+```env
+OIDC_DISCOVERY_URL=http://test-dwshub.kpndomain.com/api/sso/.well-known/openid-configuration
+OIDC_CLIENT_ID=<the client_id the Hub assigned>
+OIDC_REDIRECT_URI=http://test-pct.kpndomain.com/auth/oidc/callback
+```
+
+```bash
+cd /opt/pct && docker compose -f compose.yml up -d --force-recreate api
+docker logs pct-api --tail 5 | grep -o 'sso=[a-z]*'
+```
+
+Expect `sso=configured`. While the Hub is unreachable or misconfigured the login
+page simply hides the SSO button and local credentials keep working, so a
+mistake here cannot lock anyone out.
+
+**4. The first SSO sign-in needs an admin afterwards.** A user arriving through
+the Hub is provisioned with the `viewer` role and **deliberately no data scope**
+(`app.data_scope` is left empty on purpose), so they will see *"No data access
+granted"* rather than the dashboard. That is the intended default — access is
+granted, never assumed. In Admin → Users, for that account:
+
+- **Grant all data** (or **Scope…** for specific company/plant/purchasing org), and
+- set their **Department** and **Role**, which is what the page-permission
+  matrix reads. With neither set, every page resolves to `none`.
+
+> **SSO over plain HTTP.** The authorization code and the returned ID token
+> cross the network in clear text. PKCE stops another application replaying the
+> code, but it does not hide the token from anyone watching the wire. This is
+> the same exposure as the password login today, and the same argument for
+> putting a certificate on `test-pct.kpndomain.com` before real users arrive
+> (see 8.6).
+
+### 8.6 The TLS question this raises
+
+A real hostname is the point at which HTTP stops being defensible: sessions and
+passwords cross the network in clear text. Worth planning now, because two
+settings are coupled to it and boot validation enforces both:
+
+| | Today (HTTP) | With TLS |
+|---|---|---|
+| `SESSION_COOKIE_SECURE` | `false` | `true` |
+| `NODE_ENV` | `development` | `production` |
+| `LOCAL_AUTH_REQUIRE_MFA` | `false` | **`true` — production refuses local auth without it** |
+
+So `NODE_ENV=production` is not a flag to flip on its own: it demands a
+certificate AND MFA enrolment for every local account, and it also stops the dev
+admin seed from running. Staging stays in development mode until those are in
+place, which is why the cookie is not Secure today.
+
+---
+
+## 9. Scheduled pickup from the share folder
+
+The scheduler READS a folder. It does not fetch from SAP and it does not copy
+anything — something else has to put the six exports there. Decide that first,
+because the schedule is worthless without it:
+
+| Delivery | Status |
+|---|---|
+| Synology NAS mount | **blocked** — see 8.2 note and the NAS section; the share is unreachable from this VM |
+| Manual copy to `/opt/pct/assets` | works today (`pscp` from a workstation, or any scheduled job on the network) |
+| Admin → SAP Data Upload | works today, but it is a manual upload, not a schedule |
+
+`/opt/pct/assets` on the BE server is bind-mounted **read-only** into the API as
+`/mnt/sap_exports`, so that container path is what the panel is configured with.
+
+### 9.1 Confirm the container can see the files
+
+```bash
+ls -la /opt/pct/assets
+docker exec pct-api ls -la /mnt/sap_exports
+```
+
+Both must list the same six workbooks. If the host directory has them and the
+container does not, the bind mount is missing — recreate the container.
+
+### 9.2 Configure the schedule (Admin → SAP Data Upload → SAP Data Sync)
+
+Per file: a folder, a name pattern, and up to three daily pickup times in
+**Asia/Jakarta**. The defaults match the SAP export names, so usually only the
+folder and the times need setting:
+
+| File | Folder | Pattern |
+|---|---|---|
+| PR Report | `/mnt/sap_exports` | `PR Report*.XLSX` |
+| PO Report | `/mnt/sap_exports` | `PO Report*.XLSX` |
+| GR List | `/mnt/sap_exports` | `GR List*.XLSX` |
+| PR Release | `/mnt/sap_exports` | `PR Release*.XLSX` |
+| PO Release | `/mnt/sap_exports` | `PO Release*.XLSX` |
+| Rate Conversion | `/mnt/sap_exports` | `Rate Conversion*.xlsx` |
+
+**Same folder for all** fills the column in one click. Set the times *after* the
+export job that produces the files, then tick **Scheduled sync** and **Save
+schedule**.
+
+Press **Test / preview folders** before trusting it: each row shows the file
+that pickup would choose, and the panel says whether all six were found. It
+reads the values in the form, so nothing has to be saved first.
+
+### 9.3 What a pickup actually does
+
+- A dataset is published **complete or not at all**. A slot therefore decides
+  *when that file's folder is read again*; when one fires, the newest matching
+  file from every folder is assembled into one bundle.
+- Unchanged files produce `noop_unchanged` and **no new version**. Re-dropping
+  the same exports costs nothing and creates no duplicate.
+- A file modified in the last `INGEST_FILE_SETTLE_SECONDS` (5) is skipped until
+  the next slot, so a half-written export is never read.
+- A missed slot — server down — fires on the next tick rather than being lost.
+
+### 9.4 Turn on the emails, or nobody learns it failed
+
+Admin → Notifications: add recipients and keep both SAP toggles on. A scheduled
+run then reports rows loaded per file and the change against the previous
+version on success, and on failure names what was missing and why. Without
+recipients a failed 06:00 pickup is silent until someone notices stale figures.
+
+Verify the mail path once with **Send test email** (staging is configured for
+`mail.energi-up.com:465`, implicit TLS).
+
+### 9.5 The switch is NOT in staging.env
+
+`INGEST_AUTOPOLL_ENABLED` and `SHARE_POLL_CRON_MINUTES` were removed from the
+template: nothing read them, so the file claimed the scheduler was on while it
+was off. The enable flag, folders, patterns and times all live in `rule_config`
+and are edited in the panel, which is also why they take effect without a
+restart — the poller re-reads them every tick.
+
+---
+
+## 10. Unblocking the Synology NAS (Docker took the NAS's subnet)
+
+The share is unreachable from the BE server, and **not** because of a firewall.
+Evidence from 172.28.92.57 (7 Aug 2026):
+
+```
+ip route get 172.30.1.94
+  172.30.1.94 dev br-bd97d660ae6d src 172.30.0.1     <- a DOCKER BRIDGE
+docker network ls / inspect
+  project-management-v20_default   172.30.0.0/16     (bridge DOWN, no containers)
+```
+
+The NAS lives at **172.30.1.94**. Another application's Docker network claimed
+`172.30.0.0/16`, so the host believes that address is a local container and ARPs
+for it on the bridge instead of routing it. `nc` reports `No route to host`
+because the packets never leave the VM.
+
+Docker's default pools span 172.17–172.31, and it skips ranges that clash with
+an existing host ROUTE. There was no specific route to the NAS — it would have
+gone via the default gateway — so nothing stopped Docker taking that block.
+
+> **`172.28.0.0/16` is the only 172.x block still unclaimed on this host, and it
+> is the servers' own LAN.** The next network created is one allocation away
+> from cutting the box off from FE↔BE traffic and from PuTTY. Phase 3 is not
+> optional tidying.
+
+### Phase 1 — free the subnet (reversible, ~1 minute)
+
+The owning stack is **another application**. Its bridge is DOWN, so this is
+low-risk, but tell whoever owns `project-management-v20` first — Compose will
+recreate the network next time that stack starts.
+
+```bash
+docker network inspect project-management-v20_default \
+  --format 'attached: {{range .Containers}}{{.Name}} {{end}}'
+docker ps -a --filter network=project-management-v20_default --format '{{.Names}}\t{{.Status}}'
+```
+
+Only if nothing is attached:
+
+```bash
+docker network rm project-management-v20_default
+ip route get 172.30.1.94        # must NO LONGER name a br-* device
+nc -zv 172.30.1.94 445
+```
+
+`nc` succeeding means the collision was the whole problem. If it now reports a
+timeout rather than `No route to host`, the routing is fixed and a firewall is
+the remaining obstacle — that is an infra request, with much better evidence
+than before.
+
+### Phase 2 — mount the share read-only
+
+`/etc/smb-eos.creds` already holds `username=app-prj` and the NAS address; it is
+EOS's account, so confirm with IT that reusing it is acceptable, or ask for a
+`pct` account and point `credentials=` at a new file.
+
+```bash
+chmod 600 /etc/smb-eos.creds          # it was world-readable
+apt-get install -y cifs-utils smbclient
+smbclient -L //172.30.1.94 -A /etc/smb-eos.creds     # confirm the share name
+mkdir -p /mnt/synology-apps
+mount -t cifs //172.30.1.94/APPs /mnt/synology-apps \
+  -o ro,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8
+stat -f -c '%T  %n' /mnt/synology-apps               # must print cifs
+ls -la /mnt/synology-apps/dev
+```
+
+`ro` because this app only reads the exports; `uid=1001` because CIFS ignores
+the server's POSIX ownership and the API container runs as uid 1001 — without it
+the mount is healthy and unreadable.
+
+Persist it, or a reboot silently returns to an empty local directory:
+
+```bash
+printf '//172.30.1.94/APPs /mnt/synology-apps cifs ro,credentials=/etc/smb-eos.creds,uid=1001,gid=1001,dir_mode=0550,file_mode=0440,vers=3.0,iocharset=utf8,_netdev 0 0\n' >> /etc/fstab
+mount -a && findmnt /mnt/synology-apps
+```
+
+### Phase 3 — stop Docker taking those ranges again
+
+Phase 1 only frees the block. **It recurred on 11 Sep 2026**: a different
+stack, `tas-staging_tas_staging_network`, had taken `172.30.0.0/16`, the CIFS
+mount went stale (`findmnt` still showed it; `ls` said *Host is down*), and
+`pct-api` could not start at all — Docker refuses to bind a mount source it
+cannot stat. It surfaced mid-database-migration, which is the worst possible
+moment to discover that Phase 3 was skipped.
+
+So do **both**, not either. They are different guarantees: the pools stop
+Docker *choosing* the range, and the route stops it *mattering* if something
+takes it anyway with an explicit subnet.
+
+Both restart every container on this shared host, so they need a window.
+
+**1. Constrain Docker's pools** in `/etc/docker/daemon.json`:
+
+```json
+{
+  "default-address-pools": [
+    { "base": "172.17.0.0/16", "size": 24 },
+    { "base": "172.18.0.0/15", "size": 24 },
+    { "base": "172.20.0.0/14", "size": 24 },
+    { "base": "172.24.0.0/14", "size": 24 }
+  ]
+}
+```
+
+That gives Docker 172.17–172.27 (about 2,800 /24 networks) and fences off
+**172.28**, this server's own LAN — one allocation away from cutting the box
+off from FE↔BE traffic and from your own SSH session — and **172.29–172.31**,
+which includes the NAS at 172.30.1.94. It stays inside the block Docker
+already uses by default, rather than moving it to a 10.x range that may well
+be in use elsewhere in the company.
+
+Validate before restarting, because a malformed daemon.json stops Docker
+starting at all:
+
+```bash
+python3 -c "import json; json.load(open('/etc/docker/daemon.json')); print('valid')"
+systemctl restart docker      # restarts EVERY container on this host
+docker network create pooltest && docker network inspect pooltest \
+  --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' && docker network rm pooltest
+```
+
+The test network must come back in 172.17–172.27. Existing networks keep the
+subnets they already have — only new ones are allocated from the pools — so a
+stack still holding a bad range has to be removed once (Phase 1) to pick up a
+good one.
+
+**2. A persistent static route to the NAS.** Docker skips ranges that clash
+with an existing host route, so this both prevents and overrides the problem.
+The `ip route add` form is lost on the next reboot, which is why it is a unit
+and not a command:
+
+```bash
+cat > /etc/systemd/system/nas-route.service <<'EOF'
+[Unit]
+Description=Static route to the Synology NAS so Docker cannot shadow it
+Documentation=Docs/DEPLOY_STAGING.md section 10
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 172.28.95.253 is this subnet's gateway; eth0 is the LAN interface.
+# `replace` rather than `add` so re-running is harmless.
+ExecStart=/sbin/ip route replace 172.30.0.0/16 via 172.28.95.253 dev eth0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now nas-route.service
+ip route get 172.30.1.94      # must name eth0, never a br-* device
+```
+
+A oneshot unit rather than a netplan edit on purpose: a mistake in netplan on
+a cloud instance can take the network down with your session on it, while this
+touches nothing that already works and is removed with `systemctl disable`.
+
+**Recovering the stale mount.** Freeing the subnet does not revive the mount —
+CIFS keeps the entry after the server becomes unreachable, so `findmnt` looks
+healthy while every read fails. It has to be dropped and remade, lazily,
+because a plain unmount hangs on a host that is down:
+
+```bash
+umount -l /mnt/synology-apps; mount -a
+findmnt /mnt/synology-apps && ls -1 /mnt/synology-apps | head -3
+```
+
+### Phase 4 — point the app at the NAS
+
+```bash
+cd /opt/pct
+sed -i 's|^# STORAGE_TYPE=local|STORAGE_TYPE=local|;
+        s|^# STORAGE_SYNOLOGY_ROOT=|STORAGE_SYNOLOGY_ROOT=|;
+        s|^# STORAGE_DEPLOYMENT=|STORAGE_DEPLOYMENT=|;
+        s|^# STORAGE_PROJECT_SLUG=|STORAGE_PROJECT_SLUG=|' staging.env
+grep '^STORAGE_' staging.env
+docker compose -f compose.yml up -d --force-recreate api
+docker logs pct-api --tail 6 | grep -iE 'storage|WARNING'
+```
+
+Expect `storage=synology:/mnt/synology-apps/dev/pct` and **no** `WARNING
+storage:` line. The boot probe compares the folder's filesystem against the
+container root, so a missing bind mount is reported rather than silently read as
+an empty directory.
+
+Finally, in Admin → SAP Data Upload, the six folders still point at
+`/mnt/sap_exports`: saved settings outrank the environment on purpose. The panel
+flags the rows as **outside the storage folder** and offers **Use the NAS folder
+for all** — click it, Save, then **Test / preview folders**.
+
+## 11. Moving the database to ApsaraDB RDS
+
+Staging's database is the container-hosted Postgres in section 2. To move it to
+the managed instance
+`pgm-d9jx9o06qae8gf3h.pgsql.ap-southeast-5.rds.aliyuncs.com`, use the gated
+scripts in `deploy/migrate/` rather than ad-hoc `pg_dump` commands:
+
+```bash
+mkdir -p /opt/pct/migrate && cd /opt/pct/migrate    # BE server, 172.28.92.57
+cp /opt/pct/src/deploy/migrate/* .
+cp migrate.env.template migrate.env                 # fill DST_USER/DST_PASSWORD
+chmod 600 migrate.env && chmod +x *.sh
+./01-preflight.sh && ./02-dump.sh && ./03-restore.sh && ./04-verify.sh && ./05-cutover.sh
+```
+
+`deploy/migrate/README.md` is the runbook: what each phase gates on, the three
+places PCT deviates from the generic ApsaraDB runbook (partitioned parents
+break its completeness gate, there is one `DATABASE_URL` rather than two config
+files, and every timestamp column here is `timestamptz`), and the measured
+timings from a full rehearsal.
+
+Only `05-cutover.sh` changes anything the application reads — it rewrites the
+`DATABASE_URL` line in `/opt/pct/staging.env` and recreates the API container.
+`99-rollback.sh` puts it back. Keep `pct-postgres` on 172.28.92.60 running for
+a few days afterwards; it is the rollback.

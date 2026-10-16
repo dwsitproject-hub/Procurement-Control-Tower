@@ -6,7 +6,12 @@
 # Required next to this file:
 #   staging.env          — copied from deploy/env/staging.env, secrets filled in
 #   secrets.staging.env  — Coupa credentials (optional; integrations off without it)
-#   assets/              — the SAP export files (read-only share stand-in)
+#   assets/              — the SAP export files (fallback when the NAS is unset)
+#
+# The Synology NAS is bound read-only from the host mount (STORAGE_HOST_MOUNT,
+# default /mnt/synology/eos). If this server does not mount the NAS, leave the
+# STORAGE_* block in staging.env commented out and the app keeps reading
+# assets/ — the bind below is then an empty folder and nothing reads it.
 name: pct
 
 services:
@@ -47,8 +52,43 @@ services:
       SHARE_PATH: /mnt/sap_exports
       UPLOAD_SPOOL_PATH: /var/lib/pct/spool
     volumes:
-      # Read-only exactly as the production CIFS mount will be — an application
-      # defect can never modify or delete a source file.
+      # The shared Synology NAS (Docs/SYNOLOGY-INTEGRATION.md). Bound READ-ONLY:
+      # this app only READS the six SAP exports that land in its project folder,
+      # so an application defect can never modify or delete one. Override the
+      # host path with STORAGE_HOST_MOUNT if this server mounts it elsewhere.
+      # NOTE: /mnt/synology-apps on 172.28.92.57 was a LOCAL folder, not a mount,
+      # when this was written - see Docs/DEPLOY_STAGING.md 3a.
+      #
+      # Docker CREATES AN EMPTY FOLDER instead of failing when the host path is
+      # absent, which is why the API probes the mount at boot and the Admin ->
+      # SAP Data Upload panel reports whether the folder is really the NAS.
+      # ${STORAGE_MOUNT_MODE} defaults to `ro` so the safe behaviour is the one you
+      # get by not thinking about it. Set STORAGE_MOUNT_MODE=rw in /opt/pct/.env
+      # ONLY to enable after-run filing (Admin -> SAP Data Upload -> After a
+      # run), and note that the container bind is just one of three gates: the
+      # HOST cifs mount must also be rw, its dir_mode/file_mode must carry a
+      # write bit, and the share user must have write permission on the NAS.
+      - ${STORAGE_HOST_MOUNT:-/mnt/synology-apps}:/mnt/synology-apps:${STORAGE_MOUNT_MODE:-ro}
+      # After-run filing needs WRITE, and needs it only inside this app's own
+      # project folder - moving a file deletes the original, so read-only cannot
+      # do it. Reopening the whole APPs share to get that would hand this
+      # container write and delete over every other project's folder as well, so
+      # the write is granted here as a SECOND, narrower mount that lands on top
+      # of the read-only one:
+      #
+      #   host:  mount //<nas>/APPs/<deployment>/<slug> rw at its own mountpoint
+      #   here:  STORAGE_PROJECT_HOST_MOUNT=<that mountpoint>
+      #          STORAGE_PROJECT_MOUNT_MODE=rw
+      #
+      # Docker orders binds by depth, so the deeper destination wins for that
+      # subtree and everything else on the share stays read-only. Left unset
+      # this re-binds the same folder read-only, which changes nothing - the
+      # feature is off until someone opens all three gates deliberately.
+      # The container path must match STORAGE_DEPLOYMENT/STORAGE_PROJECT_SLUG in
+      # staging.env; those live in the env_file, which Compose cannot read for
+      # interpolation, so it is stated rather than derived.
+      - ${STORAGE_PROJECT_HOST_MOUNT:-/mnt/synology-apps/dev/PCT}:${STORAGE_PROJECT_CONTAINER_PATH:-/mnt/synology-apps/dev/PCT}:${STORAGE_PROJECT_MOUNT_MODE:-ro}
+      # Fallback source, used while STORAGE_* is unset in staging.env.
       - ./assets:/mnt/sap_exports:ro
       - spool:/var/lib/pct/spool
     ports:

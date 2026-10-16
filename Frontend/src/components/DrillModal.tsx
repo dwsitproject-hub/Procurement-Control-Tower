@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
-import { ApiError, api, type DrillPage } from '../lib/api';
+import { ApiError, api, downloadFile, type DrillPage } from '../lib/api';
 import { FLAG_META, STATUS_PILL, formatCell, formatNumber, moneyCellText } from '../lib/format';
+import { ScrollFrame } from './ScrollFrame';
+import {
+  ColumnChooser, SortButton, useColumnLayout, useHeaderDrag, type SortState,
+} from './TableTools';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
 function agingStyle(days: number): React.CSSProperties | undefined {
@@ -34,6 +38,23 @@ export function DrillModal({
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState<{ expired: boolean; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  /**
+   * Sorted on the SERVER (7 Oct 2026): the panel holds 200 rows of possibly
+   * thousands, and sorting only those would put the largest of the first 200
+   * at the top rather than the largest of all.
+   */
+  const [sort, setSort] = useState<SortState>(null);
+  const sortQs = sort ? `&sort=${encodeURIComponent(sort.key)}&dir=${sort.dir}` : '';
+  // Column choice and order, remembered per grain: a PO-line drill and a GR
+  // drill have different columns, and choosing for one must not hide the other's.
+  const layout = useColumnLayout(page ? `drill_layout_${page.grain}` : null, page?.columns ?? null);
+  const thProps = useHeaderDrag(layout.reorder);
+  const byKey = new Map((page?.columns ?? []).map((c) => [c.key, c]));
+  const shownCols = layout.visible
+    .map((k) => byKey.get(k))
+    .filter((c): c is NonNullable<typeof c> => c !== undefined);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -47,7 +68,7 @@ export function DrillModal({
     let cancelled = false;
     setLoading(true);
     api
-      .get<DrillPage>(`/api/v1/drill/${token}?limit=200`)
+      .get<DrillPage>(`/api/v1/drill/${token}?limit=200${sortQs}`)
       .then((d) => {
         if (cancelled) return;
         setPage(d);
@@ -68,11 +89,62 @@ export function DrillModal({
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, sortQs]);
+
+  /**
+   * Export every row behind this figure.
+   *
+   * No filter parameters: the token carries the stored predicate, so the
+   * server re-executes the same query that produced the count in the header.
+   * That is the same guarantee the panel itself relies on, which is why the
+   * file cannot disagree with the number the user clicked.
+   *
+   * The panel holds 200 rows at a time; the file holds all of them. Exporting
+   * only what had been scrolled into view would be a different, much less
+   * useful feature.
+   */
+  const exportExcel = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setExportNote(null);
+    try {
+      // The heading the user is looking at, so the file is named after it.
+      const shown = label || page?.label || '';
+      // The file follows the screen: the columns shown, in their order, and
+      // the sort.
+      const q = new URLSearchParams();
+      if (shown) q.set('label', shown);
+      if (shownCols.length > 0) q.set('cols', shownCols.map((c) => c.key).join(','));
+      if (sort) { q.set('sort', sort.key); q.set('dir', sort.dir); }
+      const r = await downloadFile(
+        `/api/v1/drill/${token}/export.xlsx${q.toString() ? `?${q.toString()}` : ''}`,
+        'pct-drill.xlsx',
+      );
+      const n = r.rows ?? 0;
+      setExportNote(
+        r.total !== null && r.total > n
+          ? `Downloaded ${r.filename} \u2014 ${formatNumber(n)} of ${formatNumber(r.total)} rows. `
+            + 'The export stops at 50,000.'
+          : `Downloaded ${r.filename} \u2014 ${formatNumber(n)} rows.`,
+      );
+    } catch (e) {
+      // An expired token is the likely failure here, and it is the same
+      // 15-minute expiry the panel explains above -- so say so in the same
+      // words rather than showing a bare 401.
+      const expired = e instanceof ApiError && e.problem.type.includes('drill-token-expired');
+      setExportNote(
+        expired
+          ? 'Export failed: this drill link has expired. Close this and click the figure again.'
+          : `Export failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const loadMore = async () => {
     if (!cursor) return;
-    const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}`);
+    const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}${sortQs}`);
     setRows((r) => [...r, ...d.rows]);
     setCursor(d.nextCursor);
   };
@@ -89,6 +161,19 @@ export function DrillModal({
         <header>
           <h3 id="drill-title">{'\u{1F50D} '}{label || page?.label}</h3>
           <span className="spacer" />
+          {page && !error && page.totalCount > 0 && (
+            <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} />
+          )}
+          {page && !error && page.totalCount > 0 && (
+            <button
+              className="dd-open"
+              onClick={() => void exportExcel()}
+              disabled={exporting}
+              title={`Export all ${formatNumber(page.totalCount)} rows behind this figure to Excel`}
+            >
+              {exporting ? 'Preparing\u2026' : '\u2B07 Export to Excel'}
+            </button>
+          )}
           {page?.detailHandoff && onOpenDetail && (
             <button
               className="dd-open"
@@ -149,19 +234,27 @@ export function DrillModal({
                 {rows.length < page.totalCount && <> · showing {formatNumber(rows.length)}</>}
               </p>
 
+              {exportNote && (
+                <p className={exportNote.startsWith('Export failed') ? 'err' : 'note'}>
+                  {exportNote}
+                </p>
+              )}
+
               {page.totalCount === 0 ? (
                 <p className="note">
                   No rows match this figure. If the figure was non-zero, your data scope may not
                   include them.
                 </p>
               ) : (
-                <div className="table-wrap">
+                <ScrollFrame className="table-wrap">
                   <table className="data dd-tbl">
                     <thead>
                       <tr>
                         <th />
-                        {page.columns.map((c) => (
-                          <th key={c.key}>{c.label}</th>
+                        {shownCols.map((c) => (
+                          <th key={c.key} {...thProps(c.key)}>
+                            <SortButton label={c.label} colKey={c.key} sort={sort} onSort={setSort} />
+                          </th>
                         ))}
                       </tr>
                     </thead>
@@ -183,7 +276,7 @@ export function DrillModal({
                               ) : null;
                             })}
                           </td>
-                          {page.columns.map((c) => {
+                          {shownCols.map((c) => {
                             const v = r[c.key];
                             const num = ['money', 'int', 'number', 'pct'].includes(c.type);
                             // v1's status pill, colour-coded per lifecycle state.
@@ -234,7 +327,7 @@ export function DrillModal({
                       })}
                     </tbody>
                   </table>
-                </div>
+                </ScrollFrame>
               )}
 
               {cursor && (

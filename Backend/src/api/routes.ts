@@ -9,14 +9,23 @@
 import express, { type NextFunction, type Request, type Response, type Router } from 'express';
 import multer from 'multer';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
-import { KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
-import { loadEnv } from '../config/env.js';
-import { healthCheck, query, queryOne } from '../db/client.js';
+import { FEEDS, KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
 import {
-  AuthError, buildAuthorizeUrl, ensureOidcReady, handleOidcCallback, loadPrincipal, localLogin, oidcEnabled,
+  buildErrorWorkbook, errorWorkbookName, loadFindingRows, loadRowErrors,
+} from '../modules/ingest/error_report.js';
+import { resolvePages } from '../modules/authz/pages.js';
+import { loadEnv } from '../config/env.js';
+import { healthCheck, pool, query, queryOne } from '../db/client.js';
+import { buildMart } from '../modules/analytics/mart.js';
+import { openItemsSummary } from '../modules/analytics/openitems.js';
+import { execTilePeriods } from '../modules/analytics/execperiods.js';
+import {
+  AuthError, buildAuthorizeUrl, changeLocalPassword, ensureOidcReady, handleOidcCallback,
+  loadPrincipal, localLogin, oidcEnabled,
   type Principal,
 } from '../modules/auth/auth.js';
 import {
@@ -29,14 +38,26 @@ import {
 } from '../modules/analytics/drill.js';
 import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
-import { ManualUploadSource, ShareFolderSource, type DiscoveredFile } from '../modules/ingest/sources.js';
+import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
+import {
+  PerFeedShareSource, archiveAfterRun, diagnoseMissing, loadShareConfig,
+} from '../modules/ingest/share_poller.js';
+import { archiveSummary } from '../modules/ingest/archive.js';
+import { notify } from '../modules/notify/mailer.js';
+import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
-import { queryDetail, DETAIL_COLUMNS, type DetailFilters } from '../modules/analytics/detail.js';
+import {
+  queryDetail, DETAIL_COLUMNS, DETAIL_QUERY_PARAMS, parseDetailQuery,
+  describeDetailFilters, isAgeBand, isMoneyState,
+} from '../modules/analytics/detail.js';
+import {
+  buildExportWorkbook, exportFileName, MAX_EXPORT_ROWS,
+} from '../modules/analytics/export.js';
 import {
   describeFilter, isEmptyFilter, parseGlobalFilter, type GlobalFilter,
 } from '../modules/analytics/globalfilter.js';
 import {
-  computeLiveChart, computeLiveKpis, globalFilterOptions, liveChartAvailable,
+  computeLiveChart, computeLiveChartSeries, computeLiveKpis, globalFilterOptions, liveChartAvailable,
 } from '../modules/analytics/live.js';
 import { mountExtraRoutes } from './routes_extra.js';
 
@@ -71,6 +92,13 @@ export class HttpProblem extends Error {
   }
 }
 
+/** Reachable while must_change_password is set — nothing else is. */
+const PASSWORD_CHANGE_ALLOWLIST = new Set([
+  '/api/v1/me',
+  '/auth/local/change-password',
+  '/auth/logout',
+]);
+
 function pub(handler: (req: Request, res: Response) => Promise<void> | void) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -100,6 +128,15 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
         });
         throw new HttpProblem(403, 'insufficient-role', `Requires ${min}`);
       }
+      // Forced rotation (011): while the flag is set the ONLY reachable
+      // endpoints are the ones needed to change it. Enforced here, in the one
+      // guard every authenticated route goes through — not merely in the UI.
+      if (principal.mustChangePassword && !PASSWORD_CHANGE_ALLOWLIST.has(req.path)) {
+        throw new HttpProblem(
+          403, 'password-change-required',
+          'Your temporary password must be changed before using the application.',
+        );
+      }
       const scope = await resolveScope(principal.userId);
       const ctx: Ctx = { principal, scope, sid: session.sid };
       req.ctx = ctx;
@@ -108,6 +145,37 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
       next(e);
     }
   };
+}
+
+/**
+ * A writable spool root. The configured path is a mounted volume; if it was
+ * created before the image set its ownership it is root-owned and this process
+ * (uid 1001) cannot write there. Rather than failing every manual upload, fall
+ * back to the OS temp dir and say so — spooled files are request-scoped and
+ * deleted when the batch reaches a terminal state, so durability is irrelevant.
+ */
+let spoolRootCache: string | null = null;
+async function spoolRoot(): Promise<string> {
+  if (spoolRootCache) return spoolRootCache;
+  const configured = env.UPLOAD_SPOOL_PATH;
+  try {
+    await mkdir(configured, { recursive: true });
+    const probe = join(configured, `.probe-${randomUUID()}`);
+    await writeFile(probe, '');
+    await unlink(probe).catch(() => undefined);
+    spoolRootCache = configured;
+  } catch (err) {
+    const fallback = join(tmpdir(), 'pct-spool');
+    await mkdir(fallback, { recursive: true });
+    process.stderr.write(
+      `WARNING: upload spool ${configured} is not writable ` +
+      `(${err instanceof Error ? err.message : String(err)}); using ${fallback}. ` +
+      `Fix the volume's ownership to uid 1001 to silence this.
+`,
+    );
+    spoolRootCache = fallback;
+  }
+  return spoolRootCache;
 }
 
 // ────────────────────────────────────────────────────────────── helpers
@@ -166,7 +234,10 @@ export function buildRouter(): Router {
   const r = express.Router();
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: env.UPLOAD_MAX_FILE_MB * 1024 * 1024, files: 6 },
+    // FEEDS.length, not 6: the bundle grew by four optional reference files
+    // (018) and multer silently rejects the surplus, which would surface as a
+    // confusing "incomplete bundle" for a user who selected all ten.
+    limits: { fileSize: env.UPLOAD_MAX_FILE_MB * 1024 * 1024, files: FEEDS.length },
   });
 
   // ── auth ──
@@ -212,11 +283,44 @@ export function buildRouter(): Router {
       res.json({ userId: principal.userId, email: principal.email, displayName: principal.displayName });
     } catch (e) {
       if (e instanceof AuthError) {
-        const status = e.code === 'account-locked' ? 423 : 401;
-        throw new HttpProblem(status, e.code, 'Sign-in failed', 'Invalid email or password.');
+        // 'disabled' is only ever thrown AFTER the password verified, so its
+        // message is safe to pass through; 401 keeps one uniform sentence so a
+        // wrong password and an unknown user stay indistinguishable.
+        const status = e.code === 'account-locked' ? 423 : e.code === 'disabled' ? 403 : 401;
+        throw new HttpProblem(
+          status, e.code, 'Sign-in failed',
+          status === 401 ? 'Invalid email or password.' : e.message,
+        );
       }
       throw e;
     }
+  }));
+
+  r.post('/auth/local/change-password', role('viewer', async (req, res, ctx) => {
+    const { currentPassword, newPassword } = (req.body ?? {}) as {
+      currentPassword?: string; newPassword?: string;
+    };
+    if (!currentPassword || !newPassword) {
+      throw new HttpProblem(400, 'invalid-body', 'currentPassword and newPassword are required');
+    }
+    try {
+      await changeLocalPassword(ctx.principal.userId, currentPassword, newPassword);
+    } catch (e) {
+      if (e instanceof AuthError) {
+        await recordAudit({
+          action: 'auth.password_change', actorUserId: ctx.principal.userId,
+          actorEmail: ctx.principal.email, outcome: 'failure',
+          detail: { reason: e.message }, ip: req.ip,
+        });
+        throw new HttpProblem(400, 'invalid-credentials', e.message);
+      }
+      throw e;
+    }
+    await recordAudit({
+      action: 'auth.password_change', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success', detail: {}, ip: req.ip,
+    });
+    res.json({ ok: true });
   }));
 
   r.post('/auth/logout', pub(async (req, res) => {
@@ -242,6 +346,10 @@ export function buildRouter(): Router {
       roles: ctx.principal.roles,
       scope: ctx.scope,
       capabilities: caps,
+      department: ctx.principal.department,
+      jobRole: ctx.principal.jobRole,
+      pages: await resolvePages(ctx.principal.userId, ctx.principal.roles),
+      mustChangePassword: ctx.principal.mustChangePassword,
       ssoEnabled: oidcEnabled(),
     });
   }));
@@ -299,9 +407,21 @@ export function buildRouter(): Router {
       [v.id],
     );
 
+    // The PO commitment period, which is NOT prDateRange. Requisitions in this
+    // extract reach back to 2023 while the orders are 2026 — so an Executive
+    // Summary headed with the PR span would claim a period the value figures do
+    // not cover. Same population as the page: purchase lines only.
+    const poRange = await queryOne<{ min: string | null; max: string | null }>(
+      `SELECT min(document_date)::text AS min, max(document_date)::text AS max
+         FROM core.fact_po_line
+        WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted`,
+      [v.id],
+    );
+
     res.json({
       datasetVersionId: v.id,
       prDateRange: prRange && prRange.min ? { from: prRange.min, to: prRange.max } : null,
+      poDateRange: poRange && poRange.min ? { from: poRange.min, to: poRange.max } : null,
       asOfDate: v.asOfDate,
       asOfSource: v.asOfSource,
       publishedAt: v.publishedAt,
@@ -376,13 +496,35 @@ export function buildRouter(): Router {
 
     const gf: GlobalFilter = parseGlobalFilter(req.query as Record<string, unknown>);
 
+    /**
+     * Optional `?ids=a,b,c` — return only these KPIs.
+     *
+     * The dashboard asks for the KPIs of the page being opened rather than all
+     * 71 on first paint, and asks again on every page change so the figures are
+     * current. Filtering here rather than in the browser is what makes that
+     * cheap: under a global filter each KPI is recomputed from the facts, so
+     * sending ids turns a full recompute into one for the dozen the page shows.
+     *
+     * Unknown ids are ignored rather than rejected: a browser running an older
+     * build must degrade to "that card is missing", never to a failed request
+     * that empties the whole page.
+     */
+    const idsParam = String((req.query as Record<string, unknown>)['ids'] ?? '').trim();
+    const wanted = idsParam === ''
+      ? null
+      : new Set(idsParam.split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 200));
+
     // A filtered request recomputes from the facts using the SAME spec SQL the
     // mart precomputes. The precomputed path below is untouched, so a bug in the
     // live path cannot affect the default dashboard.
     if (!isEmptyFilter(gf)) {
       const fpLive = sessionFingerprint(ctx.sid);
-      const live = await computeLiveKpis(v.id, gf);
-      const liveIds = new Set(live.map((k) => k.kpiId));
+      const liveAll = await computeLiveKpis(v.id, gf);
+      const live = wanted ? liveAll.filter((k) => wanted.has(k.kpiId)) : liveAll;
+      // Membership is tested against EVERY live KPI, not just the requested
+      // ones: a KPI that recomputes live must not be listed as unavailable
+      // merely because this page did not ask for it.
+      const liveIds = new Set(liveAll.map((k) => k.kpiId));
 
       // The 18 original mart KPIs (cycle times, GR/IR share, expedite, WBS…)
       // have no live recomputation yet. Under a filter they must NOT silently
@@ -396,6 +538,7 @@ export function buildRouter(): Router {
 
       const filteredOut = martOnly
         .filter((m) => !liveIds.has(m.kpi_id))
+        .filter((m) => !wanted || wanted.has(m.kpi_id))
         .map((m) => ({
           kpiId: m.kpi_id,
           title: KPI_TITLES[m.kpi_id as keyof typeof KPI_TITLES] ?? m.kpi_id,
@@ -450,8 +593,11 @@ export function buildRouter(): Router {
     }>(
       `SELECT kpi_id, status, value_num, numerator, denominator, sample_size, unit,
               currency_basis, severity, status_reason, detail, drill_predicate
-         FROM mart.kpi_value WHERE dataset_version_id = $1 ORDER BY kpi_id`,
-      [v.id],
+         FROM mart.kpi_value
+        WHERE dataset_version_id = $1
+          AND ($2::text[] IS NULL OR kpi_id = ANY($2::text[]))
+        ORDER BY kpi_id`,
+      [v.id, wanted ? [...wanted] : null],
     );
 
     const fp = sessionFingerprint(ctx.sid);
@@ -501,9 +647,25 @@ export function buildRouter(): Router {
     // Same rule as the KPI endpoint: filtered requests recompute live from the
     // spec SQL; the precomputed path is left alone.
     if (!isEmptyFilter(gf) && liveChartAvailable(meta.chartId)) {
-      const live = await computeLiveChart(v.id, meta.chartId, gf);
-      if (live) {
+      // Every series, not just the first: computeLiveChart used to return one,
+      // so a filtered multi-series panel silently lost the rest.
+      const liveSeries = await computeLiveChartSeries(v.id, meta.chartId, gf);
+      if (liveSeries) {
         const fpLive = sessionFingerprint(ctx.sid);
+        // Buckets are the UNION across series, ordered by the ordinal the specs
+        // assigned. A series may legitimately miss a bucket — a size band with
+        // only Delivered rows has no Open segment — so taking them from one
+        // series would drop columns from the axis.
+        const bucketOrder = new Map<string, { key: string; label: string; ordinal: number }>();
+        for (const one of liveSeries) {
+          for (const pt of one.points) {
+            if (!bucketOrder.has(pt.bucketKey)) {
+              bucketOrder.set(pt.bucketKey, {
+                key: pt.bucketKey, label: pt.bucketLabel, ordinal: pt.ordinal,
+              });
+            }
+          }
+        }
         res.json({
           datasetVersionId: v.id,
           asOfDate: v.asOfDate,
@@ -513,32 +675,28 @@ export function buildRouter(): Router {
           currencyBasis: null,
           computed: 'live',
           appliedFilters: describeFilter(gf),
-          buckets: live.points.map((pt) => ({
-            key: pt.bucketKey,
-            label: pt.bucketLabel,
-            ordinal: pt.ordinal,
+          buckets: [...bucketOrder.values()].sort((a, b) => a.ordinal - b.ordinal),
+          series: liveSeries.map((one) => ({
+            key: one.seriesKey,
+            label: one.seriesLabel,
+            points: one.points.map((pt) => ({
+              bucketKey: pt.bucketKey,
+              value: pt.value,
+              rowCount: pt.rowCount,
+              drillToken: issueDrillToken(
+                {
+                  ...(pt.drillPredicate as unknown as DrillPredicate),
+                  label: `${meta.title} — ${one.seriesLabel} — ${pt.bucketLabel}`,
+                },
+                v.id,
+                ctx.scope,
+                fpLive,
+              ),
+            })),
           })),
-          series: [
-            {
-              key: live.seriesKey,
-              label: live.seriesLabel,
-              points: live.points.map((pt) => ({
-                bucketKey: pt.bucketKey,
-                value: pt.value,
-                rowCount: pt.rowCount,
-                drillToken: issueDrillToken(
-                  {
-                    ...(pt.drillPredicate as unknown as DrillPredicate),
-                    label: `${meta.title} — ${pt.bucketLabel}`,
-                  },
-                  v.id,
-                  ctx.scope,
-                  fpLive,
-                ),
-              })),
-            },
-          ],
-          notes: live.points.length === 0 ? ['No rows match the active filter'] : (meta.notes ?? []),
+          notes: liveSeries.length === 0
+            ? ['No rows match the active filter']
+            : (meta.notes ?? []),
         });
         return;
       }
@@ -622,9 +780,123 @@ export function buildRouter(): Router {
     const offset = Number(req.query.cursor ?? 0);
     try {
       const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
-      const page = await executeDrill(payload, limit, offset);
+      const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
+      const sort = sortKey === null ? null
+        : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' as const : 'asc' as const };
+      const page = await executeDrill(payload, limit, offset, sort);
       res.json({ ...page, asOfDate: (await currentVersion())?.asOfDate ?? null });
     } catch (e) {
+      if (e instanceof DrillTokenError) {
+        if (e.code === 'foreign') {
+          await recordAudit({
+            action: 'drill.token_replay', actorUserId: ctx.principal.userId,
+            actorEmail: ctx.principal.email, outcome: 'denied', ip: req.ip,
+          });
+          throw new HttpProblem(403, 'drill-token-foreign', 'Drill token does not belong to this session');
+        }
+        throw new HttpProblem(
+          401,
+          e.code === 'expired' ? 'drill-token-expired' : 'drill-token-invalid',
+          e.code === 'expired' ? 'Drill token expired' : 'Invalid drill token',
+        );
+      }
+      throw e;
+    }
+  }));
+
+  /**
+   * Drill panel -> Excel.
+   *
+   * The token IS the filter: it carries the stored predicate of the figure
+   * that was clicked, so the export needs no query parameters and cannot
+   * disagree with the panel. Columns are the grain's own, which is what the
+   * panel shows -- there is no column chooser there to honour.
+   *
+   * The panel pages 200 rows at a time; this returns every row the figure
+   * counts, up to the export cap, which is the point of the button.
+   */
+  r.get('/api/v1/drill/:token/export.xlsx', role('analyst', async (req, res, ctx) => {
+    try {
+      const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
+      // The panel's sort, so the file is in the order on screen.
+      const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
+      const page = await executeDrill(payload, MAX_EXPORT_ROWS, 0, sortKey === null ? null
+        : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' : 'asc' });
+      const v = await currentVersion();
+
+      // The panel's heading, so the file is named after the figure the user
+      // clicked ("Total PO Amount") rather than after the stored predicate
+      // ("po_line: notSto=true, notDeleted=true"). Tokens issued for KPI cards
+      // carry no label of their own, so the server cannot know it.
+      //
+      // Cosmetic only, and treated as such: it names the file and titles the
+      // sheet, while the authoritative description of what the rows ARE stays
+      // server-derived and is recorded below as "Figure". Trimmed and stripped
+      // of control characters because it reaches a Content-Disposition header.
+      const clientLabel = req.query.label === undefined
+        ? null
+        : String(req.query.label).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80);
+      const title = clientLabel || page.label;
+
+      const filters: Array<[string, string]> = Object.entries(payload.filters ?? {})
+        .map(([k, val]) => [k, typeof val === 'object' ? JSON.stringify(val) : String(val)]);
+      filters.unshift(['Figure', page.label]);
+      if (page.note) filters.push(['Note', page.note]);
+      if (page.totals?.idrSum !== null && page.totals?.idrSum !== undefined) {
+        filters.push(['Total (document IDR)', String(page.totals.idrSum)]);
+      }
+      // Stated rather than omitted: a USD total the panel refused to show
+      // because some lines have no rate must not look like a zero here.
+      if (page.totals) {
+        filters.push([
+          'Total (USD)',
+          page.totals.usdComplete && page.totals.usdSum !== null
+            ? String(page.totals.usdSum)
+            : 'not shown \u2014 some lines have no FX rate',
+        ]);
+      }
+
+      // The panel's chosen columns in the panel's order (7 Oct 2026); unknown
+      // keys are dropped rather than failing the download, and none chosen
+      // means every column, as before.
+      const wanted = req.query.cols === undefined ? []
+        : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x !== '');
+      const byKey = new Map(page.columns.map((c) => [c.key, c]));
+      const picked = wanted.map((k) => byKey.get(k)).filter((c): c is NonNullable<typeof c> => c !== undefined);
+      const wb = buildExportWorkbook(picked.length > 0 ? picked : page.columns, page.rows, {
+        sheetName: 'Rows',
+        title,
+        datasetVersionId: payload.v,
+        asOfDate: v?.asOfDate ?? '',
+        generatedBy: ctx.principal.email,
+        totalRows: page.totalCount,
+        filters,
+      });
+
+      await recordAudit({
+        action: 'drill.export', actorUserId: ctx.principal.userId,
+        actorEmail: ctx.principal.email, outcome: 'success',
+        detail: {
+          datasetVersionId: payload.v,
+          grain: payload.grain,
+          label: page.label,
+          rows: page.rows.length,
+          totalRows: page.totalCount,
+          truncated: page.totalCount > page.rows.length,
+        },
+        ip: req.ip,
+      });
+
+      res.setHeader('Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition',
+        `attachment; filename="${exportFileName(title)}"`);
+      res.setHeader('X-Export-Rows', String(page.rows.length));
+      res.setHeader('X-Export-Total', String(page.totalCount));
+      res.send(wb);
+    } catch (e) {
+      // Same token errors as the panel itself, so an expired link explains
+      // itself the same way rather than arriving as a broken download.
       if (e instanceof DrillTokenError) {
         if (e.code === 'foreign') {
           await recordAudit({
@@ -683,60 +955,278 @@ export function buildRouter(): Router {
     const v = await currentVersion();
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
 
-    const list = (name: string): string[] | undefined => {
-      const raw = req.query[name];
-      if (raw === undefined) return undefined;
-      const arr = Array.isArray(raw) ? raw.map(String) : String(raw).split(',');
-      const cleaned = arr.map((x) => x.trim()).filter((x) => x !== '');
-      return cleaned.length > 0 ? cleaned : undefined;
-    };
-    const flag = (name: string): boolean => String(req.query[name] ?? '') === 'true';
-
-    const filters: DetailFilters = {
-      status: list('status'),
-      matCat: list('matCat'),
-      matGroup: list('matGroup'),
-      plant: list('plant'),
-      company: list('company'),
-      purchOrg: list('purchOrg'),
-      purchGroup: list('purchGroup'),
-      priority: list('priority'),
-      monthKey: list('monthKey'),
-      search: req.query.q === undefined ? undefined : String(req.query.q),
-      excludeSto: flag('excludeSto'),
-      includeDeleted: flag('includeDeleted'),
-      onlyOpen: flag('onlyOpen'),
-      onlyDirectPo: flag('onlyDirectPo'),
-      onlyReleaseExempt: flag('onlyReleaseExempt'),
-    };
-
     // Unknown parameters are rejected, not ignored: a typo must not silently
     // return unfiltered data.
-    const allowed = new Set([
-      'status','matCat','matGroup','plant','company','purchOrg','purchGroup','priority','monthKey',
-      'q','excludeSto','includeDeleted','onlyOpen','onlyDirectPo','onlyReleaseExempt',
-      'sort','dir','limit','cursor','facets',
-    ]);
+    const allowed = new Set<string>([...DETAIL_QUERY_PARAMS, 'limit', 'cursor', 'facets']);
     for (const k of Object.keys(req.query)) {
       if (!allowed.has(k)) {
         throw new HttpProblem(400, 'invalid-parameter', `Unknown query parameter: ${k}`);
       }
     }
 
-    const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
-    const sortDir = String(req.query.dir ?? 'asc') === 'desc' ? 'desc' : 'asc';
+    // Parsed by the same function the export uses, so the two cannot drift.
+    const { filters, sort } = parseDetailQuery(req.query as Record<string, unknown>);
+    if (filters.ageBand !== undefined && !isAgeBand(filters.ageBand)) {
+      throw new HttpProblem(400, 'invalid-parameter', `Unknown age band: ${filters.ageBand}`);
+    }
+    if (filters.moneyState !== undefined && !isMoneyState(filters.moneyState)) {
+      throw new HttpProblem(400, 'invalid-parameter', `Unknown state: ${filters.moneyState}`);
+    }
 
     const page = await queryDetail(
       v.id,
       v.asOfDate,
       ctx.scope,
       filters,
-      sortKey ? { key: sortKey, dir: sortDir } : null,
+      sort,
       Math.min(Number(req.query.limit ?? 200), 1000),
       Number(req.query.cursor ?? 0),
       String(req.query.facets ?? '') === 'true',
     );
     res.json(page);
+  }));
+
+  /**
+   * Detail table -> Excel.
+   *
+   * Takes the SAME query string the table is showing, plus `cols` naming the
+   * visible columns in their on-screen order, and returns those rows as a
+   * workbook. Same parser, same query, same scope: the only differences from
+   * the table request are that paging is replaced by the export cap and facets
+   * are not computed.
+   *
+   * `cols` is validated against the column whitelist rather than trusted --
+   * these keys reach a SELECT list.
+   */
+  r.get('/api/v1/detail/export.xlsx', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+
+    const allowed = new Set<string>([...DETAIL_QUERY_PARAMS, 'cols']);
+    for (const k of Object.keys(req.query)) {
+      if (!allowed.has(k)) {
+        throw new HttpProblem(400, 'invalid-parameter', `Unknown query parameter: ${k}`);
+      }
+    }
+
+    const requested = req.query.cols === undefined
+      ? null
+      : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x !== '');
+    if (requested !== null) {
+      const known = new Set(DETAIL_COLUMNS.map((c) => c.key));
+      const bad = requested.filter((k) => !known.has(k));
+      if (bad.length > 0) {
+        throw new HttpProblem(400, 'invalid-parameter', `Unknown column(s): ${bad.join(', ')}`);
+      }
+      if (requested.length === 0) {
+        throw new HttpProblem(400, 'invalid-parameter', 'No columns selected');
+      }
+    }
+    const byKey = new Map(DETAIL_COLUMNS.map((c) => [c.key, c]));
+    const columns = (requested ?? DETAIL_COLUMNS.filter((c) => c.default).map((c) => c.key))
+      .map((k) => byKey.get(k)!)
+      .map((c) => ({ key: c.key, label: c.label, type: c.type, currency: c.currency }));
+
+    const { filters, sort } = parseDetailQuery(req.query as Record<string, unknown>);
+    const page = await queryDetail(
+      v.id, v.asOfDate, ctx.scope, filters, sort, MAX_EXPORT_ROWS, 0, false,
+      columns.some((c) => byKey.get(c.key)?.coupa === true),
+    );
+
+    const wb = buildExportWorkbook(columns, page.rows, {
+      sheetName: 'Detail',
+      title: 'Detail table',
+      datasetVersionId: v.id,
+      asOfDate: v.asOfDate,
+      generatedBy: ctx.principal.email,
+      totalRows: page.totalCount,
+      filters: describeDetailFilters(filters, sort),
+    });
+
+    // Audited like the ingest error workbook: this file carries row-level data
+    // out of the application, and how much of it left is worth recording.
+    await recordAudit({
+      action: 'detail.export', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: {
+        datasetVersionId: v.id,
+        rows: page.rows.length,
+        totalRows: page.totalCount,
+        truncated: page.totalCount > page.rows.length,
+        columns: columns.map((c) => c.key),
+      },
+      ip: req.ip,
+    });
+
+    res.setHeader('Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${exportFileName('detail')}"`);
+    // Read by the browser so the page can say a file was cut short. A header,
+    // not a failure: the file is still useful, it is just not the whole set.
+    res.setHeader('X-Export-Rows', String(page.rows.length));
+    res.setHeader('X-Export-Total', String(page.totalCount));
+    res.send(wb);
+  }));
+
+  /**
+   * Rebuild the derived layer for the CURRENTLY published version, from the
+   * facts already stored. No files are read and no new version is created.
+   *
+   * ── Why this exists ─────────────────────────────────────────────────────
+   *
+   * KPI values and chart series are precomputed at ingest. A release that
+   * changes how a figure is computed therefore changes nothing until someone
+   * re-ingests — and "Rebuild from the same files" can only do that while the
+   * source files are still in the pickup folder. They often are not: after-run
+   * filing moves them, or the next export has not arrived, or (staging, 16 Sep
+   * 2026) the export itself is broken and no bundle will complete at all.
+   *
+   * That left a deployed change visible nowhere, with no way forward that did
+   * not involve the share folder. The facts, though, are already in the
+   * database; only the derivation was stale.
+   *
+   * ── What it does and does not touch ─────────────────────────────────────
+   *
+   * Rewrites mart.kpi_value and mart.chart_series for that version. Does NOT
+   * touch core.fact_*, the row counts, the as-of date or the version id — so
+   * drill tokens, saved links and published snapshots stay valid.
+   *
+   * It does mean a published version can DISPLAY different numbers after a
+   * release than it did before one, which is worth being clear about rather
+   * than hiding: the alternative is a figure that the code says is wrong and
+   * the screen keeps showing. The facts it is derived from have not moved.
+   *
+   * The rule snapshot and the disabled-KPI set are read back from the version
+   * itself — the snapshot from the row, the disabled set from the KPI rows
+   * about to be replaced — so the rebuild reproduces the rules the version was
+   * PUBLISHED under, not whatever is configured today. A rule change still
+   * needs a real recompute, and Admin -> Data Exclusions still says so.
+   */
+  r.post('/api/v1/admin/mart/rebuild', role('admin', async (req, res, ctx) => {
+    const v = await queryOne<{ id: number; as_of: string; rule_snapshot: Record<string, unknown> }>(
+      `SELECT id, as_of_date::text AS as_of, rule_snapshot
+         FROM core.dataset_version
+        WHERE upper(status) = 'PUBLISHED'
+        ORDER BY published_at DESC LIMIT 1`,
+    );
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset to rebuild');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Read the disabled set BEFORE deleting the rows that carry it. A KPI
+      // disabled by a validation finding must stay disabled and keep saying
+      // why, rather than quietly coming back with a computed number.
+      const dis = await client.query<{ kpi_id: string }>(
+        `SELECT kpi_id FROM mart.kpi_value
+          WHERE dataset_version_id = $1 AND status = 'disabled'`,
+        [v.id],
+      );
+      const before = await client.query<{ charts: number; kpis: number }>(
+        `SELECT (SELECT count(*)::int FROM mart.chart_series WHERE dataset_version_id = $1) AS charts,
+                (SELECT count(*)::int FROM mart.kpi_value    WHERE dataset_version_id = $1) AS kpis`,
+        [v.id],
+      );
+
+      await client.query(`DELETE FROM mart.chart_series WHERE dataset_version_id = $1`, [v.id]);
+      await client.query(`DELETE FROM mart.kpi_value    WHERE dataset_version_id = $1`, [v.id]);
+      await buildMart(
+        client, v.id, v.as_of, v.rule_snapshot,
+        new Set(dis.rows.map((r2) => r2.kpi_id)),
+      );
+
+      const after = await client.query<{ charts: number; kpis: number }>(
+        `SELECT (SELECT count(*)::int FROM mart.chart_series WHERE dataset_version_id = $1) AS charts,
+                (SELECT count(*)::int FROM mart.kpi_value    WHERE dataset_version_id = $1) AS kpis`,
+        [v.id],
+      );
+      // One transaction: a half-rebuilt mart would leave pages with some
+      // figures and not others, and no way to tell which.
+      await client.query('COMMIT');
+
+      await recordAudit({
+        action: 'admin.mart.rebuild', actorUserId: ctx.principal.userId,
+        actorEmail: ctx.principal.email, outcome: 'success',
+        detail: {
+          datasetVersionId: v.id,
+          chartSeries: { before: before.rows[0]?.charts ?? 0, after: after.rows[0]?.charts ?? 0 },
+          kpiValues: { before: before.rows[0]?.kpis ?? 0, after: after.rows[0]?.kpis ?? 0 },
+          disabledKpisPreserved: dis.rows.length,
+        },
+        ip: req.ip,
+      });
+
+      res.json({
+        outcome: 'rebuilt',
+        datasetVersionId: v.id,
+        asOfDate: v.as_of,
+        chartSeries: after.rows[0]?.charts ?? 0,
+        kpiValues: after.rows[0]?.kpis ?? 0,
+        chartSeriesBefore: before.rows[0]?.charts ?? 0,
+        disabledKpisPreserved: dis.rows.length,
+      });
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      client.release();
+    }
+  }));
+
+  /**
+   * The Open Items page's stage pipeline and desk table.
+   *
+   * Everything else on that page comes from the KPI and chart endpoints it
+   * already used; this covers the three figures those cannot supply — oldest
+   * age per stage, the priority split per stage, and the backlog grouped by
+   * purchasing group. See modules/analytics/openitems.ts for why the stage
+   * counts are computed here rather than read from the tiles.
+   */
+  /**
+   * YTD and current-month figures for the Executive Summary's headline tiles.
+   *
+   * Its own endpoint rather than more KPIs: a KPI's drill is a static literal
+   * and cannot say "the months of the as-of year", and the measures that needed
+   * this most - distinct vendors, distinct desks, four averages - cannot be
+   * summed out of a monthly chart the way a total can.
+   */
+  r.get('/api/v1/exec/tile-periods', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    res.json({
+      datasetVersionId: v.id,
+      ...(await execTilePeriods(v.id, v.asOfDate, ctx.scope, gf)),
+    });
+  }));
+
+  r.get('/api/v1/openitems/summary', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+    // The same global filter every other figure on the page is recomputed
+    // under. A filter this page cannot express (a GR-grain dimension, say)
+    // throws inside, and is reported rather than quietly ignored.
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    // The backlog table's own Plant / PR Type / PO Type filters.
+    const list = (k: string): string[] => String((req.query as Record<string, unknown>)[k] ?? '')
+      .split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 300);
+    const section = { plant: list('catPlant'), prType: list('catPrType'), poType: list('catPoType') };
+    try {
+      res.json({
+        datasetVersionId: v.id,
+        ...(await openItemsSummary(v.id, v.asOfDate, ctx.scope, gf, section)),
+      });
+    } catch (e) {
+      throw new HttpProblem(
+        400, 'invalid-parameter',
+        `This page cannot be filtered that way: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }));
 
   // ── ingestion ──
@@ -762,24 +1252,98 @@ export function buildRouter(): Router {
   }));
 
   r.post('/api/v1/ingest/sync', role('steward', async (req, res, ctx) => {
-    const source = new ShareFolderSource(env.SHARE_PATH, env.INGEST_FILE_SETTLE_SECONDS);
+    // Same per-feed folders/patterns the scheduler uses, so "Sync now" and the
+    // scheduled pickup can never read different files.
+    const shareCfg = await loadShareConfig();
+    const source = new PerFeedShareSource(shareCfg);
     const force = Boolean((req.body ?? {}).force);
     const out = await runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force });
+    // The same after-run filing the scheduled pickup does. Sharing one helper is
+    // the point: these two paths already share the source so they cannot read
+    // different files, and they must not diverge on what happens next either.
+    const archive = await archiveAfterRun(source, out.outcome, 'batchId' in out ? out.batchId : null, shareCfg);
     await recordAudit({
       action: 'ingest.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
       outcome: out.outcome === 'failed' ? 'failure' : 'success',
-      detail: { outcome: out.outcome, force }, ip: req.ip,
+      detail: { outcome: out.outcome, force, archive }, ip: req.ip,
     });
+    // A manual sync notifies on FAILURE only: the person who pressed the button
+    // is already looking at the result, but a failure is worth telling the team.
+    if (['failed', 'incomplete_bundle', 'source_unavailable'].includes(out.outcome)) {
+      const m = await ingestFailureBody({
+        trigger: 'manual',
+        outcome: out.outcome,
+        detail: 'missing' in out ? `missing ${out.missing.join(',')}`
+          : 'path' in out ? out.path
+          : 'reason' in out ? out.reason : undefined,
+        // The manual button sends the same mail as the scheduler, so it must
+        // carry the same diagnosis — otherwise pressing "Sync now" to
+        // reproduce a failure would produce a LESS informative mail than the
+        // one being investigated.
+        missingReasons: 'missing' in out
+          ? diagnoseMissing(out.missing, source.lastScan, out.filesRead)
+          : undefined,
+        batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
+        archive: archiveSummary(archive),
+      });
+      await notify('ingest.failure', m.subject, m.body);
+    }
     res.json(out);
+  }));
+
+  /**
+   * The failing rows of a batch, as a workbook.
+   *
+   * A separate endpoint rather than bytes inlined in the ingest response: the
+   * report can be tens of thousands of rows, an operator often wants it minutes
+   * later rather than at the moment of failure, and a download must be
+   * re-requestable without re-running an ingest.
+   *
+   * Scoped to steward like the ingest itself. The workbook contains source data,
+   * so it must not be more widely readable than the ingest that produced it.
+   */
+  r.get('/api/v1/ingest/batch/:id/errors.xlsx', role('steward', async (req, res, ctx) => {
+    const batchId = Number(req.params.id);
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      throw new HttpProblem(400, 'invalid-body', 'batch id must be a positive integer');
+    }
+    const rows = await loadRowErrors(batchId);
+    // The requester's own scope, so the workbook can never contain rows they
+    // could not open on screen.
+    const findings = await loadFindingRows(batchId, ctx.scope);
+    const wb = buildErrorWorkbook(batchId, rows, findings);
+    if (wb === null) {
+      throw new HttpProblem(
+        404, 'not-found',
+        `Batch ${batchId} has nothing to report: no unreadable cells and no rule flagged any `
+        + 'rows it could name. Either the data is clean, or the batch predates row-level '
+        + 'capture, or its staging rows have been pruned.',
+      );
+    }
+    await recordAudit({
+      action: 'ingest.errors.download', actorUserId: ctx.principal.userId,
+      actorEmail: ctx.principal.email, outcome: 'success',
+      detail: {
+        batchId,
+        cellErrors: rows.length,
+        findingSheets: findings.filter((f) => f.rows.length > 0).length,
+        findingRows: findings.reduce((a, f) => a + f.rows.length, 0),
+      },
+      ip: req.ip,
+    });
+    res.setHeader('Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${errorWorkbookName(batchId)}"`);
+    res.send(wb);
   }));
 
   // Multer parses the multipart body first; role() then authorises before any
   // file is written to the spool.
-  r.post('/api/v1/ingest/upload', upload.array('files', 6), role('steward', async (req, res, ctx) => {
+  r.post('/api/v1/ingest/upload', upload.array('files', FEEDS.length), role('steward', async (req, res, ctx) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (files.length === 0) throw new HttpProblem(400, 'invalid-body', 'No files supplied');
 
-    const spool = join(env.UPLOAD_SPOOL_PATH, randomUUID());
+    const spool = join(await spoolRoot(), randomUUID());
     await mkdir(spool, { recursive: true });
 
     const staged: DiscoveredFile[] = [];

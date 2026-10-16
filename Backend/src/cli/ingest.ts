@@ -1,7 +1,7 @@
 /**
  * CLI: run an ingestion from the share folder.
  *
- *   npm run ingest -w @pct/backend -- [--path <dir>] [--no-publish]
+ *   npm run ingest -w @pct/backend -- [--path <dir>] [--no-publish] [--force]
  */
 
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,8 @@ function arg(name: string): string | undefined {
 async function main(): Promise<number> {
   const path = arg('path') ?? env.SHARE_PATH;
   const noPublish = process.argv.includes('--no-publish');
+  // Re-run an unchanged bundle (a recompute after a rule change), as Sync now's force does.
+  const force = process.argv.includes('--force');
 
   process.stdout.write(`Ingesting from: ${path}\n`);
 
@@ -31,6 +33,7 @@ async function main(): Promise<number> {
   const result = await runIngest({
     source,
     autoPublish: !noPublish,
+    force,
     onProgress: (stage, detail) =>
       process.stdout.write(`  [${stage}]${detail ? ` ${detail}` : ''}\n`),
   });
@@ -46,6 +49,14 @@ async function main(): Promise<number> {
     case 'incomplete_bundle':
       process.stderr.write(`Missing feeds: ${result.missing.join(', ')}\nNothing was published.\n`);
       return 1;
+
+    case 'awaiting_exports':
+      process.stdout.write(
+        `Pickup folder is empty because batch ${result.filedBatchId} filed its files away `
+        + `${result.hoursAgo}h ago. Waiting for the next exports; nothing to do.
+`,
+      );
+      return 0;
 
     case 'noop_unchanged':
       process.stdout.write(

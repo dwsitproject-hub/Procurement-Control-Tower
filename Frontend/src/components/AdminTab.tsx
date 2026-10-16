@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { ApiError, api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
 import { CoupaPanel } from './CoupaTab';
+import { UserAccessTab } from './UserAccessTab';
+import { SapUploadTab } from './SapUploadTab';
+import { NotifyTab } from './NotifyTab';
 
 /**
  * W6 — steward tooling. v1's cfg-modal (exclusions), cv-modal (column mapping)
@@ -12,36 +15,163 @@ import { CoupaPanel } from './CoupaTab';
  * recompute button rather than pretending.
  */
 
-interface Opt { value: string; count: number }
-interface Exclusions { docTypes: string[]; purchGroups: string[]; purchOrgs: string[] }
+/**
+ * `excluded`/`inData` exist because an excluded value has NO rows in the facts —
+ * it is listed from the saved configuration, and its count comes from staging:
+ * what would come back if it were re-included.
+ */
+interface Opt {
+  value: string;
+  count: number;
+  poLines?: number;
+  prItems?: number;
+  excluded?: boolean;
+  inData?: boolean;
+}
+interface Exclusions {
+  docTypes: string[];
+  purchGroups: string[];
+  purchOrgs: string[];
+  /** Coupa-only (019). Enforced by views, so it needs no recompute. */
+  coupaPurchGroups: string[];
+  /** Drop lines whose derived status is HOLD PO. Needs a recompute. */
+  holdPos: boolean;
+  /** Vendor CODE prefixes treated as intercompany. Needs a recompute. */
+  intercoVendorPrefixes: string[];
+}
+
+interface CoupaOpt {
+  value: string;
+  description: string | null;
+  poLines: number;
+  sourcingEvents: number;
+  receipts: number;
+  count: number;
+  excluded: boolean;
+}
 
 const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
 
-export function AdminTab({ isAdmin }: { isAdmin: boolean }) {
+/**
+ * Admin sub-pages. The tab grew to six independent panels, which is too much
+ * on one scroll, so each is its own section behind a sub-nav. The choice is
+ * remembered per browser like the other UI preferences.
+ */
+const ADMIN_SECTIONS = [
+  { id: 'users', label: 'Users', icon: '👥', adminOnly: true },
+  { id: 'permissions', label: 'Page Permission', icon: '🔐', adminOnly: true },
+  { id: 'sapupload', label: 'SAP Data Upload', icon: '⬆️', adminOnly: false },
+  { id: 'coupa', label: 'Coupa Sync', icon: '🔄', adminOnly: false },
+  { id: 'exclusions', label: 'Data Exclusions', icon: '🗂️', adminOnly: false },
+  { id: 'mapping', label: 'Column Mapping', icon: '🔧', adminOnly: false },
+  { id: 'fx', label: 'FX Rates', icon: '💱', adminOnly: false },
+  { id: 'notify', label: 'Notifications', icon: '📧', adminOnly: false },
+] as const;
+type AdminSection = (typeof ADMIN_SECTIONS)[number]['id'];
+
+/**
+ * The section now comes from the URL (`/admin/exclusions`) rather than from
+ * local state, so an admin sub-page can be linked to and survives a reload —
+ * "open Admin → Data Exclusions" is a link you can send someone.
+ *
+ * `section` is whatever was in the path, so it is validated here rather than
+ * trusted: an unknown or no-longer-permitted value falls back to the first
+ * section the user can actually see.
+ */
+export function AdminTab({ isAdmin, canIngest, section, onSection }: {
+  isAdmin: boolean;
+  canIngest: boolean;
+  section: string | null;
+  onSection: (id: AdminSection) => void;
+}) {
+  const available = ADMIN_SECTIONS.filter((x) => isAdmin || !x.adminOnly);
+  const active: AdminSection = available.some((x) => x.id === section)
+    ? (section as AdminSection)
+    : available[0]!.id;
+
+  // Canonicalise the URL so /admin (or a stale section) becomes the real path.
+  useEffect(() => {
+    if (section !== active) onSection(active);
+  }, [section, active, onSection]);
+
   return (
     <>
-      <CoupaPanel isAdmin={isAdmin} />
-      <ExclusionsPanel isAdmin={isAdmin} />
-      <MappingsPanel />
-      <FxPanel />
+      <div className="admin-subnav" role="tablist" aria-label="Admin sections">
+        {available.map((x) => (
+          <a
+            key={x.id}
+            href={`/admin/${x.id}`}
+            className="asn-btn"
+            role="tab"
+            aria-selected={active === x.id}
+            aria-current={active === x.id ? 'page' : undefined}
+            onClick={(e) => {
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              e.preventDefault();
+              onSection(x.id);
+            }}
+          >
+            <span aria-hidden="true">{x.icon}</span> {x.label}
+          </a>
+        ))}
+      </div>
+
+      {active === 'users' && <UserAccessTab section="users" />}
+      {active === 'permissions' && <UserAccessTab section="matrix" />}
+      {active === 'sapupload' && <SapUploadTab canUpload={canIngest} isAdmin={isAdmin} />}
+      {active === 'coupa' && <CoupaPanel isAdmin={isAdmin} />}
+      {active === 'exclusions' && <ExclusionsPanel isAdmin={isAdmin} />}
+      {active === 'mapping' && <MappingsPanel />}
+      {active === 'fx' && <FxPanel />}
+      {active === 'notify' && <NotifyTab isAdmin={isAdmin} />}
     </>
   );
 }
 
 // ────────────────────────────────────────────────────────────── exclusions
 
+/**
+ * "12 PO lines · 4,300 PR items" rather than one combined figure: they are
+ * separate populations, and the requisition count is often the larger of the
+ * two — which is the whole reason the PR feed had to be read here.
+ */
+function rowSplit(o: Opt): string {
+  const parts: string[] = [];
+  if ((o.poLines ?? 0) > 0) parts.push(`${formatNumber(o.poLines!)} PO lines`);
+  if ((o.prItems ?? 0) > 0) parts.push(`${formatNumber(o.prItems!)} PR items`);
+  return parts.length > 0 ? parts.join(' · ') : `${formatNumber(o.count)} rows`;
+}
+
 function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [current, setCurrent] = useState<Exclusions | null>(null);
+  /**
+   * The intercompany prefix box, as TYPED.
+   *
+   * It cannot be a controlled input over the parsed array. Typing "LN2," splits
+   * to ['LN2', ''], the empty is filtered out, the array re-renders as "LN2" —
+   * and the comma is deleted on the same keystroke, so a second prefix can
+   * never be entered at all. The raw text lives here; the array is parsed FROM
+   * it rather than back into it.
+   *
+   * null means "not being edited", so the box shows the saved value in its
+   * canonical form until someone types.
+   */
+  const [prefixText, setPrefixText] = useState<string | null>(null);
   const [options, setOptions] = useState<{ docTypes: Opt[]; purchGroups: Opt[]; purchOrgs: Opt[] } | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [coupaOptions, setCoupaOptions] = useState<CoupaOpt[]>([]);
 
   useEffect(() => {
-    api.get<{ current: Exclusions; options: typeof options }>('/api/v1/admin/exclusions')
+    api.get<{ current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[] }>(
+      '/api/v1/admin/exclusions',
+    )
       .then((d) => {
         setCurrent(d.current);
+        setPrefixText(null);
         setOptions(d.options as never);
+        setCoupaOptions(d.coupaOptions ?? []);
       })
       .catch((e: Error) => setMsg(e instanceof ApiError && e.status === 403 ? 'Steward role required.' : e.message));
   }, []);
@@ -49,7 +179,17 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   if (msg && !current) return <div className="panel"><h2>Data exclusions</h2><p className="note">{msg}</p></div>;
   if (!current || !options) return <div className="panel"><h2>Data exclusions</h2><div className="spinner" /></div>;
 
-  const toggle = (key: keyof Exclusions, v: string) => {
+  /**
+   * The list-valued exclusion keys.
+   *
+   * Named rather than `keyof Exclusions` because holdPos is a boolean: the
+   * generic facet helpers below index the value as an array, and TypeScript
+   * caught the mismatch the moment the flag was added.
+   */
+  type ListKey = 'docTypes' | 'purchGroups' | 'purchOrgs' | 'coupaPurchGroups'
+    | 'intercoVendorPrefixes';
+
+  const toggle = (key: ListKey, v: string) => {
     setCurrent((c) => {
       if (!c) return c;
       const list = c[key];
@@ -59,58 +199,214 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     setDirty(true);
   };
 
-  const save = async () => {
+  /**
+   * Save AND recompute, in one action.
+   *
+   * These were two buttons, which made the destructive half optional: saving
+   * alone changed the stored configuration while every page kept serving the
+   * previous scope, so the panel and the dashboard disagreed until someone
+   * remembered the second button. An exclusion is only real once the facts are
+   * rebuilt, so the two steps are now one.
+   */
+  const saveAndRecompute = async () => {
     setBusy('saving');
     setMsg(null);
     try {
-      await api.put('/api/v1/admin/exclusions', current);
+      const out = await api.put<{ recomputeRequired?: boolean }>(
+        '/api/v1/admin/exclusions', current,
+      );
       setDirty(false);
-      setMsg('Saved. Run a recompute to apply — until then every view still shows the previous scope.');
+      // Show the saved, normalised list rather than whatever spacing was typed.
+      setPrefixText(null);
+      // A Coupa-only change is live already: the views read the rule store
+      // directly. Rebuilding every fact for it would cost a minute and change
+      // nothing, so the server tells us whether it is actually needed.
+      if (out.recomputeRequired === false) {
+        setMsg('Saved. Coupa exclusions are live immediately — no rebuild was needed.');
+        setBusy(null);
+        return;
+      }
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'save failed');
-    } finally {
       setBusy(null);
+      return;
     }
-  };
 
-  const recompute = async () => {
     setBusy('recompute');
-    setMsg('Recomputing — re-reading the share folder and rebuilding all facts…');
+    setMsg('Saved. Rebuilding every fact from the source files — this takes a minute…');
     try {
       // force: exclusion changes alter the transform's behaviour while the
       // source files stay byte-identical, so the bundle-hash no-op must be
       // bypassed.
-      const out = await api.post<{ outcome: string }>('/api/v1/ingest/sync', { force: true });
+      const out = await api.post<{ outcome: string; datasetVersionId?: number }>(
+        '/api/v1/ingest/sync', { force: true },
+      );
       setMsg(
         out.outcome === 'published'
-          ? 'Recompute complete — reload the page to see the new dataset version.'
-          : `Recompute outcome: ${out.outcome}`,
+          ? `Applied — dataset version ${out.datasetVersionId} published. Every page now uses the new scope; reload to see it.`
+          : out.outcome === 'source_unavailable'
+            ? 'Saved, but the source files could not be read, so nothing was rebuilt — the previous scope is still in force.'
+          : out.outcome === 'awaiting_exports'
+            // A recompute reads the pickup folder, and after-run filing empties
+            // it once a run has published. So between exports there is nothing
+            // to rebuild FROM, and saying "reported awaiting_exports" would
+            // leave an admin hunting for a fault that is not there.
+            ? 'Saved, but the pickup folder is empty — a previous run filed its exports away, '
+              + 'so there is nothing to rebuild from. The new scope takes effect at the next '
+              + 'publish, or sooner if you put the exports back in the pickup folder.'
+            : `Saved, but the rebuild reported "${out.outcome}" — the previous scope is still in force.`,
       );
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'recompute failed');
+      setMsg(
+        `Saved, but the rebuild failed (${e instanceof Error ? e.message : 'unknown error'}). `
+        + 'The previous scope is still in force; retry to apply.',
+      );
     } finally {
       setBusy(null);
     }
   };
 
-  const group = (label: string, key: keyof Exclusions, opts: Opt[]) => (
+  const group = (label: string, key: ListKey, opts: Opt[]) => (
     <details className="dt-facet" open={current[key].length > 0}>
       <summary>
         {label}
         {current[key].length > 0 && <span className="dt-badge">{current[key].length}</span>}
       </summary>
       <div className="dt-facet-list">
-        {opts.map((o) => (
-          <label key={o.value} className="dt-chip">
-            <input
-              type="checkbox"
-              disabled={!isAdmin}
-              checked={current[key].includes(o.value)}
-              onChange={() => toggle(key, o.value)}
-            />
-            {o.value} <span className="muted">({formatNumber(o.count)} lines)</span>
-          </label>
-        ))}
+        {/* Excluded values first: they are the ones an admin comes here to undo,
+            and they are absent from the data so they would otherwise be lost
+            among values that are still present. */}
+        {[...opts].sort((a, b) => Number(b.excluded ?? false) - Number(a.excluded ?? false))
+          .map((o) => (
+            <label key={o.value} className={`dt-chip${o.inData === false ? ' dt-chip-off' : ''}`}>
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={current[key].includes(o.value)}
+                onChange={() => toggle(key, o.value)}
+              />
+              {o.value}{' '}
+              {o.inData === false ? (
+                <span className="muted">
+                  (excluded{o.count > 0 ? ` — ${rowSplit(o)} return if unticked` : ''})
+                </span>
+              ) : (
+                <span className="muted">({rowSplit(o)})</span>
+              )}
+            </label>
+          ))}
+      </div>
+    </details>
+  );
+
+  /**
+   * The Coupa purchasing-group facet.
+   *
+   * Its own renderer rather than a parameter on group() above, because the
+   * counts mean different things: order lines and quote requests, not PO lines
+   * and PR items. It also shows the desk's NAME from the purchasing-group
+   * master, since these codes are people and "L3A" alone is not reviewable.
+   */
+  const coupaGroup = () => (
+    <details className="dt-facet" open={current.coupaPurchGroups.length > 0}>
+      <summary>
+        Coupa purchasing groups
+        {current.coupaPurchGroups.length > 0 && (
+          <span className="dt-badge">{current.coupaPurchGroups.length}</span>
+        )}
+      </summary>
+      <div className="dt-facet-list">
+        {[...coupaOptions].sort((a, b) => Number(b.excluded) - Number(a.excluded) || b.count - a.count)
+          .map((o) => (
+            <label key={o.value} className={`dt-chip${o.excluded ? ' dt-chip-off' : ''}`}>
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={current.coupaPurchGroups.includes(o.value)}
+                onChange={() => toggle('coupaPurchGroups', o.value)}
+              />
+              {o.value}
+              {o.description ? <>{' '}<strong>{o.description}</strong></> : null}{' '}
+              <span className="muted">
+                ({formatNumber(o.poLines)} PO lines · {formatNumber(o.sourcingEvents)} quote requests
+                {o.receipts > 0 ? ` · ${formatNumber(o.receipts)} receipts` : ''})
+              </span>
+            </label>
+          ))}
+      </div>
+    </details>
+  );
+
+  /**
+   * Held POs and intercompany vendors.
+   *
+   * Not a facet list like the three above: HOLD PO is one value of a derived
+   * status rather than a code an administrator can pick from the data, and the
+   * intercompany rule is a vendor-code PREFIX, which is free text — there is no
+   * finite option list to tick.
+   */
+  const holdAndInterco = () => (
+    <details className="dt-facet" open={current.holdPos || current.intercoVendorPrefixes.length > 0}>
+      <summary>
+        Held POs and intercompany
+        {(current.holdPos || current.intercoVendorPrefixes.length > 0) && (
+          <span className="dt-badge">
+            {(current.holdPos ? 1 : 0) + current.intercoVendorPrefixes.length}
+          </span>
+        )}
+      </summary>
+      <div className="dt-facet-list" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '.5rem' }}>
+        <label className="dt-chip" style={{ alignSelf: 'flex-start' }}>
+          <input
+            type="checkbox"
+            disabled={!isAdmin}
+            checked={current.holdPos}
+            onChange={() => {
+              setCurrent({ ...current, holdPos: !current.holdPos });
+              setDirty(true);
+            }}
+          />
+          Exclude PO lines on <strong>HOLD</strong>{' '}
+          <span className="muted">(derived status “HOLD PO”)</span>
+        </label>
+        <label className="cu-field" style={{ maxWidth: '32rem' }}>
+          Intercompany vendor code prefixes
+          <input
+            className="gf-search-in"
+            disabled={!isAdmin}
+            placeholder="e.g. LN2, LN29 — separate with a comma"
+            value={prefixText ?? current.intercoVendorPrefixes.join(', ')}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setPrefixText(raw);
+              // Split on comma OR whitespace, so a space-separated list works
+              // too rather than becoming one nonsense prefix. Empties are
+              // dropped from the SAVED array only — the typed text keeps its
+              // trailing comma so the next prefix can be entered.
+              setCurrent({
+                ...current,
+                intercoVendorPrefixes: raw.split(/[,\s]+/)
+                  .map((x) => x.trim().toUpperCase()).filter((x) => x !== ''),
+              });
+              setDirty(true);
+            }}
+          />
+        </label>
+        {current.intercoVendorPrefixes.length > 0 && (
+          <p className="note" style={{ margin: 0 }}>
+            <span className="bs sl">applies to</span>{' '}
+            {current.intercoVendorPrefixes.map((x) => <code key={x}>{x}</code>)
+              .reduce<React.ReactNode[]>((a, el, i) => (i === 0 ? [el] : [...a, ', ', el]), [])}
+            {' '}— {current.intercoVendorPrefixes.length} prefix
+            {current.intercoVendorPrefixes.length === 1 ? '' : 'es'}.
+          </p>
+        )}
+        <p className="note" style={{ margin: 0 }}>
+          A <strong>code prefix</strong>, not a name match. Matching the name on “INTERCO” also
+          hits <code>INTERCON TERMINAL INDONESIA</code>, a genuine third-party supplier, so a
+          name rule would silently drop a real vendor&apos;s orders. Leave this empty and nothing
+          is excluded.
+        </p>
       </div>
     </details>
   );
@@ -119,23 +415,43 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     <div className="panel">
       <h2>🎛 Data exclusions</h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
-        Excluded document types, purchasing groups and orgs are removed from <strong>every</strong> view
-        at the next recompute — KPIs, charts, drills and the detail table all agree because the rows
-        are never loaded into the facts. Staging keeps them for lineage.
+        Excluded document types, purchasing groups and orgs are removed from <strong>every</strong>
+        stage — requisitions, approval steps (AR), sourcing, orders,
+        goods receipts, and Coupa invoices and payments. Saving rebuilds the facts, so KPIs,
+        charts, drills and the detail table all agree by construction rather than by filtering.
+        Staging keeps the rows for lineage, so an exclusion is always reversible: an
+        already-excluded value stays listed here in red with how many rows would come back, and
+        unticking it restores them on the next save.
         {!isAdmin && ' Editing requires the admin role.'}
       </p>
       <div className="dt-facets">
         {group('Document types', 'docTypes', options.docTypes)}
         {group('Purchasing groups', 'purchGroups', options.purchGroups)}
         {group('Purchasing orgs', 'purchOrgs', options.purchOrgs)}
+        {holdAndInterco()}
+        {coupaGroup()}
       </div>
+      <p className="note" style={{ marginTop: '.5rem' }}>
+        <span className="bs sl">Coupa only</span> The last group above applies to the{' '}
+        <strong>Coupa store alone</strong> — its purchase orders, quote requests, receipts and the
+        invoices drawn from them. It is separate from the SAP lists because the desks in Coupa are
+        largely not the ones in the SAP facts, and because it is enforced by database views rather
+        than by the transform: <strong>it takes effect the moment you save, with no rebuild</strong>.
+        A partially relevant invoice is kept, not dropped — an invoice disappears only when every
+        one of its linked lines is excluded.
+      </p>
       {isAdmin && (
         <div className="dt-toolbar" style={{ marginTop: '.6rem' }}>
-          <button className="btn" style={{ width: 'auto' }} disabled={!dirty || busy !== null} onClick={() => void save()}>
-            {busy === 'saving' ? 'Saving…' : 'Save exclusions'}
-          </button>
-          <button className="dt-btn" disabled={busy !== null} onClick={() => void recompute()}>
-            {busy === 'recompute' ? 'Recomputing…' : 'Recompute now (re-ingest)'}
+          <button
+            className="btn"
+            style={{ width: 'auto' }}
+            disabled={!dirty || busy !== null}
+            onClick={() => void saveAndRecompute()}
+            title="Saves the selection and rebuilds every fact so the change takes effect"
+          >
+            {busy === 'saving' ? 'Saving…'
+              : busy === 'recompute' ? 'Rebuilding…'
+                : 'Save exclusions & recompute'}
           </button>
         </div>
       )}

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { ScrollFrame } from './ScrollFrame';
+import { SortButton, ToolTable, type SortState, type ToolTableColumn } from './TableTools';
 import {
   CategoryScale, Chart as ChartJS, Legend, LineController, LineElement,
   LinearScale, PointElement, Tooltip,
@@ -21,6 +23,10 @@ import { DASH, FLAG_META, formatDate, formatMoney, formatNumber, STATUS_PILL } f
 interface VendorRow {
   vendorCode: string;
   vendorName: string;
+  /** Coupa supplier master, matched on the supplier number (payload doc §1.8). */
+  poEmail: string | null;
+  /** Distinguishes "no Coupa record" from "record with no address". */
+  inCoupa: boolean;
   poCount: number;
   lineCount: number;
   spendUsd: number | null;
@@ -80,7 +86,15 @@ function EntPager({
   );
 }
 
-export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string) => void }) {
+export function VendorsTab({ onDrill, filterQuery = '' }: {
+  onDrill: (token: string, label: string) => void;
+  /**
+   * The filter bar (7 Oct 2026). Both tables ignored it until the Year filter
+   * became the default, when Vendor 360 would have been the one page still
+   * showing every year under a bar that said otherwise.
+   */
+  filterQuery?: string;
+}) {
   const [rows, setRows] = useState<VendorRow[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
@@ -93,21 +107,28 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
   const [view, setView] = useState<'top' | 'pivot'>('top');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
+  /**
+   * Header sort (7 Oct 2026), done on the SERVER: the table is paged, and
+   * sorting the page on screen would rank 50 of the vendors, not all of them.
+   * null is the default ranking, spend descending.
+   */
+  const [sort, setSort] = useState<SortState>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
     return () => clearTimeout(t);
   }, [search]);
 
-  // A new search or page size restarts from the first page.
-  useEffect(() => { setPage(0); }, [debounced, pageSize]);
+  // A new search, page size, sort or filter restarts from the first page.
+  useEffect(() => { setPage(0); }, [debounced, pageSize, sort, filterQuery]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     api
       .get<{ totalVendors: number; rows: VendorRow[] }>(
-        `/api/v1/entity/vendors?limit=${pageSize}&offset=${page * pageSize}${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`,
+        `/api/v1/entity/vendors?limit=${pageSize}&offset=${page * pageSize}${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`
+          + `${sort ? `&sort=${sort.key}&dir=${sort.dir}` : ''}${filterQuery ? `&${filterQuery}` : ''}`,
       )
       .then((d) => {
         if (cancelled) return;
@@ -119,7 +140,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
     return () => {
       cancelled = true;
     };
-  }, [debounced, page, pageSize]);
+  }, [debounced, page, pageSize, sort, filterQuery]);
 
   return (
     <>
@@ -146,25 +167,28 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
       </div>
 
       {view === 'pivot' ? (
-        <VendorPivot search={debounced} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
+        <VendorPivot search={debounced} filterQuery={filterQuery} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
       ) : loading ? (
         <div className="center-msg"><div className="spinner" />Loading vendors…</div>
       ) : (
         <>
-        <div className="table-wrap dt-scroll">
+        <ScrollFrame className="table-wrap dt-scroll">
           <table className="data dd-tbl">
             <thead>
               <tr>
                 <th className="num">No</th>
-                <th>Vendor</th><th>Code</th>
-                <th style={{ textAlign: 'right' }}>POs</th>
-                <th style={{ textAlign: 'right' }}>Lines</th>
-                <th style={{ textAlign: 'right' }}>Spend USD</th>
-                <th style={{ textAlign: 'right' }}>Materials</th>
-                <th style={{ textAlign: 'right' }}>Areas</th>
-                <th style={{ textAlign: 'right' }}>OTD %</th>
-                <th style={{ textAlign: 'right' }}>Avg late (d)</th>
-                <th style={{ textAlign: 'right' }}>Open USD</th>
+                {/* Every header sorts, both ways (7 Oct 2026). The keys are the
+                    server's whitelist (entity.ts VENDOR_SORT). */}
+                {([
+                  ['vendorName', 'Vendor', false], ['vendorCode', 'Code', false], ['poEmail', 'PO Email', false],
+                  ['poCount', 'POs', true], ['lineCount', 'Lines', true], ['spendUsd', 'Spend USD', true],
+                  ['materials', 'Materials', true], ['areas', 'Areas', true], ['otdPct', 'OTD %', true],
+                  ['avgDaysLate', 'Avg late (d)', true], ['openExposureUsd', 'Open USD', true],
+                ] as const).map(([key, label, right]) => (
+                  <th key={key} style={right ? { textAlign: 'right' } : undefined}>
+                    <SortButton label={label} colKey={key} sort={sort} onSort={setSort} />
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -177,6 +201,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
                   <td className="num muted">{page * pageSize + i + 1}</td>
                   <td>{r.vendorName}</td>
                   <td className="muted">{r.vendorCode}</td>
+                  <td className="ent-email"><PoEmailCell email={r.poEmail} inCoupa={r.inCoupa} /></td>
                   <td className="num">{formatNumber(r.poCount)}</td>
                   <td className="num">{formatNumber(r.lineCount)}</td>
                   <td className="num">
@@ -191,7 +216,7 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
               ))}
             </tbody>
           </table>
-        </div>
+        </ScrollFrame>
         {total > 0 && (
           <EntPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
         )}
@@ -214,9 +239,10 @@ export function VendorsTab({ onDrill }: { onDrill: (token: string, label: string
 // ─────────────────────────── vendors × materials × month pivot (G3.1)
 
 function VendorPivot({
-  search, onOpenVendor, onOpenMaterial,
+  search, filterQuery, onOpenVendor, onOpenMaterial,
 }: {
   search: string;
+  filterQuery: string;
   onOpenVendor: (code: string) => void;
   onOpenMaterial: (code: string) => void;
 }) {
@@ -224,16 +250,24 @@ function VendorPivot({
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
   const [expanded, setExpanded] = useState<Record<string, Record<string, any>[] | 'loading'>>({});
+  /**
+   * Header sort (7 Oct 2026): vendor name, any month, or the total. Ranked on
+   * the server before paging, so sorting by a month ranks every vendor by it.
+   * null is the default ranking, total descending.
+   */
+  const [sort, setSort] = useState<SortState>(null);
 
-  useEffect(() => { setPage(0); }, [search, pageSize]);
+  useEffect(() => { setPage(0); }, [search, pageSize, sort, filterQuery]);
 
   useEffect(() => {
     const q = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) });
     if (search) q.set('q', search);
+    if (sort) { q.set('sort', sort.key); q.set('dir', sort.dir); }
+    for (const [k, v] of new URLSearchParams(filterQuery)) q.set(k, v);
     api.get<Record<string, any>>(`/api/v1/entity/vendor-pivot?${q.toString()}`)
       .then(setD)
       .catch(() => setD(null));
-  }, [search, page, pageSize]);
+  }, [search, page, pageSize, sort, filterQuery]);
 
   const toggle = (code: string) => {
     if (expanded[code]) {
@@ -258,13 +292,20 @@ function VendorPivot({
   return (
     <>
       <p className="note" style={{ marginTop: 0 }}>{d.note}</p>
-      <div className="table-wrap dt-scroll">
+      <ScrollFrame className="table-wrap dt-scroll">
         <table className="data dd-tbl">
           <thead>
             <tr>
-              <th>Vendor / material (USD)</th>
-              {months.map((m) => <th key={m} style={{ textAlign: 'right' }}>{m}</th>)}
-              <th style={{ textAlign: 'right' }}>Total</th>
+              <th><SortButton label="Vendor / material (USD)" colKey="name" sort={sort} onSort={setSort} /></th>
+              <th>PO Email</th>
+              {months.map((m) => (
+                <th key={m} style={{ textAlign: 'right' }}>
+                  <SortButton label={m} colKey={m} sort={sort} onSort={setSort} />
+                </th>
+              ))}
+              <th style={{ textAlign: 'right' }}>
+                <SortButton label="Total" colKey="total" sort={sort} onSort={setSort} />
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -280,11 +321,12 @@ function VendorPivot({
                     </button>
                     {r.anyUnrated && <span className="muted" title="Some lines have unrated currencies"> ⚠</span>}
                   </td>
+                  <td className="ent-email"><PoEmailCell email={r.poEmail ?? null} inCoupa={r.inCoupa === true} /></td>
                   {months.map((m) => <td key={m} className="num">{cell(r.byMonth[m])}</td>)}
                   <td className="num"><strong>{cell(r.total)}</strong></td>
                 </tr>
                 {expanded[r.code] === 'loading' && (
-                  <tr><td colSpan={months.length + 2} className="muted">Loading materials…</td></tr>
+                  <tr><td colSpan={months.length + 3} className="muted">Loading materials…</td></tr>
                 )}
                 {Array.isArray(expanded[r.code]) &&
                   (expanded[r.code] as Record<string, any>[]).map((m: any) => (
@@ -299,6 +341,7 @@ function VendorPivot({
                         </button>
                         {m.descr ? ` · ${m.descr}` : ''}
                       </td>
+                      <td />
                       {months.map((mk) => <td key={mk} className="num muted">{cell(m.byMonth[mk])}</td>)}
                       <td className="num muted">{cell(m.total)}</td>
                     </tr>
@@ -309,12 +352,12 @@ function VendorPivot({
           <tfoot>
             <tr>
               <td><strong>Grand total ({formatNumber(d.totalVendors)} vendors)</strong></td>
-              <td colSpan={months.length} />
+              <td colSpan={months.length + 1} />
               <td className="num"><strong>{d.grandTotalUsd === null ? `${DASH} (unrated ccy)` : cell(d.grandTotalUsd)}</strong></td>
             </tr>
           </tfoot>
         </table>
-      </div>
+      </ScrollFrame>
       {d.totalVendors > 0 && (
         <EntPager
           total={d.totalVendors} page={page} pageSize={pageSize}
@@ -355,6 +398,75 @@ function VendorOtdBars({ onOpenVendor }: { onOpenVendor: (code: string) => void 
   );
 }
 
+/**
+ * The PO email as a table cell.
+ *
+ * Three outcomes are distinguished rather than collapsed into a blank: an
+ * address (a mailto link), a Coupa record whose address was never filled in
+ * (actionable — someone should complete the master data), and no Coupa record
+ * at all (nothing to fix on this side; the vendor was never onboarded there).
+ */
+function PoEmailCell({ email, inCoupa }: { email: string | null; inCoupa: boolean }) {
+  if (email) {
+    return (
+      <a href={`mailto:${email}`} onClick={(e) => e.stopPropagation()} title="Send to this address">
+        {email}
+      </a>
+    );
+  }
+  return inCoupa
+    ? <span className="bs sa" title="This supplier exists in Coupa but has no PO email set">not set</span>
+    : <span className="muted" title="No Coupa supplier carries this vendor code">{DASH}</span>;
+}
+
+/**
+ * Where this vendor's purchase orders are sent — the Coupa supplier master
+ * (payload doc §1.8), matched on the supplier number, which holds the same
+ * value as the SAP vendor code.
+ *
+ * Three states, all worth distinguishing: no Coupa record at all (the vendor
+ * was never onboarded there), a record with no PO email (onboarded but the
+ * address was never filled in — actionable), and an address. A blank field
+ * would read as a bug in all three.
+ */
+function SupplierContact({ code, supplier }: { code: string; supplier: any }) {
+  if (!supplier) {
+    return (
+      <p className="note vsup">
+        <span className="bs sl">no Coupa supplier</span>{' '}
+        <span className="muted">
+          No supplier in Coupa carries the number <code>{code}</code>, so there is no PO email
+          on file. Vendors are matched on the supplier number, which holds the SAP vendor code.
+        </span>
+      </p>
+    );
+  }
+  const held = supplier.onHold === true;
+  return (
+    <p className="note vsup">
+      <strong>📧 PO Email </strong>
+      {supplier.poEmail
+        ? <a href={`mailto:${supplier.poEmail}`}>{supplier.poEmail}</a>
+        : <span className="bs sa">not set in Coupa</span>}
+      {supplier.contactEmail && supplier.contactEmail !== supplier.poEmail && (
+        <span className="muted">
+          {' · '}contact <a href={`mailto:${supplier.contactEmail}`}>{supplier.contactEmail}</a>
+        </span>
+      )}
+      {supplier.poMethod && <span className="muted">{' · '}sent by {supplier.poMethod}</span>}
+      {supplier.status && (
+        <span className="muted">
+          {' · '}Coupa status <span className={`bs ${supplier.status === 'active' ? 'sd' : 'sl'}`}>{supplier.status}</span>
+        </span>
+      )}
+      {held && <span className="bs spdel" style={{ marginLeft: '.3rem' }}>on hold</span>}
+      {supplier.name && supplier.name !== undefined && (
+        <span className="muted">{' · '}as {supplier.name} in Coupa</span>
+      )}
+    </p>
+  );
+}
+
 export function VendorModal({
   code, onClose, onDrill,
 }: { code: string; onClose: () => void; onDrill: (t: string, l: string) => void }) {
@@ -385,6 +497,8 @@ export function VendorModal({
           {!d && !err && <div className="center-msg"><div className="spinner" />Loading…</div>}
           {d && (
             <>
+              <SupplierContact code={code} supplier={d.coupaSupplier} />
+
               {/* v1's 11 Vendor-360 bio KPIs */}
               <div className="ent-kpis">
                 <Bio label="Total Spending" value={d.bio.spendUsd === null ? `${DASH} (unrated ccy present)` : formatMoney(d.bio.spendUsd, 'USD')} />
@@ -428,10 +542,15 @@ export function VendorModal({
 
               <h4 className="ent-h">Materials supplied <span className="muted">(top {d.materials.length} of cap {d.caps.materials})</span></h4>
               <SimpleTable
+                prefKey="vendor_materials_layout"
                 head={['Material', 'Description', 'Lines', 'Qty', 'Spend USD', 'Last PO']}
+                right={[false, false, true, true, true, false]}
                 rows={d.materials.map((m: any) => [
                   m.materialCode ?? '(service)', m.description, formatNumber(m.lines),
                   formatNumber(m.qty, 1), formatMoney(m.usd, 'USD'), formatDate(m.lastPo),
+                ])}
+                sortValues={d.materials.map((m: any) => [
+                  m.materialCode, m.description, m.lines, m.qty, m.usd, m.lastPo,
                 ])}
               />
 
@@ -451,10 +570,16 @@ export function VendorModal({
 
               <h4 className="ent-h">GR history <span className="muted">(newest {d.grHistory.length}, cap {d.caps.grHistory})</span></h4>
               <SimpleTable
+                prefKey="vendor_gr_history_layout"
                 head={['Mat. doc', 'PO', 'Item', 'Mvt', 'Class', 'Posted', 'Signed qty', 'Material']}
+                right={[false, false, true, false, false, false, true, false]}
                 rows={d.grHistory.map((g: any) => [
                   g.materialDoc, g.poNo, String(g.poItem), g.movementType, g.postingClass,
                   formatDate(g.postingDate), formatNumber(g.signedQty, 3), g.materialDesc ?? DASH,
+                ])}
+                sortValues={d.grHistory.map((g: any) => [
+                  g.materialDoc, g.poNo, g.poItem, g.movementType, g.postingClass,
+                  g.postingDate, g.signedQty, g.materialDesc,
                 ])}
               />
             </>
@@ -508,7 +633,7 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
-        <h3 className="pr-tbl-h">Summary by Material Category <span className="muted">— avg aging metrics (days)</span></h3>
+        <h3 className="pr-tbl-h">Summary by Spend Category <span className="muted">— avg aging metrics (days)</span></h3>
         <div className="table-wrap">
           <table className="data dd-tbl">
             <thead>
@@ -881,64 +1006,63 @@ function MiniBars({
   );
 }
 
-function SimpleTable({ head, rows }: { head: string[]; rows: (string | null)[][] }) {
-  return (
-    <div className="table-wrap" style={{ maxHeight: '300px', overflow: 'auto' }}>
-      <table className="data">
-        <thead><tr>{head.map((h2) => <th key={h2}>{h2}</th>)}</tr></thead>
-        <tbody>
-          {rows.map((r2, i) => (
-            <tr key={i}>{r2.map((c, j) => <td key={j}>{c ?? DASH}</td>)}</tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+/**
+ * A popup list with the table tools (7 Oct 2026): choose columns, drag to
+ * reorder, sort any header either way, scrollbar above. `rows` are the cells
+ * as shown; `sortValues`, when given, are the raw values they sort by, so a
+ * money or quantity column sorts by amount rather than by its formatted text.
+ */
+function SimpleTable({ prefKey, head, rows, sortValues, right }: {
+  prefKey: string;
+  head: string[];
+  rows: (string | null)[][];
+  sortValues?: unknown[][];
+  right?: boolean[];
+}) {
+  type R = { cells: (string | null)[]; raw: unknown[] };
+  const data: R[] = rows.map((cells, i) => ({ cells, raw: sortValues?.[i] ?? cells }));
+  const columns: ToolTableColumn<R>[] = head.map((h2, j) => ({
+    key: String(j),
+    label: h2,
+    right: right?.[j] ?? false,
+    render: (r) => r.cells[j] ?? DASH,
+    sortValue: (r) => r.raw[j],
+  }));
+  return <ToolTable prefKey={prefKey} columns={columns} rows={data} maxHeight="300px" className="data" />;
 }
 
 function PoHistoryTable({ rows, vendor = false }: { rows: Record<string, any>[]; vendor?: boolean }) {
+  const columns: ToolTableColumn<Record<string, any>>[] = [
+    { key: 'poNo', label: 'PO', render: (r) => r.poNo },
+    { key: 'poItem', label: 'Item', right: true, render: (r) => r.poItem },
+    { key: 'documentDate', label: 'Date', render: (r) => formatDate(r.documentDate) },
+    ...(vendor ? [{ key: 'vendorName', label: 'Vendor', render: (r: Record<string, any>) => r.vendorName ?? DASH }] : []),
+    { key: 'orderQty', label: 'Qty', right: true, render: (r) => formatNumber(r.orderQty, 2) },
+    { key: 'orderUnit', label: 'Unit', render: (r) => r.orderUnit ?? DASH },
+    {
+      key: 'unitPrice', label: 'Unit price', right: true,
+      render: (r) => ((r.flags as string[])?.includes('sto') ? `${DASH} (STO)` : formatNumber(r.unitPrice, 2)),
+    },
+    { key: 'priceUnit', label: 'Price unit', right: true, render: (r) => r.priceUnit ?? DASH },
+    { key: 'currencyCode', label: 'Ccy', render: (r) => r.currencyCode },
+    { key: 'netOrderValue', label: 'Value', right: true, render: (r) => formatMoney(r.netOrderValue) },
+    { key: 'netOrderValueUsd', label: 'Value USD', right: true, render: (r) => formatMoney(r.netOrderValueUsd, 'USD') },
+    {
+      key: 'status', label: 'Status',
+      render: (r) => <span className={'bs ' + (STATUS_PILL[String(r.status)] ?? 'sl')}>{r.status}</span>,
+    },
+    { key: 'receiptDate', label: 'GR date', render: (r) => formatDate(r.receiptDate) },
+  ];
   return (
-    <div className="table-wrap" style={{ maxHeight: '340px', overflow: 'auto' }}>
-      <table className="data dd-tbl">
-        <thead>
-          <tr>
-            <th /><th>PO</th><th>Item</th><th>Date</th>
-            {vendor && <th>Vendor</th>}
-            <th style={{ textAlign: 'right' }}>Qty</th><th>Unit</th>
-            <th style={{ textAlign: 'right' }}>Unit price</th>
-            <th style={{ textAlign: 'right' }}>Price unit</th>
-            <th>Ccy</th>
-            <th style={{ textAlign: 'right' }}>Value</th>
-            <th style={{ textAlign: 'right' }}>Value USD</th>
-            <th>Status</th><th>GR date</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r2, i) => (
-            <tr key={i}>
-              <td>
-                {((r2.flags as string[]) ?? []).map((f) => {
-                  const m = FLAG_META[f];
-                  return m ? <span key={f} className="flag" title={m.label}>{m.icon}</span> : null;
-                })}
-              </td>
-              <td>{r2.poNo}</td>
-              <td className="num">{r2.poItem}</td>
-              <td>{formatDate(r2.documentDate)}</td>
-              {vendor && <td className="muted">{r2.vendorName ?? DASH}</td>}
-              <td className="num">{formatNumber(r2.orderQty, 2)}</td>
-              <td>{r2.orderUnit ?? DASH}</td>
-              <td className="num">{(r2.flags as string[])?.includes('sto') ? `${DASH} (STO)` : formatNumber(r2.unitPrice, 2)}</td>
-              <td className="num">{r2.priceUnit ?? DASH}</td>
-              <td>{r2.currencyCode}</td>
-              <td className="num">{formatMoney(r2.netOrderValue)}</td>
-              <td className="num">{formatMoney(r2.netOrderValueUsd, 'USD')}</td>
-              <td><span className={'bs ' + (STATUS_PILL[String(r2.status)] ?? 'sl')}>{r2.status}</span></td>
-              <td>{formatDate(r2.receiptDate)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <ToolTable
+      prefKey={vendor ? 'material_po_history_layout' : 'vendor_po_history_layout'}
+      columns={columns}
+      rows={rows}
+      maxHeight="340px"
+      lead={(r) => ((r.flags as string[]) ?? []).map((f) => {
+        const m = FLAG_META[f];
+        return m ? <span key={f} className="flag" title={m.label}>{m.icon}</span> : null;
+      })}
+    />
   );
 }

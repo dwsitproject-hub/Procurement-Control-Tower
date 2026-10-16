@@ -1,7 +1,14 @@
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
-import { MaterialModal, VendorModal } from './EntityViews';
+/**
+ * The Vendor/Material 360 popups are loaded on demand. They live in
+ * EntityViews alongside the two full pages, so importing them statically here
+ * pulled that entire module — both pages included — into the main bundle for
+ * everyone, even though a popup only appears once someone clicks a row.
+ */
+const VendorModal = lazy(() => import('./EntityViews').then((m) => ({ default: m.VendorModal })));
+const MaterialModal = lazy(() => import('./EntityViews').then((m) => ({ default: m.MaterialModal })));
 
 /**
  * v1's PO-page top-spend tables (replacing the bar charts, 4 Aug 2026):
@@ -132,8 +139,10 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
         </div>
       </div>
 
-      {openVendor && <VendorModal code={openVendor} onClose={() => setOpenVendor(null)} onDrill={onDrill} />}
-      {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} />}
+      <Suspense fallback={null}>
+        {openVendor && <VendorModal code={openVendor} onClose={() => setOpenVendor(null)} onDrill={onDrill} />}
+        {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} />}
+      </Suspense>
     </>
   );
 }

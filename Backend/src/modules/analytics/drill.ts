@@ -18,7 +18,11 @@ import { query, queryOne } from '../../db/client.js';
 import {
   intersectScopes, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+import {
+  ageBandPredicateSql, prSpendCategoryMatchSql, spendCategoryWithPlantSql,
+} from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
+import { datePredicate, dimPredicate } from './globalfilter.js';
 
 const env = loadEnv();
 
@@ -103,7 +107,10 @@ export function openDrillToken(
 const TABLES: Record<Grain, { table: string; alias: string; order: string; id: string }> = {
   pr_item: { table: 'core.fact_pr_item', alias: 'f', order: 'f.pr_no, f.pr_item', id: "f.pr_no || '|' || f.pr_item" },
   po_line: { table: 'core.fact_po_line', alias: 'f', order: 'f.po_no, f.po_item', id: "f.po_no || '|' || f.po_item" },
-  gr_posting: { table: 'core.fact_gr_posting', alias: 'f', order: 'f.material_doc, f.material_doc_item', id: "f.material_doc || '|' || f.material_doc_item" },
+  // The year is part of a receipt's identity (034): SAP restarts material
+  // document numbers every fiscal year, so document + item alone names two
+  // different receipts once an extract spans years.
+  gr_posting: { table: 'core.fact_gr_posting', alias: 'f', order: 'f.material_doc_year, f.material_doc, f.material_doc_item', id: "f.material_doc_year || '|' || f.material_doc || '|' || f.material_doc_item" },
   pr_release: { table: 'core.fact_pr_release', alias: 'f', order: 'f.pr_no, f.pr_item, f.rel_seq', id: "f.pr_no || '|' || f.pr_item || '|' || f.rel_seq" },
   po_release: { table: 'core.fact_po_release', alias: 'f', order: 'f.po_no, f.rel_seq', id: "f.po_no || '|' || f.rel_seq" },
 };
@@ -144,7 +151,106 @@ function monthExpr(alias: string, grain: Grain): string {
   return `to_char(${alias}.${col}, 'YYYY-MM')`;
 }
 
+/**
+ * Apply a PO-line predicate at whatever grain the drill is running on.
+ *
+ * The PO-line grain applies it directly; the PR grain reaches its linked PO
+ * lines. This is the drill-side twin of buildFilterClause's `poScoped`, and the
+ * two must stay identical: the chart aggregates with one and the drill filters
+ * with the other, and the sweep asserts they agree.
+ */
+function poLineScoped(grain: Grain | undefined, a: string, predicate: string): string {
+  if (grain === 'pr_item') {
+    return `EXISTS (SELECT 1 FROM core.fact_po_line _xs
+                     WHERE _xs.dataset_version_id = ${a}.dataset_version_id
+                       AND _xs.pr_no = ${a}.pr_no AND _xs.pr_item = ${a}.pr_item
+                       AND _xs.${predicate})`;
+  }
+  return `${a}.${predicate}`;
+}
+
+/**
+ * The month a requisition CONVERTED in: its earliest linked PO line, but never
+ * earlier than the month it was raised.
+ *
+ * Earliest, not any: a requisition split across three orders converted once, on
+ * the first of them, and counting it three times would make the outflow larger
+ * than the population it drains.
+ *
+ * Never earlier than the raise month because of RETRO POs - 57 of this
+ * dataset's 10,228 converted requisitions carry an order dated before the
+ * requisition itself. Taken literally they leave the pipeline in a month they
+ * had not yet entered, and the flow stops balancing: measured before this
+ * floor, six months were out by between 1 and 28 requisitions. Flooring says
+ * the requisition was born already converted, which is what a retro PO IS.
+ *
+ * The CASE is not decoration. GREATEST ignores NULLs in Postgres, so
+ * GREATEST(NULL, raised) returns the raise month - and every requisition that
+ * never converted would have counted as converted on the day it arrived.
+ */
+const PR_CONVERTED_MONTH = (a: string): string =>
+  `(SELECT CASE WHEN min(_pf.document_date) IS NULL THEN NULL
+                ELSE GREATEST(to_char(min(_pf.document_date), 'YYYY-MM'),
+                              to_char(${a}.requisition_date, 'YYYY-MM')) END
+      FROM core.fact_po_line _pf
+     WHERE _pf.dataset_version_id = ${a}.dataset_version_id
+       AND _pf.pr_no = ${a}.pr_no AND _pf.pr_item = ${a}.pr_item)`;
+
 const FILTERS: Record<string, Compiler> = {
+  /**
+   * One phase of the requisition flow chart, for one month.
+   *
+   * The four phases are written here ONCE and the chart's aggregate calls the
+   * same expressions, so a bar and the rows it opens cannot disagree about what
+   * "still outstanding in March" means.
+   *
+   *   new        raised in the month, whatever became of it afterwards
+   *   cancelled  raised in the month and since deleted
+   *   to_po      converted in the month, and not cancelled
+   *   carried_in raised BEFORE the month, not cancelled, and not yet converted
+   *              when the month opened
+   *
+   * Those four make the month balance exactly:
+   *
+   *   carried_in(M+1) = carried_in(M) + new(M) - to_po(M) - cancelled(M)
+   *
+   * which is why `new` deliberately includes rows that were later cancelled -
+   * excluding them would subtract the same requisition twice.
+   *
+   * carried_in is a STOCK, not a flow: one requisition appears in every month
+   * it spent waiting. Its bars therefore do not sum to anything meaningful
+   * across months, and the chart says so.
+   */
+  prFlow: (v, a, ps) => {
+    const o = v as { phase?: string; month?: string; band?: string };
+    const month = String(o.month ?? '');
+    if (!/^[0-9]{4}-[0-9]{2}$/.test(month)) {
+      throw new Error(`prFlow needs a YYYY-MM month, got: ${month}`);
+    }
+    const m = p(ps, month);
+    const raised = `to_char(${a}.requisition_date, 'YYYY-MM')`;
+    // '9999-99' for "never converted": the comparison is on 'YYYY-MM' text, so
+    // a sentinel that sorts after every real month keeps unconverted rows in
+    // the outstanding stock without a second IS NULL branch.
+    const conv = `COALESCE(${PR_CONVERTED_MONTH(a)}, '9999-99')`;
+    switch (o.phase) {
+      case 'new':
+        return `${raised} = ${m}`;
+      case 'cancelled':
+        return `${a}.is_deleted AND ${raised} = ${m}`;
+      case 'to_po':
+        return `NOT ${a}.is_deleted AND ${PR_CONVERTED_MONTH(a)} = ${m}`;
+      case 'carried_in': {
+        const stock = `NOT ${a}.is_deleted AND ${raised} < ${m} AND ${conv} >= ${m}`;
+        // One age band of the stock: age on the 1st of the month (the
+        // waterfall's segments, mart_parity CARRIED_IN_BAND_SERIES).
+        if (o.band === undefined) return stock;
+        return `${stock} AND ${ageBandPredicateSql(`(to_date(${m}, 'YYYY-MM') - ${a}.requisition_date)`, String(o.band))}`;
+      }
+      default:
+        throw new Error(`unknown prFlow phase: ${String(o.phase)}`);
+    }
+  },
   // Filters the mart aggregates apply. Every predicate must carry the SAME
   // filters as the query that produced its number — the omission of these two is
   // what made 29 chart points drill to a higher count than they displayed.
@@ -161,7 +267,26 @@ const FILTERS: Record<string, Compiler> = {
     v === null ? `${a}.material_category IS NULL` : `${a}.material_category = ${p(ps, String(v))}`,
   prNoPo: (_v, a) => `${a}.po_line_count = 0`,
   hasPo: (_v, a) => `${a}.po_line_count > 0`,
-  hasPr: (_v, a) => `${a}.pr_no IS NOT NULL`,
+  /**
+   * "This PO line has a requisition **in this version's facts**" — an EXISTS,
+   * not `pr_no IS NOT NULL`.
+   *
+   * Every chart using this filter reaches the PR item by an inner join (E2E
+   * needs the requisition date), so a reference alone is not what the aggregate
+   * counted. The two agreed on the reference data by luck — the PO lines whose
+   * requisition is missing from the PR export (V-R03) happen to have no receipt,
+   * so they fell out of the E2E population anyway.
+   *
+   * A data exclusion breaks that luck: excluding a purchasing org drops PR items
+   * whose PO lines belong to a different org and survive, and those lines then
+   * carry a pr_no that resolves to nothing. The chart dropped them, the drill
+   * kept them, and e2e_by_category reported 18 buckets where the drill returned
+   * more rows than the bar counted. Testing existence makes the predicate mean
+   * what the SQL means, under exclusions and without them.
+   */
+  hasPr: (_v, a) => `EXISTS (SELECT 1 FROM core.fact_pr_item _hp
+                              WHERE _hp.dataset_version_id = ${a}.dataset_version_id
+                                AND _hp.pr_no = ${a}.pr_no AND _hp.pr_item = ${a}.pr_item)`,
   unreleased: (_v, a) => `${a}.release_final_date IS NULL`,
   released: (_v, a) => `${a}.release_final_date IS NOT NULL`,
   purchOrg: (v, a, ps) => `${a}.purch_org = ${p(ps, String(v))}`,
@@ -210,11 +335,24 @@ const FILTERS: Record<string, Compiler> = {
   // ── global filters (W2) ──
   // Merged into every predicate issued from a filtered figure, so a card and its
   // drill can never disagree once a filter is applied.
-  companyCodeIn: (v, a, ps) => `${a}.company_code = ANY(${p(ps, (v as unknown[]).map(String))})`,
-  plantIn: (v, a, ps) => `${a}.plant = ANY(${p(ps, (v as unknown[]).map(String))})`,
-  purchOrgIn: (v, a, ps) => `${a}.purch_org = ANY(${p(ps, (v as unknown[]).map(String))})`,
+  // The figure's own expression (globalfilter.dimPredicate): a table that does
+  // not carry the column reaches its order line, on both sides.
+  companyCodeIn: (v, a, ps, grain) =>
+    dimPredicate(grain, 'company', `${a}.`, p(ps, (v as unknown[]).map(String))),
+  plantIn: (v, a, ps, grain) =>
+    dimPredicate(grain, 'plant', `${a}.`, p(ps, (v as unknown[]).map(String))),
+  purchOrgIn: (v, a, ps, grain) =>
+    dimPredicate(grain, 'purchOrg', `${a}.`, p(ps, (v as unknown[]).map(String))),
+  // The global Month and Year filters: the figure's own date rule
+  // (globalfilter.datePredicate) - which for a PR release step is its
+  // requisition's raise date, not the step's approval date. The chart-bucket
+  // `monthKey` below keeps PRIMARY_DATE: a bar of approvals by month IS by
+  // approval month.
   monthKeyIn: (v, a, ps, grain) =>
-    `${monthExpr(a, grain)} = ANY(${p(ps, (v as unknown[]).map(String))})`,
+    datePredicate(grain, `${a}.`, 'YYYY-MM', p(ps, (v as unknown[]).map(String))),
+  /** The global Year filter: 'YYYY', on the same date as monthKeyIn. */
+  yearIn: (v, a, ps, grain) =>
+    datePredicate(grain, `${a}.`, 'YYYY', p(ps, (v as unknown[]).map(String))),
 
   /**
    * A lead-time chart only aggregates rows where its measure exists (a sourcing
@@ -246,6 +384,11 @@ const FILTERS: Record<string, Compiler> = {
     if (!col) throw new Error(`unknown measure: ${String(v)}`);
     return `(${a}.${col} IS NOT NULL AND ${a}.${col} >= 0)`;
   },
+  /**
+   * cycle_delivery's population since 7 Oct 2026: received lines with a PO
+   * delivery date. Early receipts count (negative days) - see cycleKpis.
+   */
+  deliveryVsPlanEvaluable: (_v, a) => `${a}.delivery_vs_promise_days IS NOT NULL`,
   // cycle_e2e's population: received lines whose linked PR gives a
   // non-negative requisition->receipt span.
   e2eEvaluable: (_v, a) =>
@@ -295,6 +438,69 @@ const FILTERS: Record<string, Compiler> = {
   wbsStatus: (v, a, ps) => `${a}.wbs_status = ${p(ps, String(v))}`,
   urgencyIn: (v, a, ps) => `${a}.urgency = ANY(${p(ps, (v as unknown[]).map(Number))})`,
   agingGt: (v, a, ps) => `${a}.aging_days > ${p(ps, Number(v))}`,
+  /**
+   * Whether the person who RAISED the order sits at Head Office or a site.
+   *
+   * Looked up from the business file by created_by. min() because a buyer can
+   * act for several purchasing orgs; none in the file disagrees with themselves
+   * about HO/Unit, so this picks the single value rather than inventing a
+   * tie-break.
+   *
+   * '(unmapped)' is a real band, not an absence: the panel shows creators who
+   * are not in the file rather than dropping them, so the drill has to be able
+   * to select them too. Without this the month filter alone returned every band
+   * and the parity sweep reported 54 mismatches.
+   */
+  createdByHoUnit: (v, a, ps) => {
+    const band = String(v);
+    const sub = `(SELECT min(hu_.ho_unit) FROM core.dim_user_purch_org hu_
+                   WHERE hu_.user_id = ${a}.created_by)`;
+    return band === '(unmapped)' ? `${sub} IS NULL` : `${sub} = ${p(ps, band)}`;
+  },
+  /**
+   * "Outstanding on a given DAY, in a given aging band on that day."
+   *
+   * The Outstanding-PR panel reconstructs history: it asks, for each day, which
+   * requisitions had been raised but had no purchase order YET. That is not
+   * `aging_days` — which is measured once, at the dataset's as-of date — so a
+   * drill built from aging_days would select a different set from the bar it
+   * came from and the parity sweep would say so.
+   *
+   * Outstanding on D means: raised on or before D, and no PO line for that
+   * requisition dated on or before D. Aging on D is D minus the requisition
+   * date, which is why the band has to travel with the date rather than being a
+   * separate filter.
+   */
+  prOutstandingOn: (v, a, ps) => {
+    const o = (v ?? {}) as { asOf?: unknown; band?: unknown };
+    const asOf = String(o.asOf ?? '');
+    const band = String(o.band ?? '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error(`bad asOf: ${asOf}`);
+    const d = p(ps, asOf);
+    const age = `(${d}::date - ${a}.requisition_date::date)`;
+    // Mirrors the CASE in the exec_pr_outstanding spec, band for band. The
+    // sweep compares the bar against this predicate, so an off-by-one here is
+    // caught rather than shipped.
+    const bands: Record<string, string> = {
+      '>150': `${age} > 150`,
+      '91-150': `${age} BETWEEN 91 AND 150`,
+      '61-90': `${age} BETWEEN 61 AND 90`,
+      '31-60': `${age} BETWEEN 31 AND 60`,
+      '8-30': `${age} BETWEEN 8 AND 30`,
+      '<7': `${age} <= 7`,
+    };
+    const clause = bands[band];
+    if (!clause) throw new Error(`unknown outstanding band: ${band}`);
+    return `${a}.requisition_date IS NOT NULL
+            AND ${a}.requisition_date::date <= ${d}::date
+            AND ${clause}
+            AND NOT EXISTS (
+              SELECT 1 FROM core.fact_po_line o_
+               WHERE o_.dataset_version_id = ${a}.dataset_version_id
+                 AND o_.pr_no = ${a}.pr_no AND o_.pr_item = ${a}.pr_item
+                 AND o_.document_date IS NOT NULL
+                 AND o_.document_date::date <= ${d}::date)`;
+  },
   agingBand: (v, a, ps) => {
     const band = String(v);
     const ranges: Record<string, string> = {
@@ -325,6 +531,16 @@ const FILTERS: Record<string, Compiler> = {
   hasInfoRecord: (v, a) => (v ? `${a}.info_record IS NOT NULL` : `${a}.info_record IS NULL`),
   valuedIdr: (_v, a) => `COALESCE(${a}.total_value_idr, 0) > 0`,
   // v1's four age bands (Open Items page). NULL aging never matches a band.
+  /**
+   * One of the six bands (23 Sep 2026), generated from the shared definition so
+   * a boundary cannot move in the chart and not in the rows it opens.
+   */
+  ageBand: (v, a) => `(${ageBandPredicateSql(`${a}.aging_days`, String(v))})`,
+  /**
+   * The four bands this replaced. Kept because a drill TOKEN issued before the
+   * change carries the old key, and a token outlives the page that minted it;
+   * the mart stops emitting these at the next rebuild.
+   */
   ageBand4: (v, a) => {
     const ranges: Record<string, string> = {
       '0-15': `${a}.aging_days <= 15`,
@@ -342,6 +558,84 @@ const FILTERS: Record<string, Compiler> = {
               WHERE _pr.dataset_version_id = ${a}.dataset_version_id
                 AND _pr.pr_no = ${a}.pr_no AND _pr.pr_item = ${a}.pr_item
                 AND ${a}.document_date < _pr.requisition_date)`,
+  // ── Executive Summary (020) ──
+  // Both filter a column stamped on the fact at transform time, so the drill
+  // and the chart aggregate read the same value by construction — which is what
+  // the parity sweep asserts.
+  // ── Executive Summary dimensions (022) ──
+  //
+  // GRAIN-AWARE, and they must mirror buildFilterClause EXACTLY — the same
+  // requirement scopeOpen carries above, for the same reason. These columns live
+  // on the PO line; on the PR grain the clause builder resolves them through the
+  // linked PO lines, so a drill that applied them directly to fact_pr_item
+  // either errored (no such column) or silently returned nothing. Both happened:
+  // spendCategory= produced 25 chart errors and lifecycle=closed produced 99
+  // chart/drill mismatches before this was made grain-aware.
+  //
+  // GR postings carry neither, and buildFilterClause throws for that grain, so
+  // no drill on it can arrive here carrying one.
+  // The aggregate side's twin (globalfilter.ts): a requisition matches through
+  // its linked order, or through its own material when it has no order. The
+  // sweep compares the two, so they move together or not at all.
+  spendCategory: (v, a, ps, grain) => {
+    const val = p(ps, String(v));
+    return grain === 'pr_item'
+      ? prSpendCategoryMatchSql(`${a}.`, `ARRAY[${val}]`)
+      : `${a}.spend_category = ${val}`;
+  },
+  /**
+   * The same spend category, applied to the row ITSELF rather than through its
+   * purchase orders.
+   *
+   * spendCategory above reaches a PR item's linked PO lines, which is right for
+   * a PO-value figure sliced by category. It is wrong for a chart that groups
+   * PR ITEMS by their own material's category: a requisition with no PO belongs
+   * to a bar and would be excluded by an EXISTS on PO lines, so the bar and its
+   * drill would disagree — and the parity sweep would say so.
+   *
+   * The PR grain has no spend_category column (020 added it to fact_po_line
+   * only), so the value is derived here from the same generator the transform
+   * used to fill that column. One rule, two call sites, no drift.
+   */
+  ownSpendCategory: (v, a, ps, grain) => {
+    const expr = grain === 'pr_item'
+      ? spendCategoryWithPlantSql(`${a}.material_code`, `${a}.material_group`, `${a}.plant`)
+      : `${a}.spend_category`;
+    return `${expr} = ${p(ps, String(v))}`;
+  },
+  spendCategoryIn: (v, a, ps, grain) => {
+    const arr = p(ps, (v as unknown[]).map(String));
+    return grain === 'pr_item'
+      ? prSpendCategoryMatchSql(`${a}.`, arr)
+      : `${a}.spend_category = ANY(${arr})`;
+  },
+  sizeBand: (v, a, ps, grain) => poLineScoped(grain, a, `size_band = ${p(ps, String(v))}`),
+  sizeBandIn: (v, a, ps, grain) =>
+    poLineScoped(grain, a, `size_band = ANY(${p(ps, (v as unknown[]).map(String))})`),
+  /**
+   * The Executive Summary's Open/Closed split: true = Delivered (Closed).
+   *
+   * Not the same as scopeOpen, which uses the v1 open-status list and so omits
+   * 'Fully Reversed'. Kept separate so a chart series and the rows behind it
+   * cannot disagree — see GlobalFilter.delivered.
+   */
+  delivered: (v, a, _ps, grain) =>
+    poLineScoped(grain, a, `status ${v === true ? '=' : '<>'} 'Delivered'`),
+  /**
+   * The GLOBAL filter's half of the same split, under distinct keys.
+   *
+   * It cannot reuse `delivered`: a chart series sets that key itself, and
+   * `filters` is an object, so a global value would OVERWRITE the spec's rather
+   * than AND with it. Under lifecycle=closed the Open series correctly aggregates
+   * to zero, but its drill was rewritten to Closed and returned rows the bar did
+   * not count — 26 mismatches. Distinct keys let both compile, and a genuine
+   * contradiction (Open series, Closed filter) then yields no rows, which is what
+   * the bar shows. This mirrors scopeOpen / scopeComplete for the same reason,
+   * and the *In suffixes above for the list dimensions.
+   */
+  lifecycleOpen: (_v, a, _ps, grain) => poLineScoped(grain, a, `status <> 'Delivered'`),
+  lifecycleClosed: (_v, a, _ps, grain) => poLineScoped(grain, a, `status = 'Delivered'`),
+
   currencyIs: (v, a, ps) => `${a}.currency_code = ${p(ps, String(v))}`,
   requisitioner: (v, a, ps) => `${a}.requisitioner = ${p(ps, String(v))}`,
   // Purchasing group, blank-aware: the charts bucket blanks as 'N/A'/'(none)'.
@@ -365,6 +659,72 @@ const FILTERS: Record<string, Compiler> = {
   areaIs: (v, a, ps) =>
     `COALESCE((SELECT max(_dp.area) FROM core.dim_plant _dp WHERE _dp.plant = ${a}.plant), ${a}.plant) = ${p(ps, String(v))}`,
   foreignCcy: (_v, a) => `${a}.currency_code <> 'IDR'`,
+
+  // ── v1's Outstanding-PR and PO-bracket families (7 Aug 2026) ────────────
+  /**
+   * v1's PR age brackets, verbatim including the Indonesian "sd" (s/d, "up to")
+   * in the labels the business uses: `< 7 · 8 sd 14 · 15 sd 21 · 22 sd 30 · > 31`.
+   * Boundaries are contiguous, so every whole day falls in exactly one bracket —
+   * and `aging_days` is already as-of-dated by the transform, so nothing here
+   * consults wall-clock time.
+   */
+  prAgeBracket: (v, a) => {
+    const k = String(v);
+    const c = a + '.aging_days';
+    if (k === '< 7') return `${c} IS NOT NULL AND ${c} <= 7`;
+    if (k === '8 sd 14') return `${c} BETWEEN 8 AND 14`;
+    if (k === '15 sd 21') return `${c} BETWEEN 15 AND 21`;
+    if (k === '22 sd 30') return `${c} BETWEEN 22 AND 30`;
+    if (k === '> 31') return `${c} >= 31`;
+    throw new Error(`unknown PR age bracket: ${k}`);
+  },
+  /** Layer-1 approval is measurable: both ends of the interval exist. */
+  l1Evaluable: (_v, a) => `${a}.release_l1_date IS NOT NULL AND ${a}.requisition_date IS NOT NULL`,
+  /**
+   * Head Office vs site UNIT, from the purchasing-group master (017). v1 derives
+   * this from the description on every render; the rule is precomputed in
+   * dim_purch_group so this is a lookup rather than a string test.
+   */
+  issuedBy: (v, a, ps) => {
+    const k = String(v);
+    if (k === 'Unassigned') return `(${a}.purch_group IS NULL OR ${a}.purch_group = '')`;
+    const isHo = `EXISTS (SELECT 1 FROM core.dim_purch_group _dg
+                           WHERE _dg.code = ${a}.purch_group AND _dg.is_ho)`;
+    if (k === 'HO') return isHo;
+    // UNIT is everything else, as the chart's CASE has it - including a group
+    // missing from the master (P64, P39, P63 on the 2023-2025 orders loaded
+    // 25 Sep 2026), which the old `is_ho = false` match dropped from the drill.
+    return `(${a}.purch_group IS NOT NULL AND ${a}.purch_group <> '' AND NOT ${isHo})`;
+  },
+  /**
+   * The PO DOCUMENT this line belongs to totals into the given value bracket.
+   *
+   * Brackets are a property of the document, not the line, so the predicate has
+   * to re-aggregate: v1 sums each document's IDR lines and brackets the total.
+   * Same population as the chart — IDR-currency lines that are neither STO nor
+   * deleted — or the drill would not match the bar.
+   */
+  poDocBracket: (v, a, ps) => {
+    const B: Record<string, [number, number | null]> = {
+      '0 - 5 JT': [0, 5e6],
+      '5 - 25 JT': [5e6, 25e6],
+      '25 - 100 JT': [25e6, 100e6],
+      '100 - 500 JT': [100e6, 500e6],
+      '>500 JT': [500e6, null],
+    };
+    const range = B[String(v)];
+    if (!range) throw new Error(`unknown PO value bracket: ${String(v)}`);
+    const [lo, hi] = range;
+    const upper = hi === null ? '' : ` AND _t.total < ${p(ps, hi)}`;
+    return `EXISTS (
+      SELECT 1 FROM (
+        SELECT sum(_pl.net_order_value) AS total
+          FROM core.fact_po_line _pl
+         WHERE _pl.dataset_version_id = ${a}.dataset_version_id
+           AND _pl.po_no = ${a}.po_no
+           AND _pl.currency_code = 'IDR' AND NOT _pl.is_sto AND NOT _pl.is_deleted
+      ) _t WHERE _t.total > 0 AND _t.total >= ${p(ps, lo)}${upper})`;
+  },
   // The global scope toggle (G2.2), grain-aware to mirror buildFilterClause
   // EXACTLY — a converted PR item's own status never reaches 'Delivered', so
   // the PR grain consults its PO lines. Any drift here would break the
@@ -386,7 +746,14 @@ const FILTERS: Record<string, Compiler> = {
       : `${a}.status = 'Delivered'`,
   // On-Time vs Requested (D4): a line is evaluable only when both the receipt
   // and the requested date exist. Empty until EBAN-LFDAT reaches the export.
-  otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.need_by_date IS NOT NULL`,
+  // otd_vs_requested's population since 7 Oct 2026: received lines with a PO
+  // delivery date (EINDT), the date the card now measures against.
+  otdrEvaluable: (_v, a) => `${a}.receipt_date IS NOT NULL AND ${a}.delivery_date IS NOT NULL`,
+  /** PR items with an approval step still open: pending_pr_approvals' population. */
+  releasePending: (_v, a) => `EXISTS (SELECT 1 FROM core.fact_pr_release _rp
+                     WHERE _rp.dataset_version_id = ${a}.dataset_version_id
+                       AND _rp.pr_no = ${a}.pr_no AND _rp.pr_item = ${a}.pr_item
+                       AND _rp.approve_date IS NULL)`,
   // v1's open definition (OPEN_ST + "any GR means Delivered"): a PR item is
   // open while no PO exists, or while its POs are unapproved/held/awaiting GR
   // AND no linked line has received ANY goods. Differs from scopeOpen, which
@@ -440,6 +807,17 @@ function detailHandoffFor(filters: Record<string, unknown>): DrillPage['detailHa
       case 'plantIn': params['plant'] = (v as unknown[]).map(String).join(','); break;
       case 'purchOrg': params['purchOrg'] = String(v); break;
       case 'purchOrgIn': params['purchOrg'] = (v as unknown[]).map(String).join(','); break;
+      // spendCategory became mappable on 22 Sep 2026: migration 030 put
+      // spend_category on core.v_detail and detail.ts gained the filter, so the
+      // handoff is now exact rather than a param the query would ignore.
+      case 'spendCategory': params['spendCategory'] = String(v); break;
+      case 'spendCategoryIn': params['spendCategory'] = (v as unknown[]).map(String).join(','); break;
+      // sizeBand and delivered ARE still deliberately absent, so they fall to
+      // the default below and are reported as unmapped. The detail view carries
+      // no size_band column, so a param here would be accepted by the URL and
+      // then ignored by the query — the handoff would silently widen while the
+      // UI claimed it was exact. Naming them unmapped makes the approximation
+      // visible, which is the behaviour this switch was built for.
       case 'purchGroup': params['purchGroup'] = String(v); break;
       case 'companyCode': params['company'] = String(v); break;
       case 'companyCodeIn': params['company'] = (v as unknown[]).map(String).join(','); break;
@@ -561,6 +939,14 @@ export async function executeDrill(
   payload: TokenPayload,
   limit: number,
   offset: number,
+  /**
+   * Sort by one of the grain's own columns (requested 7 Oct 2026: every popup
+   * table sortable both ways). Looked up in COLUMNS - never interpolated from
+   * the request - and ordered by the column's OUTPUT name, so the sort is on
+   * exactly what the cell shows. The grain's stable key follows as a
+   * tiebreak, so paging through a sorted drill never repeats or skips a row.
+   */
+  sort: { key: string; dir: 'asc' | 'desc' } | null = null,
 ): Promise<DrillPage> {
   const t = TABLES[payload.grain];
   const params: unknown[] = [payload.v];
@@ -609,10 +995,14 @@ export async function executeDrill(
       }
     : null;
 
+  const sortCol = sort ? COLUMNS[payload.grain].find((c) => c.key === sort.key) : undefined;
+  const orderBy = sortCol
+    ? `"${sortCol.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, ${t.order}`
+    : t.order;
   const pageParams = [...params, limit, offset];
   const rows = await query<Record<string, unknown>>(
     `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
-      WHERE ${whereSql} ORDER BY ${t.order}
+      WHERE ${whereSql} ORDER BY ${orderBy}
       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
     pageParams,
   );

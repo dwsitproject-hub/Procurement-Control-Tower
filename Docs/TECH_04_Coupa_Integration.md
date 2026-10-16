@@ -176,3 +176,35 @@ user-accepted: Coupa test rates fill periods the SAP file does not cover, so
 pre-2026 conversions (e.g. PR Pipeline ≈ $76 B) are wrong on staging and will
 correct themselves against production Coupa rates.
 
+---
+
+## Supplier master as a sixth object (added 7 Aug 2026, payload doc v4.0 §1.8)
+
+`GET /api/suppliers` syncs into `ops.coupa_supplier` (migration 015) alongside
+the five transactional objects, on the same watermark and page-cap machinery.
+
+**Why it was added:** Vendor 360 shows who a vendor is and what they cost, but
+not *where an order is sent*. `po-email` is that address, and it lives only in
+Coupa.
+
+**The join.** The supplier's `number` carries the same value as the SAP vendor
+code (`LN11000001`, `IN11000154`), which is what lets a vendor resolve to a
+Coupa record. Nothing enforces this — it is a convention of the master data —
+so the lookup is a LEFT match that is allowed to find nothing, and the popup
+says so explicitly rather than rendering a blank field.
+
+**`po_email` is not the contact email.** They are separate fields in the payload
+and differ in practice, so both are stored and the popup shows the contact only
+when it differs from the PO address.
+
+**Scope.** `/api/suppliers` answers **403** without `core.supplier.read`, which
+the app did not previously request even though the client is granted it (both
+scope lists in the payload doc include it). It is now in the `COUPA_SCOPES`
+default. A deployment that pins `COUPA_SCOPES` in its env file must add it, or
+supplier sync alone will fail while everything else keeps working.
+
+**Volume.** The supplier master is much larger than the transaction feeds —
+several thousand rows against a staging tenant — so a first run does not finish
+in one pass. The existing 40-page cap (2,000 rows) applies and the run resumes
+from its watermark on the next tick, which is the same behaviour as a cold
+purchase-order sync.

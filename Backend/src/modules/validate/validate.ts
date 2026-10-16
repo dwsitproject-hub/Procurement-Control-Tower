@@ -189,10 +189,13 @@ export async function checkStaged(batchId: number): Promise<Finding[]> {
         ruleId: 'V-M01',
         severity: 'CAVEAT',
         feed: 'pr',
-        message: `Requested delivery date is not distinct from release date (${pct.toFixed(2)}% of rows differ, expected >= 50%). The column is not a need-by date, so Demand Realism and On-Time vs Requested remain disabled. Fix: add SAP EBAN-LFDAT to the ME5A export variant (PRD 13.1.1).`,
+        message: `Requested delivery date is not distinct from release date (${pct.toFixed(2)}% of rows differ, expected >= 50%). The column is not a need-by date, so Demand Realism remains disabled (On-Time is measured against the PO delivery date instead). Fix: add SAP EBAN-LFDAT to the ME5A export variant (PRD 13.1.1).`,
         affectedRows: dv.total - dv.differing,
         measured: { expected: '>=50%', actual: `${pct.toFixed(2)}%`, total: dv.total, differing: dv.differing },
-        disablesKpis: ['demand_realism', 'otd_vs_requested'],
+        // otd_vs_requested left this list on 7 Oct 2026: it now measures
+        // against the PO delivery date, not the requested date this caveat
+        // is about.
+        disablesKpis: ['demand_realism'],
         drillPredicate: null,
       });
     }
@@ -295,6 +298,29 @@ export function checkMetrics(m: TransformMetrics, rules: Record<string, unknown>
     });
   }
 
+  // Repeated keys in an export (25 Sep 2026). Loud, because the first row was
+  // kept and the rest discarded, and if the repeats DIFFER - a later export
+  // correcting an earlier one - the reader must know which copy the dashboard
+  // is showing. Before this, the same condition failed the whole load.
+  for (const [n, what, feed] of [
+    [m.duplicatePrItems, 'requisition item', 'pr'],
+    [m.duplicatePoLines, 'order line', 'po'],
+    [m.duplicateGrPostings, 'goods-receipt posting', 'gr'],
+  ] as const) {
+    if ((n ?? 0) > 0) {
+      out.push({
+        ruleId: 'V-X01',
+        severity: 'WARNING',
+        feed,
+        message: `${n} ${what}(s) appeared more than once in the export. The first occurrence of each was kept and the repeats were ignored - check the export if the copies could differ.`,
+        affectedRows: n,
+        measured: null,
+        disablesKpis: [],
+        drillPredicate: null,
+      });
+    }
+  }
+
   if (m.grOrphans > 0) {
     out.push({
       ruleId: 'V-R01',
@@ -318,6 +344,53 @@ export function checkMetrics(m: TransformMetrics, rules: Record<string, unknown>
       measured: null,
       disablesKpis: [],
       drillPredicate: { grain: 'po_line', filters: { linkStatus: 'dangling' } },
+    });
+  }
+
+  /**
+   * V-R08 — the bundle carried no rate table.
+   *
+   * fx stopped being a required feed (user decision 27 Aug 2026): the monthly
+   * rate table changes rarely, and re-uploading an unchanged copy with every
+   * batch was pure friction. It is safe because buildFx already sources a
+   * version's rates from ops.fx_rate_source, the shared store fed by BOTH the
+   * SAP file and the Coupa API — so a bundle without the file inherits whatever
+   * rates are already known.
+   *
+   * Reported, never silent. "Where did this version's rates come from" must be
+   * answerable from the batch itself, not inferred from the absence of a file.
+   *
+   * With no rates at all it is a BLOCKER, not a caveat: every USD figure in the
+   * dataset would be unavailable, and publishing that as though it were a
+   * normal dataset would put a version live that cannot answer the questions
+   * the dashboard is for.
+   */
+  if (m.fxRatePairs === 0) {
+    out.push({
+      ruleId: 'V-R08',
+      severity: 'BLOCKER',
+      feed: 'fx',
+      message: 'No FX rates are available: this bundle carried no rate table and the shared '
+        + 'rate store is empty. Every USD figure would be unavailable. Upload the Rate '
+        + 'Conversion export once — later bundles can then omit it.',
+      affectedRows: null,
+      measured: { fxSuppliedByBundle: m.fxSuppliedByBundle, fxRatePairs: 0 },
+      disablesKpis: [],
+      drillPredicate: null,
+    });
+  } else if (!m.fxSuppliedByBundle) {
+    out.push({
+      ruleId: 'V-R08',
+      severity: 'WARNING',
+      feed: 'fx',
+      message: `This bundle carried no Rate Conversion export, so the version's `
+        + `${m.fxRatePairs} rate pair(s) were carried forward from the shared rate store `
+        + '(SAP file plus Coupa API). Figures are converted at those rates. Upload a rate '
+        + 'table when the rates themselves change.',
+      affectedRows: null,
+      measured: { fxSuppliedByBundle: false, fxRatePairs: m.fxRatePairs },
+      disablesKpis: [],
+      drillPredicate: null,
     });
   }
 

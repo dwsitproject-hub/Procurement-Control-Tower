@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  // fx
+  FxTable,
+  buildFxTable,
   // movement
   lookupMovement,
   signedQty,
@@ -636,13 +639,21 @@ describe('material category and priority labels (ported from v1)', () => {
     expect(materialCategory('777', { '777': 'Chemical' })).toBe('Chemical');
   });
 
-  it('labels priority the way v1 does, and refuses to label urgency 0', () => {
-    expect(priorityLabel(1)).toBe('02-Urgent');
-    expect(priorityLabel(2)).toBe('03-Standard');
-    expect(priorityLabel(3)).toBe('04-Planned');
-    expect(priorityLabel(0)).toBe('01-Emergency');
-    // 104 reference items carry urgency 4, which v1's 4-entry array cannot label.
-    expect(priorityLabel(4)).toBeNull();
+  it('labels priority from v1s explicit urgency map, not by array index', () => {
+    // v1: {0:'04-Planned', 1:'01-Emergency', 2:'02-Urgent', 3:'03-Standard'}
+    // with everything else defaulting to '03-Standard'.
+    //
+    // This test previously asserted the array-index reading of that map, which
+    // is what the implementation did — so it locked in a one-step shift and,
+    // worst of all, urgency 0 (the LOWEST priority: 250 reference items) as
+    // "01-Emergency". Checked against v1 (19) on the reference export.
+    expect(priorityLabel(1)).toBe('01-Emergency');
+    expect(priorityLabel(2)).toBe('02-Urgent');
+    expect(priorityLabel(3)).toBe('03-Standard');
+    expect(priorityLabel(0)).toBe('04-Planned');
+    // Urgency 4 and up (96 reference items) fall back rather than vanish.
+    expect(priorityLabel(4)).toBe('03-Standard');
+    expect(priorityLabel(9)).toBe('03-Standard');
     expect(priorityLabel(null)).toBeNull();
   });
 
@@ -653,5 +664,23 @@ describe('material category and priority labels (ported from v1)', () => {
     expect(isUrgent(3)).toBe(false);
     expect(isStandard(3)).toBe(true);
     expect(isStandard(4)).toBe(true);
+  });
+});
+
+describe('FX: zero is zero in every currency', () => {
+  const table = new FxTable(buildFxTable([
+    { from: 'USD', to: 'IDR', rate: 16800, year: 2026, month: 1 },
+  ]));
+
+  it('a zero amount converts to zero even with no currency code', () => {
+    // PO 1012104004 on staging: blank currency, value 0. It had no USD value,
+    // and the strict total then refused the rupiah headline for the page.
+    expect(table.toUsd(0, null, '2026-01-19').usd).toBe(0);
+    expect(table.toUsd(0, 'XYZ', '2026-01-19').usd).toBe(0);
+  });
+
+  it('a non-zero amount in an unrated currency is still null, never guessed', () => {
+    expect(table.toUsd(5, null, '2026-01-19').usd).toBeNull();
+    expect(table.toUsd(5, 'XYZ', '2026-01-19').usd).toBeNull();
   });
 });

@@ -18,6 +18,20 @@
   --neutral: #64748B;
   --radius: 9px;
   --shadow: 0 1px 5px rgba(0, 0, 0, 0.07);
+
+  /* Stacking order, named because it was previously guessed per component and
+     they disagreed: the drill modal sat at 50 while the sticky topbar sat at
+     100, so the modal's own title row and its close button were painted over by
+     the header and could not be seen or clicked.
+
+     Anything that floats over the page belongs on this scale. --z-modal is the
+     top of it by definition. */
+  --z-dropdown: 40;
+  --z-sticky: 100;
+  --z-modal: 200;
+  /* The sticky topbar's height. The modal clears it rather than sliding under
+     it, so both headers stay readable. */
+  --topbar-h: 50px;
   color-scheme: light dark;
 }
 
@@ -67,7 +81,7 @@ a { color: var(--accent); }
 .topbar {
   /* v1's .bar: navy, sticky, elevated */
   display: flex; align-items: center; gap: .7rem; padding: 0 1.2rem; height: 50px;
-  background: var(--navy); position: sticky; top: 0; z-index: 100;
+  background: var(--navy); position: sticky; top: 0; z-index: var(--z-sticky);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
 }
 .topbar h1 { font-size: .92rem; margin: 0; font-weight: 700; color: #fff; white-space: nowrap; }
@@ -99,11 +113,15 @@ a { color: var(--accent); }
   font-size: .58rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
   color: rgba(255, 255, 255, .35); padding: .7rem 1rem .25rem;
 }
+/* Nav items are anchors (each page has a URL), so the browser's default link
+   underline and colour have to be turned off; everything else is as it was
+   when they were buttons. */
 .ni {
   display: flex; align-items: center; gap: .5rem; width: 100%; text-align: left;
   padding: .5rem 1rem; font-size: .78rem; color: rgba(255, 255, 255, .75);
   background: none; border: 0; border-left: 3px solid transparent; cursor: pointer;
   transition: background .12s;
+  text-decoration: none; box-sizing: border-box;
 }
 .ni:hover { background: rgba(255, 255, 255, .06); color: #fff; }
 .ni[aria-selected="true"] {
@@ -201,6 +219,11 @@ a { color: var(--accent); }
 
 .chart-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
 .chart-box { position: relative; height: 260px; }
+/* A chart that needs the page's full width (Chart.tsx WIDE_CHARTS). */
+.chart-wide { grid-column: 1 / -1; }
+/* Pages wrap each chart in a grid cell (layout slots), so the cell holding a
+   wide chart is the one that must span. */
+.chart-grid > div:has(.chart-wide) { grid-column: 1 / -1; }
 
 /* ── tables ───────────────────────────────────────────────────────── */
 
@@ -223,17 +246,48 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(8, 11, 15, .55);
-  display: flex; align-items: flex-start; justify-content: center; padding: 3vh 1rem; z-index: 50;
+  display: flex; align-items: flex-start; justify-content: center;
+  /* Top padding clears the sticky topbar so the modal's header is never
+     underneath it. The backdrop itself still covers the full viewport, so the
+     page behind — topbar included — is dimmed, which is what tells the reader
+     the modal has focus. */
+  padding: calc(var(--topbar-h) + .75rem) 1rem 1rem;
+  z-index: var(--z-modal);
 }
 .modal {
   background: var(--panel); border-radius: var(--radius); border: 1px solid var(--border);
-  width: min(1200px, 100%); max-height: 94vh; display: flex; flex-direction: column;
+  width: min(1200px, 100%);
+  /* Bounded by what is left after the topbar offset, so a long table scrolls
+     inside the modal instead of pushing its footer off-screen. */
+  max-height: calc(100vh - var(--topbar-h) - 1.75rem);
+  display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
 }
-.modal header { display: flex; align-items: center; gap: .75rem; padding: .75rem 1rem; border-bottom: 1px solid var(--border); }
+.modal header {
+  display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+  padding: .75rem 1rem; border-bottom: 1px solid var(--border);
+  /* flex: none stops a long title from squeezing the header while the body
+     grows; the table inside has its own sticky <th> at a lower layer. */
+  flex: none; position: relative; z-index: 1; background: var(--panel);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
 .modal header h3 { margin: 0; font-size: .95rem; }
 .modal header .spacer { flex: 1; }
 .modal .body { overflow: auto; padding: .5rem 1rem 1rem; }
 .modal .count { color: var(--muted); font-size: .72rem; }
+
+/* The Detail Table in a popup (DetailModal): wider than a drill, since it
+   carries the whole table with its toolbar and filters. */
+.modal--wide { width: min(1500px, 100%); }
+.modal--wide .panel { box-shadow: none; border: none; padding: 0; margin: 0; }
+
+/* A second horizontal scrollbar above a wide table (ScrollFrame). The strip is
+   just tall enough to show the browser's own scrollbar. */
+.scroll-top { overflow-x: auto; overflow-y: hidden; height: 14px; margin-bottom: 2px; }
+.scroll-top > div { height: 1px; }
+
+/* The backlog table's own filter row on Open Items. */
+.oi-cat-filters { margin: .25rem 0 .6rem; align-items: center; }
 
 /* ── drill modal — v1's dd-modal look ── */
 .modal header h3 { font-weight: 800; }
@@ -337,6 +391,16 @@ table.dd-tbl th .dt-sort:hover { color: #dbe7ff; }
   border: 1px solid var(--border); border-radius: 6px; margin-bottom: .6rem; background: var(--bg);
 }
 .dt-chip { display: inline-flex; align-items: center; gap: .3rem; font-size: .78rem; white-space: nowrap; }
+/* Two groups in the chooser: SAP's columns, then Coupa's. */
+.dt-chooser { flex-direction: column; }
+.dt-chooser-group { display: flex; flex-wrap: wrap; gap: .3rem .7rem; align-items: center; }
+.dt-chooser-coupa { border-top: 1px dashed var(--border); padding-top: .45rem; }
+.dt-chooser-title { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted, #667085); margin-right: .3rem; }
+/* An exclusion that is already applied: the value is absent from the data, so
+   it is listed from the saved configuration. Marked so it reads as "removed",
+   not as an ordinary unticked option. */
+.dt-chip-off { font-style: italic; opacity: .85; }
+.dt-chip-off > span { color: var(--bad, #b42318); }
 
 .dt-facets { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .6rem; }
 .dt-facet { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
@@ -380,7 +444,7 @@ table.dd-tbl th .dt-sort:hover { color: #dbe7ff; }
 }
 .gf-note { color: var(--muted); font-style: italic; }
 .gf-panel {
-  position: absolute; top: calc(100% + .25rem); left: 0; z-index: 40;
+  position: absolute; top: calc(100% + .25rem); left: 0; z-index: var(--z-dropdown);
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   box-shadow: 0 6px 20px rgba(8, 11, 15, .18); min-width: 240px; max-width: 340px;
 }
@@ -590,3 +654,569 @@ table.data th.dt-dragover { box-shadow: inset 3px 0 0 var(--accent); }
 
 /* PO-page top-spend tables: totals row. */
 .po-tbl-total td { font-weight: 700; border-top: 2px solid var(--border); }
+
+/* Admin sub-page nav: pills above the active section's panel. */
+.admin-subnav {
+  display: flex; flex-wrap: wrap; gap: .35rem;
+  margin-bottom: .8rem; padding-bottom: .6rem;
+  border-bottom: 1px solid var(--border);
+}
+.asn-btn {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: .32rem .8rem; font-size: .74rem; font-weight: 600; cursor: pointer;
+  /* Also an anchor now (/admin/<section>): restore button-like layout. */
+  display: inline-block; text-decoration: none; line-height: 1.45;
+}
+.asn-btn:hover { border-color: var(--accent); }
+.asn-btn[aria-selected="true"] {
+  background: var(--navy); color: #fff; border-color: var(--navy);
+}
+
+/* Vendor 360: the Coupa supplier's PO email, above the bio cards. */
+.vsup { margin: 0 0 .5rem; padding: .45rem .6rem; background: var(--bg); border-radius: 6px; }
+.vsup a { font-weight: 650; }
+
+/* Vendor tables: the PO email column. Long addresses must not stretch the
+   table, so it truncates with the full value in the title attribute. */
+.ent-email { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Executive Summary (020) ──────────────────────────────────────────────
+   Built on the existing tokens so it inherits both themes automatically.
+
+   Deliberately NOT the reference design's red. There, red was both the brand
+   accent for neutral magnitudes and the colour of the action panel — and red
+   conventionally reads as "bad", so a large bar looked like a warning. Emphasis
+   here is --accent, and everything unemphasised is a muted track. */
+
+.xs-tile {
+  display: flex; flex-direction: column; gap: .15rem;
+  padding: .7rem .8rem; text-align: left;
+  background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  cursor: pointer; font: inherit; color: inherit;
+}
+.xs-tile:disabled { cursor: default; }
+.xs-tile:hover:not(:disabled) { border-color: var(--accent); }
+.xs-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.xs-tile-value { font-size: 1.45rem; font-weight: 800; color: var(--heading); line-height: 1.1; }
+.xs-tile-label { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.xs-tile-sub { font-size: .66rem; }
+
+/* The Executive Summary's headline row — eight tiles, one line.
+   Its own grid rather than widening .kpi-grid: that class sizes the KPI cards
+   on every other page, and a column narrow enough for eight tiles would shrink
+   all of them. Explicit column counts, not auto-fill, because auto-fill sizes
+   from a minimum and there is no minimum that yields exactly eight. */
+.xs-tiles { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: .45rem; }
+.xs-tiles .xs-tile { padding: .5rem .55rem; border-left-width: 2px; gap: .1rem; }
+.xs-tiles .xs-tile-value { font-size: 1.02rem; letter-spacing: -.02em; }
+.xs-tiles .xs-tile-label { font-size: .58rem; letter-spacing: .02em; line-height: 1.2; }
+.xs-tiles .xs-tile-sub { font-size: .56rem; line-height: 1.25; color: var(--muted); }
+/* The YTD / current-month pair stacks at this width — side by side it forced
+   the two value tiles wider than the other six and broke the row. */
+.xs-tiles .xs-tile-periods { flex-direction: column; gap: .15rem; margin-top: .25rem; padding-top: .25rem; }
+.xs-tiles .xs-tp { flex-direction: row; align-items: baseline; gap: .3rem; }
+.xs-tiles .xs-tp-name { font-size: .5rem; }
+.xs-tiles .xs-tp-val { font-size: .62rem; }
+
+/* Eight across needs the width for it. Below that, fall back in halves rather
+   than to auto-fill — four then two keeps the tiles aligned in a grid instead
+   of leaving an orphan on its own row. */
+@media (max-width: 1250px) {
+  .xs-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .xs-tiles .xs-tile-value { font-size: 1.2rem; }
+}
+@media (max-width: 640px) {
+  .xs-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Ranked horizontal bars. grid, not flex, so every label column is the same
+   width and the bars share one baseline — the comparison the panel exists for. */
+.xs-bars { display: flex; flex-direction: column; gap: 2px; }
+.xs-bar-row {
+  display: grid; grid-template-columns: minmax(7rem, 12rem) 1fr minmax(9rem, auto);
+  align-items: center; gap: .5rem;
+  padding: .2rem .3rem; border: 0; border-radius: 4px;
+  background: transparent; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.xs-bar-row:disabled { cursor: default; }
+.xs-bar-row:hover:not(:disabled) { background: var(--bg); }
+.xs-bar-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.xs-bar-label { font-size: .7rem; text-align: right; color: var(--muted); }
+.xs-bar-track { background: var(--border); border-radius: 3px; height: .8rem; overflow: hidden; }
+.xs-bar-fill { display: block; height: 100%; background: var(--neutral); border-radius: 3px; }
+.xs-hi .xs-bar-label { color: var(--text); font-weight: 700; }
+.xs-hi .xs-bar-fill { background: var(--accent); }
+.xs-bar-value { font-size: .7rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The Closed/Open split under the row total. Its own line so the total stays the
+   figure the eye lands on, and colour-keyed to the segments rather than repeating
+   the words in the legend. */
+.xs-bar-split { display: block; font-size: .62rem; color: var(--muted); }
+.xs-sp-closed { color: var(--accent); font-weight: 600; }
+.xs-sp-open { color: var(--warn); font-weight: 600; }
+
+/* Headline tile period split: YTD and the as-of month under the tile figure. */
+.xs-tile-periods {
+  display: flex; gap: .6rem; margin-top: .3rem;
+  padding-top: .3rem; border-top: 1px solid var(--border);
+}
+.xs-tp { display: flex; flex-direction: column; line-height: 1.25; }
+.xs-tp-name { font-size: .55rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.xs-tp-val { font-size: .72rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* Master data: sortable column headers. The whole header is the control, so the
+   hit area matches what the reader sees rather than a small arrow beside it. */
+.ms-sort {
+  display: inline-flex; align-items: center; gap: .3rem;
+  width: 100%; background: none; border: 0; padding: 0;
+  font: inherit; color: inherit; text-align: inherit; cursor: pointer;
+}
+.ms-sort:hover { color: var(--accent); }
+.ms-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ms-sort-on { color: var(--accent); font-weight: 700; }
+/* The idle indicator stays faint so a sorted column is obvious at a glance,
+   but present on every header so the affordance is discoverable. */
+.ms-arrow { font-size: .6em; opacity: .35; }
+.ms-sort-on .ms-arrow { opacity: 1; }
+th[style*="right"] .ms-sort { justify-content: flex-end; }
+
+/* Outstanding PR: one column per day, stacked by aging band.
+   A vertical plot because the axis is time and there are ~60 of them; horizontal
+   rows would run off the bottom of any screen. */
+.xs-pr { display: flex; flex-direction: column; }
+.xs-pr-plot {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 190px; overflow-x: auto; padding-bottom: .2rem;
+}
+.xs-pr-col {
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  height: 100%; min-width: 15px; flex: 1 1 0;
+}
+.xs-pr-total {
+  font-size: .5rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap; margin-bottom: 1px;
+}
+/* column-reverse so the FIRST band listed sits at the base: the >31 block is
+   what the panel is read for, and it needs a common baseline across days. */
+.xs-pr-stack { display: flex; flex-direction: column-reverse; width: 100%; flex: 1 1 auto; }
+.xs-pr-seg { border: 0; padding: 0; width: 100%; cursor: pointer; min-height: 1px; }
+.xs-pr-seg:hover { filter: brightness(1.15); }
+.xs-pr-seg:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.xs-pr-day { font-size: .5rem; color: var(--muted); margin-top: 2px; }
+
+/* HO/Site: month segments carry their own figure where it fits. */
+.xs-mo-seg { display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: .55rem; font-weight: 700; overflow: hidden; }
+
+/* Transaction size: the closed/open split beside each band percentage. */
+/* On the SAME line as its total (8 Oct 2026). As a second block line it
+   overflowed the 12-pixel row and printed over the row below - every figure
+   in the panel collided with its neighbour. */
+.xs-band-split { display: inline; margin-left: .3rem; font-size: .64rem; color: var(--muted); }
+
+/* Spend category: a value bar and a PO-lines bar stacked in one row, each on
+   its own scale. The two measures differ by orders of magnitude, so a shared
+   scale would flatten every count to a sliver. */
+.xs-bar-tracks { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.xs-bar-track-lines { height: .42rem; opacity: .62; }
+.xs-bar-track-lines .xs-seg { border-radius: 2px; }
+
+/* Monthly Spend Category: the figures behind the bars.
+   A category worth a fraction of a month is a two-pixel segment with nowhere to
+   print a label and nothing to click, so the table carries every number and the
+   same click-through. */
+.xs-mc-tbl-wrap { margin-top: .9rem; }
+.xs-mc-tbl { font-size: .72rem; }
+.xs-mc-tbl th, .xs-mc-tbl td { padding: .3rem .5rem; white-space: nowrap; }
+/* Sticky category column: with a column per month the table scrolls sideways,
+   and a scrolled row whose label has left the screen is unreadable. */
+.xs-mc-th-cat {
+  position: sticky; left: 0; z-index: 1;
+  background: var(--panel); text-align: left; font-weight: 600;
+  display: table-cell;
+}
+.xs-mc-tbl thead .xs-mc-th-cat { background: var(--panel); }
+.xs-mc-th-cat .xs-key { margin-right: .35rem; vertical-align: baseline; }
+.xs-mc-num { text-align: right; font-variant-numeric: tabular-nums; }
+.xs-mc-tot { font-weight: 700; border-left: 1px solid var(--border); }
+.xs-mc-tbl tfoot td, .xs-mc-tbl tfoot th {
+  border-top: 2px solid var(--border); font-weight: 700;
+}
+/* The cell is the control, so the whole figure is the hit area. */
+.xs-mc-cell {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.xs-mc-cell:hover { color: var(--accent); text-decoration: underline; }
+.xs-mc-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Monthly Spend Category: one stacked bar per month, stacked by category.
+   Grid rather than flex so the quarter, month and total columns line up down
+   the panel however long a month label or a total is. */
+.xs-mc { display: flex; flex-direction: column; gap: .25rem; }
+.xs-mc-legend { flex-wrap: wrap; row-gap: .2rem; }
+.xs-mc-row {
+  display: grid;
+  grid-template-columns: 1.6rem 3.2rem 1fr minmax(5.5rem, auto);
+  align-items: center;
+  gap: .4rem;
+}
+.xs-mc-q { font-size: .65rem; font-weight: 700; color: var(--muted); text-align: right; }
+.xs-mc-month { font-size: .7rem; color: var(--text); }
+/* min-width:0 so a long stack cannot push the total column off the panel. */
+.xs-mc-track { display: flex; height: 1.15rem; min-width: 0; align-items: stretch; }
+.xs-mc-seg {
+  border: 0; padding: 0; cursor: pointer; min-width: 2px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: .58rem; font-weight: 700; line-height: 1;
+  overflow: hidden;
+}
+.xs-mc-seg:first-child { border-radius: 3px 0 0 3px; }
+.xs-mc-seg:last-child { border-radius: 0 3px 3px 0; }
+.xs-mc-seg:hover { filter: brightness(1.12); }
+.xs-mc-seg:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.xs-mc-num { pointer-events: none; }
+.xs-mc-total {
+  font-size: .7rem; font-variant-numeric: tabular-nums;
+  white-space: nowrap; font-weight: 600;
+}
+
+@media (max-width: 700px) {
+  /* The quarter gutter is the first thing to go: it is a grouping hint, and the
+     month label already carries the period. */
+  .xs-mc-row { grid-template-columns: 0 2.8rem 1fr minmax(4.5rem, auto); }
+  .xs-mc-q { display: none; }
+}
+
+/* Size bands: two stacked bars per band, sharing the band's row. */
+.xs-bands { display: flex; flex-direction: column; gap: .55rem; }
+.xs-band-row {
+  display: grid; grid-template-columns: minmax(8rem, 11rem) 1fr;
+  align-items: center; gap: .6rem;
+  padding: .25rem .3rem; border: 0; border-radius: 4px;
+  background: transparent; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.xs-band-row:disabled { cursor: default; }
+.xs-band-row:hover:not(:disabled) { background: var(--bg); }
+.xs-band-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.xs-band-label { font-size: .7rem; font-weight: 700; text-align: right; }
+.xs-band-bars { display: flex; flex-direction: column; gap: 4px; }
+.xs-band-line { position: relative; display: flex; align-items: center; gap: .6rem; height: 1.05rem; }
+.xs-band-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
+/* Value and volume must be distinguishable without colour: value is solid, and
+   volume is lighter AND labelled, so the pair reads in greyscale too. */
+/* A fixed column, so the figures line up down the panel and the bars all end
+   at the same place instead of each shrinking to its own label's width. */
+.xs-band-num {
+  flex: 0 0 13.5rem; font-size: .68rem; color: var(--muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.xs-band-num strong { color: var(--heading); }
+
+.xs-means { margin: .2rem 0 0; padding-left: 1.1rem; font-size: .74rem; line-height: 1.55; }
+.xs-means li { margin-bottom: .35rem; }
+
+/* Executive Summary: stacked Open/Closed segments (022).
+   Open is AMBER and Closed is BLUE (user decision, 20 Aug 2026). Amber for the
+   work still outstanding reads the same way it does on the aging cells and the
+   freshness banner, so the page agrees with the rest of the app about what amber
+   means. The two hues also differ in lightness, so the split survives greyscale
+   printing and the common forms of colour blindness — and each segment carries a
+   text tooltip naming Open or Closed, so colour is never the only channel. */
+.xs-legend {
+  display: flex; gap: 1rem; font-size: .66rem; color: var(--muted);
+  margin-bottom: .35rem; flex-wrap: wrap;
+}
+.xs-key { display: inline-block; width: .6rem; height: .6rem; border-radius: 2px; margin-right: .25rem; }
+.xs-key.xs-open { background: var(--warn); }
+.xs-key.xs-closed { background: var(--accent); }
+
+.xs-bar-track, .xs-band-track {
+  display: flex; background: var(--border); border-radius: 3px; overflow: hidden;
+}
+.xs-bar-track { height: .8rem; }
+.xs-band-track { height: 100%; flex: 1; min-width: 0; }
+.xs-seg { border: 0; padding: 0; height: 100%; cursor: pointer; min-width: 2px; }
+.xs-seg:disabled { cursor: default; }
+.xs-seg.xs-open { background: var(--warn); }
+.xs-seg.xs-closed { background: var(--accent); }
+.xs-seg:hover:not(:disabled) { filter: brightness(1.15); }
+.xs-seg:focus-visible { outline: 2px solid var(--heading); outline-offset: -2px; }
+/* The rows are containers now, not buttons — the segments inside are the
+   clickable things, so a row must not look interactive itself. */
+.xs-bar-row, .xs-band-row { cursor: default; }
+.xs-bar-row:hover, .xs-band-row:hover { background: transparent; }
+
+/* ── Global filter dropdown (modernised) ───────────────────────────────────
+   The panel gained a search box, a select-all that follows the search, and
+   dismissal by click-outside or Escape. The styling below is deliberately built
+   from the existing tokens rather than new colours, so it inherits both themes
+   and stays consistent with the drill modal and the panels. */
+.gf-btn { display: inline-flex; align-items: center; gap: .3rem; }
+.gf-caret { font-size: .6rem; color: var(--muted); }
+.gf-btn[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.gf-panel {
+  /* Above the sticky topbar's siblings but below a modal — the shared scale in
+     :root, so this can never disagree with the drill overlay again. */
+  z-index: var(--z-dropdown);
+  min-width: 17rem; max-width: 24rem;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
+  overflow: hidden;
+}
+.gf-search { padding: .4rem .45rem; border-bottom: 1px solid var(--border); }
+.gf-search-in {
+  width: 100%; box-sizing: border-box;
+  padding: .3rem .45rem; font: inherit; font-size: .76rem;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--text);
+}
+.gf-search-in:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.gf-panel-head { align-items: center; gap: .4rem; flex-wrap: wrap; }
+.gf-count { font-size: .66rem; color: var(--muted); margin-left: auto; white-space: nowrap; }
+.gf-mini-ghost { border-style: dashed; }
+.gf-empty { font-size: .72rem; color: var(--muted); margin: .3rem .1rem; }
+
+/* Rows are full-width targets, not just the checkbox and its text — a 3mm
+   checkbox is a poor thing to ask someone to hit forty-eight times. */
+.gf-opt {
+  padding: .18rem .3rem; border-radius: 4px; cursor: pointer;
+  white-space: normal; gap: .45rem;
+}
+.gf-opt:hover { background: var(--bg); }
+.gf-opt-on { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.gf-opt-label { flex: 1; min-width: 0; }
+/* The code as a chip: it is a lookup key, so it should not read as prose. */
+.gf-opt-code {
+  font-size: .62rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 .25rem; flex: none;
+}
+.gf-dropped {
+  font-size: .66rem; color: var(--crit);
+  border: 1px dashed var(--crit); border-radius: 5px; padding: .1rem .35rem;
+}
+
+/* ── Saved layout views ───────────────────────────────────────────────────── */
+.ly-views {
+  display: flex; align-items: center; gap: .4rem; flex-wrap: wrap;
+  margin-bottom: .4rem; font-size: .74rem;
+}
+.ly-views-pick { display: inline-flex; align-items: center; gap: .3rem; }
+.ly-views-name { display: inline-flex; align-items: center; gap: .3rem; }
+.ly-views-msg { font-style: italic; font-size: .68rem; }
+
+/* ── Executive Summary panel grid ─────────────────────────────────────────
+   Panels sit on a 12-column row so a width can be a share of it. --span comes
+   from the saved layout and defaults to 12, so a layout with no widths set
+   stacks exactly as it did before this existed. */
+.xs-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: 1rem;
+  align-items: start;
+}
+.xs-cell { grid-column: span var(--span, 12); min-width: 0; }
+/* min-width:0 on the cell AND the panel: without it a wide table inside refuses
+   to shrink and pushes the whole row wider than the page. */
+.xs-cell > .panel { min-width: 0; }
+
+/* Below this a third of the width is unreadable for a chart with axis labels, so
+   every panel takes the full row regardless of what was saved. The saved value
+   is untouched — widen the window and it returns. */
+@media (max-width: 1100px) {
+  .xs-cell { grid-column: span 12; }
+}
+
+/* ── Open Items: the stage-pipeline redesign (16 Sep 2026) ─────────────────
+   Every colour below is an existing token. The page introduces no palette of
+   its own — the age bands reuse accent / warn / orange / crit in the order the
+   aging chart already draws them, so a reader moving between the two pages is
+   reading the same colours to mean the same thing. */
+
+.oi-head-row { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.oi-asof { margin: 0; font-size: .78rem; color: var(--muted); }
+.oi-total { margin: .1rem 0 0; font-size: 1.9rem; font-weight: 800; color: var(--navy); line-height: 1.1; }
+.oi-total span { font-size: .95rem; font-weight: 600; color: var(--muted); }
+.oi-says { margin: .6rem 0 0; font-size: .95rem; line-height: 1.5; max-width: 74ch; }
+.oi-desk-pick select { margin: 0 .35rem; padding: .2rem .35rem; }
+
+.oi-lens { display: inline-flex; align-items: center; gap: .3rem; }
+.oi-lens > span { margin-right: .2rem; font-size: .76rem; }
+.oi-lens button {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: .28rem .7rem; font-size: .8rem; cursor: pointer;
+}
+.oi-lens button:first-of-type { border-radius: 6px 0 0 6px; }
+.oi-lens button:last-child { border-radius: 0 6px 6px 0; }
+.oi-lens button.on { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 700; }
+
+.oi-caveat {
+  margin: .5rem 0; padding: .45rem .7rem; font-size: .82rem;
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: 6px;
+}
+
+/* The pipeline. Five across on a wide screen, and never fewer than two — a
+   single-column pipeline is a list, and the point is the comparison. */
+/* SEVEN cards: the five open stages plus the two post-delivery ones, which
+   joined the row on 23 Sep 2026 so it reads as the whole life of an order line
+   from left to right. auto-fit rather than a fixed seven, because seven fixed
+   columns on a laptop gives each card less width than its own heading. */
+.oi-pipe {
+  display: grid; gap: .6rem;
+  /* --oi-cards is set by the page to the number of cards, so the row holds
+     them all: open stages plus the two after delivery. */
+  grid-template-columns: repeat(var(--oi-cards, 8), minmax(0, 1fr));
+}
+/* Below this, eight columns leave each card narrower than its own heading;
+   wrapping is the lesser harm there. */
+@media (max-width: 1100px) {
+  .oi-pipe { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+/* The card whose rows are in the table below. Without it a filtered table two
+   screens down reads as though the click did nothing. */
+.oi-stage--on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.oi-stage--after { border-style: dashed; }
+.oi-tag--after { background: var(--muted); }
+.oi-stage-note { margin: .35rem 0 0; font-size: .66rem; color: var(--muted); line-height: 1.45; }
+/* The backlog table's three figure columns, heading and cells together.
+   Requested 23 Sep 2026: the headings sat left of right-aligned figures, so
+   each label floated away from the column it names. Centring BOTH keeps them
+   over their own numbers at every column width. */
+.oi-desks th.oi-c, .oi-desks td.oi-c { text-align: center; }
+/* 2px, and a darker line than the app's default rule.
+   Requested 17 Sep 2026: at 1px against a white panel on a white ground the
+   five cards read as one block of text, and the eye has to parse the headings
+   to find the boundaries. The bottleneck card keeps its orange and now wins on
+   weight as well as hue, which is also the one thing on the row that a
+   colour-blind reader can still separate. */
+.oi-stage {
+  border: 2px solid var(--oi-edge); border-radius: 10px; padding: .65rem .75rem;
+  background: var(--panel); min-width: 0;
+}
+.oi-stage:hover { border-color: var(--oi-edge-hi); }
+.oi-stage--hot {
+  border-color: var(--orange);
+  box-shadow: 0 0 0 1px var(--orange), 0 1px 5px rgba(0, 0, 0, .06);
+}
+.oi-stage-h { display: flex; align-items: center; gap: .4rem; min-height: 1.1rem; }
+.oi-stage-name { font-size: .78rem; font-weight: 700; color: var(--navy); }
+.oi-tag {
+  font-size: .6rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+  background: var(--orange); color: #fff; padding: .05rem .3rem; border-radius: 3px;
+}
+.oi-stage-n { margin: .25rem 0 .1rem; font-size: 1.45rem; font-weight: 800; color: var(--ink); }
+.oi-stage-n span { font-size: .72rem; font-weight: 600; }
+.oi-stage-sub { margin: 0 0 .4rem; font-size: .72rem; color: var(--muted); }
+.oi-stage-foot { display: flex; justify-content: space-between; gap: .4rem; margin: .35rem 0 0; font-size: .72rem; }
+.oi-stage-prio { display: flex; flex-wrap: wrap; gap: .5rem; margin: .3rem 0 0; font-size: .68rem; color: var(--muted); }
+.oi-stage-prio i { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: .2rem; }
+
+/* Card edges. Two tokens rather than a hard-coded grey, so the dark theme gets
+   a border that reads as an edge there too — #E2E8F0 on a dark panel is a glow,
+   not an outline. */
+:root { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; --oi-late: #7F1D1D; }
+/* Both dark paths, the way the rest of this file does it: the media query for
+   "system dark", and the explicit override so the theme toggle wins. A border
+   tuned for a white panel reads as a glow on a dark one. */
+@media (prefers-color-scheme: dark) {
+  :root { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; --oi-late: #B91C1C; }
+}
+:root[data-theme="dark"] { --oi-edge: #3A4A63; --oi-edge-hi: #5B79A6; --oi-late: #B91C1C; }
+:root[data-theme="light"] { --oi-edge: #C9D4E4; --oi-edge-hi: #8FA6C4; --oi-late: #7F1D1D; }
+
+/* Every figure on a card is a button. It has to look like the number it
+   replaced — a real button chrome would turn each card into a form — so the
+   affordance is an underline on hover and a focus ring for the keyboard. */
+.oi-num {
+  background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit;
+  cursor: pointer; text-align: left; border-bottom: 2px solid transparent;
+}
+.oi-num:hover:not(:disabled) { border-bottom-color: currentColor; }
+.oi-num:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.oi-num:disabled { cursor: default; opacity: .55; }
+.oi-num--sm { display: inline-flex; align-items: center; gap: .2rem; }
+.oi-num--sm i { display: inline-block; width: 7px; height: 7px; border-radius: 2px; }
+
+/* Segments of the mix bar are buttons too; they keep the bar's exact geometry
+   so the proportions stay readable. */
+.oi-mix-seg { display: block; height: 100%; border: 0; padding: 0; cursor: pointer; }
+.oi-mix-seg:hover { filter: brightness(1.15); }
+.oi-mix-seg:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+.oi-focus {
+  border-left: 3px solid var(--accent); padding-left: .6rem;
+}
+.dt-agechip { display: flex; align-items: center; gap: .4rem; }
+
+/* The age-mix bar, shared by the stage cards and the desk table. */
+.oi-mix { display: flex; height: 7px; border-radius: 4px; overflow: hidden; background: var(--line); }
+.oi-mix span { display: block; height: 100%; }
+.oi-mix--empty { opacity: .4; }
+
+.oi-watch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
+.oi-watch-card {
+  border: 2px solid var(--oi-edge); border-radius: 10px; padding: .65rem .75rem;
+  background: var(--panel);
+}
+.oi-watch-card:hover { border-color: var(--oi-edge-hi); }
+.oi-watch-v { margin: 0; font-size: 1.35rem; font-weight: 800; color: var(--navy); }
+.oi-watch-l { margin: .05rem 0 .25rem; font-size: .76rem; font-weight: 700; }
+.oi-watch-n { margin: 0; font-size: .72rem; color: var(--muted); line-height: 1.4; }
+
+.oi-hyg { display: flex; flex-wrap: wrap; gap: .4rem 1.6rem; align-items: baseline; }
+.oi-hyg-item { display: flex; align-items: baseline; gap: .4rem; }
+.oi-hyg-v { font-size: 1.05rem; font-weight: 800; color: var(--navy); }
+.oi-hyg-l { font-size: .76rem; color: var(--muted); }
+
+.oi-desks td.oi-desk-mix { width: 26%; min-width: 120px; }
+
+@media (max-width: 1250px) {
+  .oi-pipe, .oi-pipe--compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .oi-watch { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .oi-pipe, .oi-pipe--compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Master data editing (032) ─────────────────────────────────────────────
+   Admin only. The dialog is narrower than a drill modal: it holds a handful of
+   fields, and a form stretched to 1200px puts the label a screen away from its
+   input. */
+.me-modal { width: min(640px, 100%); }
+.me-grid { display: grid; gap: .7rem; margin-top: .6rem; }
+.me-field { display: flex; flex-direction: column; gap: .25rem; }
+.me-label { font-size: .78rem; font-weight: 600; color: var(--heading); }
+.me-field input, .me-field select { width: 100%; }
+/* When a change reaches the figures, stated on the field that causes it. */
+.me-effect { font-size: .7rem; color: var(--warn); }
+.me-ro { margin-top: .9rem; padding: .55rem .7rem; border: 1px dashed var(--border); border-radius: 6px; }
+.me-ro ul, .me-hidden ul { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .74rem; color: var(--muted); }
+.me-ro-h { margin: 0; font-size: .74rem; font-weight: 700; color: var(--heading); }
+.me-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+.me-bar { display: flex; align-items: center; gap: .7rem; margin: .3rem 0 .4rem; font-size: .76rem; }
+.me-act-h { width: 1%; }
+.me-act { white-space: nowrap; }
+.me-act .dt-btn { padding: .15rem .45rem; font-size: .72rem; margin-right: .25rem; }
+.me-row-marked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.me-badge {
+  margin-left: .4rem; padding: .02rem .3rem; border-radius: 3px;
+  font-size: .6rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: #fff;
+}
+.me-badge--edited { background: var(--accent); }
+.me-badge--added { background: var(--good); }
+.me-hidden { margin-top: .7rem; }
+.dt-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dt-btn-primary:hover { filter: brightness(1.08); }
+.dt-btn-danger { color: var(--crit); }
+.dt-btn-danger:hover { border-color: var(--crit); }

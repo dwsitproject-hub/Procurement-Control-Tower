@@ -10,14 +10,46 @@
  * and an unfiltered one can never be computed by two different pieces of SQL.
  */
 
+import { prSpendCategoryMatchSql } from '@pct/rules';
+
 export interface GlobalFilter {
   companyCode?: string[];
   plant?: string[];
   purchOrg?: string[];
   /** 'YYYY-MM' against the grain's primary date. */
   monthKey?: string[];
+  /**
+   * 'YYYY' against the SAME date as monthKey. Its own dimension rather than a
+   * shorthand for twelve month keys: the Month options come from order dates,
+   * so a requisition raised in a month no order was dated in would fall
+   * outside a year expanded into months. Year AND Month together intersect,
+   * like every other pair of dimensions.
+   */
+  year?: string[];
   /** v1's per-page "Show: All | Open Only | Complete (GR)" toggle (G2.2). */
   scope?: 'open' | 'complete';
+
+  // ── Executive Summary dimensions (022) ──
+  //
+  // These exist so a figure on that page can be opened into the Overview
+  // structure with the SAME slice applied — clicking METHANOL shows the whole
+  // Overview filtered to METHANOL rather than a bare line list.
+
+  /** core.fact_po_line.spend_category (020). */
+  spendCategory?: string[];
+  /** core.fact_po_line.size_band ordinal key, '1'..'7' (020). */
+  sizeBand?: string[];
+  /**
+   * The Executive Summary's Open/Closed split: true = status 'Delivered'
+   * (Closed), false = everything else (Open).
+   *
+   * DELIBERATELY NOT `scope`. That toggle's 'open' means OPEN_STATUSES, which
+   * omits 'Fully Reversed' — so scope='open' and "not Delivered" disagree by 17
+   * lines in the current data. Small, but the two would then be two different
+   * definitions of the same word on one screen, and a chart series and the drill
+   * behind it would not tie out. One extra field is cheaper than that.
+   */
+  delivered?: boolean;
 }
 
 /** The status set v1 (and the drill `open` filter) treat as open. */
@@ -31,18 +63,99 @@ export function isEmptyFilter(f: GlobalFilter): boolean {
     (f.plant?.length ?? 0) === 0 &&
     (f.purchOrg?.length ?? 0) === 0 &&
     (f.monthKey?.length ?? 0) === 0 &&
+    (f.year?.length ?? 0) === 0 &&
+    (f.spendCategory?.length ?? 0) === 0 &&
+    (f.sizeBand?.length ?? 0) === 0 &&
+    f.delivered === undefined &&
     f.scope === undefined
   );
 }
 
-/** The date column a month filter applies to, per fact table. */
-export type FactKind = 'pr_item' | 'po_line' | 'gr_posting';
+/**
+ * The fact table a clause filters. The two release tables were added 7 Oct
+ * 2026: the KPIs and charts that read them used to be filtered as if they were
+ * order lines, and failed ("column document_date does not exist") or reported
+ * themselves unfilterable the moment any filter - now including the default
+ * Year - was on.
+ */
+export type FactKind = 'pr_item' | 'po_line' | 'gr_posting' | 'pr_release' | 'po_release';
 
-const MONTH_COL: Record<FactKind, string> = {
+/**
+ * The date a Month or Year filter applies to, per table. null: the table's own
+ * date is the wrong one, and the filter reaches the requisition (datePredicate).
+ */
+const MONTH_COL: Record<FactKind, string | null> = {
   pr_item: 'requisition_date',
   po_line: 'document_date',
   gr_posting: 'posting_date',
+  // A PR release step's only date is its APPROVAL date, which a pending step
+  // does not have: filtered on it, every pending approval vanished under the
+  // default Year filter. Release steps are filtered by the year/month their
+  // requisition was raised, as the joined approval specs already are.
+  pr_release: null,
+  po_release: 'po_date',
 };
+
+/**
+ * `to_char(<the table's filter date>, <fmt>) = ANY(<placeholder>)`. Shared with
+ * the drill compiler (monthKeyIn / yearIn), for the reason dimPredicate is.
+ */
+export function datePredicate(
+  kind: FactKind, alias: string, fmt: 'YYYY-MM' | 'YYYY', placeholder: string,
+): string {
+  const col = MONTH_COL[kind];
+  if (col !== null) return `to_char(${alias}${col}, '${fmt}') = ANY(${placeholder})`;
+  const outer = alias !== '' ? alias : `${TABLE_OF[kind]}.`;
+  return `EXISTS (SELECT 1 FROM core.fact_pr_item _gq
+                   WHERE _gq.dataset_version_id = ${outer}dataset_version_id
+                     AND _gq.pr_no = ${outer}pr_no AND _gq.pr_item = ${outer}pr_item
+                     AND to_char(_gq.requisition_date, '${fmt}') = ANY(${placeholder}))`;
+}
+
+const TABLE_OF: Record<FactKind, string> = {
+  pr_item: 'core.fact_pr_item',
+  po_line: 'core.fact_po_line',
+  gr_posting: 'core.fact_gr_posting',
+  pr_release: 'core.fact_pr_release',
+  po_release: 'core.fact_po_release',
+};
+
+type Dim = 'company' | 'plant' | 'purchOrg';
+const DIM_SQL: Record<Dim, string> = { company: 'company_code', plant: 'plant', purchOrg: 'purch_org' };
+
+/**
+ * Where each table keeps company, plant and purchasing org. false: the table
+ * does not carry it, and the predicate reaches the ORDER LINE the row belongs
+ * to - a receipt's purchasing org is its order's, a PO release's plant is its
+ * order's lines'.
+ */
+const HAS_DIM: Record<FactKind, Record<Dim, boolean>> = {
+  pr_item:    { company: true, plant: true,  purchOrg: true },
+  po_line:    { company: true, plant: true,  purchOrg: true },
+  gr_posting: { company: true, plant: true,  purchOrg: false },
+  pr_release: { company: true, plant: true,  purchOrg: true },
+  po_release: { company: true, plant: false, purchOrg: true },
+};
+
+/**
+ * `<dim> = ANY(<placeholder>)` on one table, as SQL. Shared with the drill
+ * compiler (drill.ts companyCodeIn / plantIn / purchOrgIn): a figure and the
+ * rows behind it must be filtered by the SAME expression or the sweep's
+ * card-equals-drill check cannot hold.
+ *
+ * `alias` ends with a dot ('pol.') or is '' for an unaliased single table.
+ */
+export function dimPredicate(kind: FactKind, dim: Dim, alias: string, placeholder: string): string {
+  const col = DIM_SQL[dim];
+  if (HAS_DIM[kind][dim]) return `${alias}${col} = ANY(${placeholder})`;
+  const outer = alias !== '' ? alias : `${TABLE_OF[kind]}.`;
+  const lineMatch = kind === 'gr_posting'
+    ? `_gd.po_no = ${outer}po_no AND _gd.po_item = ${outer}po_item`
+    : `_gd.po_no = ${outer}po_no`;
+  return `EXISTS (SELECT 1 FROM core.fact_po_line _gd
+                   WHERE _gd.dataset_version_id = ${outer}dataset_version_id
+                     AND ${lineMatch} AND _gd.${col} = ANY(${placeholder}))`;
+}
 
 export interface Clause {
   /** Begins with ' AND ' when non-empty, so it can be appended directly. */
@@ -70,28 +183,102 @@ export function buildFilterClause(
   const params: unknown[] = [];
   let n = startIndex;
 
-  const add = (col: string, vals: string[] | undefined) => {
+  const add = (dim: Dim, vals: string[] | undefined) => {
     if (!vals || vals.length === 0) return;
     params.push(vals);
-    parts.push(`${alias}${col} = ANY($${n})`);
+    parts.push(dimPredicate(kind, dim, alias, `$${n}`));
     n += 1;
   };
 
-  add('company_code', f.companyCode);
+  add('company', f.companyCode);
   add('plant', f.plant);
-  add('purch_org', f.purchOrg);
+  add('purchOrg', f.purchOrg);
+
+  /** The Executive Summary dimensions and the scope toggle mean nothing on these. */
+  const lifecycleless = kind === 'gr_posting' || kind === 'pr_release' || kind === 'po_release';
 
   if (f.monthKey && f.monthKey.length > 0) {
     params.push(f.monthKey);
-    parts.push(`to_char(${alias}${MONTH_COL[kind]}, 'YYYY-MM') = ANY($${n})`);
+    parts.push(datePredicate(kind, alias, 'YYYY-MM', `$${n}`));
     n += 1;
+  }
+
+  if (f.year && f.year.length > 0) {
+    params.push(f.year);
+    parts.push(datePredicate(kind, alias, 'YYYY', `$${n}`));
+    n += 1;
+  }
+
+  /**
+   * The Executive Summary dimensions live on the PO line. On the PR grain they
+   * are resolved through the linked PO lines — the same device `scope` already
+   * uses below, and for the same reason: a requisition has no order value of
+   * its own, but "requisitions that became METHANOL orders" is a meaningful and
+   * answerable question.
+   *
+   * SPEND CATEGORY no longer uses this device; see below. A requisition does
+   * have a category of its own, through its material, and dropping the ones
+   * that never reached an order made 42% of an open backlog disappear from
+   * every requisition-grain figure.
+   *
+   * On the GR grain they throw, so the caller reports the figure as unfilterable
+   * rather than quietly returning an unfiltered number.
+   */
+  const poScoped = (predicate: (t: string) => string) => {
+    if (lifecycleless) {
+      throw new Error(`Executive Summary filters do not apply to ${kind}`);
+    }
+    if (kind === 'pr_item') {
+      const outer = alias !== '' ? alias : 'core.fact_pr_item.';
+      parts.push(
+        `EXISTS (SELECT 1 FROM core.fact_po_line _xs
+                  WHERE _xs.dataset_version_id = ${outer}dataset_version_id
+                    AND _xs.pr_no = ${outer}pr_no AND _xs.pr_item = ${outer}pr_item
+                    AND ${predicate('_xs.')})`,
+      );
+    } else {
+      parts.push(predicate(alias));
+    }
+  };
+
+  if (f.spendCategory && f.spendCategory.length > 0) {
+    params.push(f.spendCategory);
+    const i = n;
+    if (lifecycleless) {
+      throw new Error(`Executive Summary filters do not apply to ${kind}`);
+    }
+    if (kind === 'pr_item') {
+      // The order's category, falling back to the requisition's own material -
+      // the definition core.v_detail.spend_category carries, written once in
+      // @pct/rules and called by the drill compiler too.
+      const outer = alias !== '' ? alias : 'core.fact_pr_item.';
+      parts.push(prSpendCategoryMatchSql(outer, `$${i}`));
+    } else {
+      parts.push(`${alias}spend_category = ANY($${i})`);
+    }
+    n += 1;
+  }
+
+  if (f.sizeBand && f.sizeBand.length > 0) {
+    params.push(f.sizeBand);
+    const i = n;
+    poScoped((t) => `${t}size_band = ANY($${i})`);
+    n += 1;
+  }
+
+  if (f.delivered !== undefined) {
+    // Written as an explicit comparison rather than parameterised: the value is a
+    // boolean the parser already validated, so there is nothing user-supplied to
+    // bind, and the SQL reads as the rule it implements.
+    const op = f.delivered ? '=' : '<>';
+    poScoped((t) => `${t}status ${op} 'Delivered'`);
   }
 
   if (f.scope !== undefined) {
     // GR postings carry no lifecycle status; a spec on that grain cannot be
     // scoped honestly — the caller reports it unavailable instead.
-    if (kind === 'gr_posting') {
-      throw new Error('scope filter does not apply to GR postings');
+    if (lifecycleless) {
+      throw new Error(`scope filter does not apply to ${kind}`);
     }
     if (kind === 'pr_item') {
       // A converted PR item's own status stays 'PO-No GR' forever — the PR
@@ -132,21 +319,35 @@ export function buildFilterClause(
 /**
  * Inject the clause into a spec's SQL.
  *
- * Every spec anchors on `dataset_version_id = $1`. Only the FIRST occurrence is
- * patched: in a joined spec the second table is correlated to the first on that
- * column, so filtering the driving table is sufficient and correct.
+ * Every spec anchors on `dataset_version_id = $1`, and exactly ONE anchor gets
+ * the clause — a joined spec correlates its second table on
+ * `b.dataset_version_id = a.dataset_version_id`, never on `$1`, so filtering the
+ * driving table carries the whole query.
+ *
+ * A SECOND literal `= $1` is therefore not a correlated join but an independent
+ * scan of the facts, and the two halves would then disagree: one filtered, one
+ * not. Such a spec must say which scan the clause belongs to by marking it (the
+ * F-marker below), and this refuses to guess if it does not — the caller then
+ * reports the figure as unfilterable, which is recoverable, where a
+ * half-filtered number is not.
  */
 export function injectFilter(sql: string, clause: Clause): string {
   if (clause.sql === '') return sql;
-  // A spec whose FIRST anchor is not its driving table (e.g. a scalar subquery
-  // in the SELECT list) marks the true injection point with /*F*/ — otherwise
-  // the filter would silently land on the wrong table.
+  // The marker also covers the case where the FIRST anchor is not the driving
+  // table at all (e.g. a scalar subquery in the SELECT list) — without it the
+  // filter would silently land on the wrong one.
   const mark = sql.indexOf('/*F*/');
   if (mark >= 0) return sql.slice(0, mark) + clause.sql + sql.slice(mark);
   const anchor = 'dataset_version_id = $1';
   const at = sql.indexOf(anchor);
   if (at < 0) {
     throw new Error('spec SQL has no dataset_version_id = $1 anchor to filter on');
+  }
+  if (sql.indexOf(anchor, at + anchor.length) >= 0) {
+    throw new Error(
+      'spec SQL scans the facts at $1 more than once and has no /*F*/ marker; '
+      + 'filtering only the first scan would half-filter the figure',
+    );
   }
   return sql.slice(0, at + anchor.length) + clause.sql + sql.slice(at + anchor.length);
 }
@@ -178,10 +379,34 @@ export function mergeIntoPredicate(
   if (f.monthKey?.length) {
     filters['monthKeyIn'] = f.monthKey;
   }
+  if (f.year?.length) {
+    filters['yearIn'] = f.year;
+  }
   if (f.scope === 'open') {
     filters['scopeOpen'] = true;
   } else if (f.scope === 'complete') {
     filters['scopeComplete'] = true;
+  }
+
+  // The Executive Summary dimensions (022). Omitting them here was a real
+  // defect: a chart recomputed under spendCategory= or sizeBand= was correct,
+  // but the drill token minted for each of its points did not carry the
+  // constraint, so opening a point returned the unfiltered population. Every
+  // dimension buildFilterClause understands must appear here too, or the
+  // chart-equals-drill guarantee holds only for the dimensions someone
+  // remembered.
+  if (f.spendCategory?.length) {
+    filters['spendCategoryIn'] = f.spendCategory;
+  }
+  if (f.sizeBand?.length) {
+    filters['sizeBandIn'] = f.sizeBand;
+  }
+  if (f.delivered !== undefined) {
+    // A DISTINCT key from the `delivered` a chart series sets for itself:
+    // `filters` is an object, so reusing the key would overwrite the spec's
+    // value instead of ANDing with it, and an Open series under a Closed filter
+    // would drill to rows its own bar reports as zero.
+    filters[f.delivered ? 'lifecycleClosed' : 'lifecycleOpen'] = true;
   }
 
   return { ...predicate, filters };
@@ -197,12 +422,20 @@ export function parseGlobalFilter(q: Record<string, unknown>): GlobalFilter {
     return cleaned.length > 0 ? cleaned : undefined;
   };
   const rawScope = q['scope'] === undefined ? undefined : String(q['scope']);
+  // 'open' | 'closed' on the wire, because that is what the page calls them.
+  const rawLifecycle = q['lifecycle'] === undefined ? undefined : String(q['lifecycle']);
   return {
     companyCode: list('company'),
     plant: list('plant'),
     purchOrg: list('purchOrg'),
     monthKey: list('monthKey'),
+    // Four digits only: anything else would match nothing and look like an
+    // empty year rather than a malformed link.
+    year: list('year')?.filter((y) => /^\d{4}$/.test(y)),
     scope: rawScope === 'open' || rawScope === 'complete' ? rawScope : undefined,
+    spendCategory: list('spendCategory'),
+    sizeBand: list('sizeBand'),
+    delivered: rawLifecycle === 'closed' ? true : rawLifecycle === 'open' ? false : undefined,
   };
 }
 
@@ -213,6 +446,10 @@ export function describeFilter(f: GlobalFilter): Record<string, unknown> {
   if (f.plant?.length) out['plant'] = f.plant;
   if (f.purchOrg?.length) out['purchOrg'] = f.purchOrg;
   if (f.monthKey?.length) out['monthKey'] = f.monthKey;
+  if (f.year?.length) out['year'] = f.year;
   if (f.scope) out['scope'] = f.scope;
+  if (f.spendCategory?.length) out['spendCategory'] = f.spendCategory;
+  if (f.sizeBand?.length) out['sizeBand'] = f.sizeBand;
+  if (f.delivered !== undefined) out['lifecycle'] = f.delivered ? 'closed' : 'open';
   return out;
 }

@@ -719,15 +719,15 @@ export default function App() {
             />
           </PageChunk>
         ) : tab === 'vendors' ? (
-          <PageChunk tab={tab}><VendorsTab onDrill={onDrill} filterQuery={gfQuery} /></PageChunk>
+          <PageChunk tab={tab}><VendorsTab onDrill={onDrill} filterQuery={gfQuery} currency={currency} /></PageChunk>
         ) : tab === 'materials' ? (
-          <PageChunk tab={tab}><MaterialsTab onDrill={onDrill} /></PageChunk>
+          <PageChunk tab={tab}><MaterialsTab onDrill={onDrill} filterQuery={gfQuery} currency={currency} /></PageChunk>
         ) : tab === 'coupa_src' ? (
           <PageChunk tab={tab}><CoupaSourcingTab /></PageChunk>
         ) : tab === 'coupa_inv' ? (
           <PageChunk tab={tab}><CoupaInvoicesTab /></PageChunk>
         ) : tab === 'custom' ? (
-          <PageChunk tab={tab}><CustomTab onDrill={onDrill} /></PageChunk>
+          <PageChunk tab={tab}><CustomTab onDrill={onDrill} currency={currency} /></PageChunk>
         ) : tab === 'admin' ? (
           <PageChunk tab={tab}>
             <AdminTab
@@ -856,7 +856,7 @@ export default function App() {
                       {shownCustomKpis.map((spec) => (
                         <Suspense key={`cu-${spec.title}`} fallback={null}>
                           <Suspense fallback={null}>
-                      <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                      <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} currency={currency} />
                     </Suspense>
                         </Suspense>
                       ))}
@@ -941,7 +941,7 @@ export default function App() {
                         onClick={() => updateLayout((cur) => ({ ...cur, customKpis: cur.customKpis.filter((t) => t !== spec.title) }))}
                       >✕</button>
                     )}
-                    <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                    <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} currency={currency} />
                   </div>
                 ))}
               </div>
@@ -990,17 +990,17 @@ export default function App() {
                     >✕</button>
                   )}
                   <Suspense fallback={null}>
-                    <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                    <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} currency={currency} />
                   </Suspense>
                 </div>
               ))}
             </div>
 
             {/* v1's PR-page tables: approval bottlenecks + requisitioner demand. */}
-            {tab === 'pr' && <PrTables onDrill={onDrill} />}
+            {tab === 'pr' && <PrTables onDrill={onDrill} currency={currency} />}
 
             {/* v1's PO-page top-spend tables with Vendor/Material 360 popups. */}
-            {tab === 'po' && <PoTables onDrill={onDrill} />}
+            {tab === 'po' && <PoTables onDrill={onDrill} currency={currency} />}
 
             {/* The Open Items detail table moved into OpenItemsTab, which owns
                 the whole page now and filters it per view. */}

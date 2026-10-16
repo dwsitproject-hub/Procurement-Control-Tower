@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { formatMoney, formatNumber } from '../lib/format';
+import { formatCurrency, formatNumber } from '../lib/format';
 
 /**
  * v1's PR Analysis tables (pr-bneck / pr-reqr): approval bottlenecks per
@@ -17,7 +17,11 @@ interface ReqRow {
   emg: number; urg: number; drill: string;
 }
 
-export function PrTables({ onDrill }: { onDrill: (token: string, label: string) => void }) {
+export function PrTables({ onDrill, currency = 'USD' }: {
+  onDrill: (token: string, label: string) => void;
+  /** Topbar display currency. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [bneck, setBneck] = useState<BneckRow[] | null>(null);
   const [reqr, setReqr] = useState<ReqRow[] | null>(null);
 
@@ -88,7 +92,7 @@ export function PrTables({ onDrill }: { onDrill: (token: string, label: string) 
               <tr>
                 <th>Requisitioner</th>
                 <th className="num">PR Items</th>
-                <th className="num">Value</th>
+                <th className="num">Value ({currency})</th>
                 <th className="num" title="Share of PR items with urgency 1 (01-Emergency)">Emg %</th>
                 <th className="num" title="Share of PR items with urgency 2 (02-Urgent)">Urg %</th>
               </tr>
@@ -114,7 +118,7 @@ export function PrTables({ onDrill }: { onDrill: (token: string, label: string) 
                     <td>{q.requisitioner}</td>
                     <td className="num">{formatNumber(q.items)}</td>
                     <td className="num">
-                      {q.valueUsd !== null ? formatMoney(q.valueUsd, 'USD') : formatMoney(q.valueIdr, 'IDR')}
+                      {formatCurrency(q.valueUsd, q.valueIdr, currency)}
                     </td>
                     <td className="num" style={emgPct > 30 ? { color: 'var(--crit)', fontWeight: 700 } : undefined}>
                       {emgPct.toFixed(0)}%

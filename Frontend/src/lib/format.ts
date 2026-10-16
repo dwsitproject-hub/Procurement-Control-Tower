@@ -142,3 +142,23 @@ export function moneyCellText(v: number): string {
     ? (v / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' M'
     : v.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
+
+/**
+ * Money in the display currency the topbar toggle selects.
+ *
+ * Every figure that can be shown both ways is carried as a PAIR from the API —
+ * a USD value that needed an FX rate and an IDR value that did not — so the
+ * choice is made here rather than by converting in the browser. A USD total is
+ * null when any line inside it failed to convert (the strict rule in
+ * entity.ts); the rupiah side has no such hole, which is why switching to IDR
+ * can fill in a figure that reads as an em dash in USD.
+ */
+export function formatCurrency(
+  usd: number | null | undefined,
+  idr: number | null | undefined,
+  currency: 'USD' | 'IDR',
+): string {
+  return currency === 'IDR'
+    ? formatMoney(idr ?? null, 'IDR')
+    : formatMoney(usd ?? null, 'USD');
+}

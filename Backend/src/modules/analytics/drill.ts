@@ -841,7 +841,13 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'prItem', label: 'Item', type: 'int' },
     { key: 'shortText', label: 'Description', type: 'string' },
     { key: 'materialCode', label: 'Material', type: 'string' },
-    { key: 'materialCategory', label: 'Mat Cat', type: 'string' },
+    // The vocabulary every page now speaks. 'Mat Cat' sat here showing
+    // material_category, so a drill headed 'MRO GENERAL' listed rows reading
+    // 'Spare Parts-Factory' — the two-vocabularies confusion this product
+    // removed everywhere else. Both are kept; the legacy one is labelled as
+    // such, matching detail.ts.
+    { key: 'spendCategory', label: 'Category', type: 'string' },
+    { key: 'materialCategory', label: 'Category (legacy)', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
     { key: 'vendorName', label: 'Supplier', type: 'string' },
     { key: 'poNo', label: 'PO No', type: 'string' },
@@ -859,6 +865,7 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'shortText', label: 'Description', type: 'string' },
     { key: 'vendorName', label: 'Vendor', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
+    { key: 'spendCategory', label: 'Category', type: 'string' },
     { key: 'netOrderValue', label: 'Value (doc ccy)', type: 'money' },
     { key: 'netOrderValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
     { key: 'status', label: 'Status', type: 'enum' },
@@ -897,14 +904,16 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
 
 const SELECTS: Record<Grain, string> = {
   pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText",
-            f.material_code AS "materialCode", f.material_category AS "materialCategory", f.plant,
+            f.material_code AS "materialCode", f.material_category AS "materialCategory",
+            f.spend_category AS "spendCategory", f.plant,
             fp.vendor_name AS "vendorName", fp.po_no AS "poNo", f.status,
             fp.document_date AS "documentDate", fp.receipt_date AS "receiptDate",
             f.aging_days AS "agingDays", f.total_value_idr AS "totalValueIdr",
             f.total_value_usd AS "totalValueUsd",
             f.requisition_date AS "requisitionDate", f.wbs_status AS "_wbs"`,
   po_line: `f.po_no AS "poNo", f.po_item AS "poItem", f.pr_no AS "prNo", f.short_text AS "shortText",
-            f.vendor_name AS "vendorName", f.plant, f.net_order_value AS "netOrderValue",
+            f.vendor_name AS "vendorName", f.plant, f.spend_category AS "spendCategory",
+            f.net_order_value AS "netOrderValue",
             f.currency_code AS "currencyCode", f.net_order_value_usd AS "netOrderValueUsd",
             f.status, f.document_date AS "documentDate", f.receipt_date AS "receiptDate",
             f.aging_days AS "agingDays", f.is_sto AS "_sto", f.release_exempt AS "_exempt",

@@ -9,7 +9,7 @@ import { api } from '../lib/api';
 import { CATEGORY_COLORS, ChartPanel } from './Chart';
 
 ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
-import { DASH, FLAG_META, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
+import { DASH, FLAG_META, formatCurrency, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
 
 /**
  * W3 — Vendor 360 and Material Group views (v1's pg-v360 / pg-mg / mx-modal).
@@ -30,12 +30,15 @@ interface VendorRow {
   poCount: number;
   lineCount: number;
   spendUsd: number | null;
+  /** Rupiah equivalent, complete even where the USD total is not. */
+  spendIdr: number | null;
   spendConverted: boolean;
   materials: number;
   areas: number;
   otdPct: number | null;
   avgDaysLate: number | null;
   openExposureUsd: number | null;
+  openExposureIdr: number | null;
 }
 
 /** DetailTable's pager, shared by the Vendor-360 tables (5 Aug 2026). */
@@ -86,7 +89,7 @@ function EntPager({
   );
 }
 
-export function VendorsTab({ onDrill, filterQuery = '' }: {
+export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
   onDrill: (token: string, label: string) => void;
   /**
    * The filter bar (7 Oct 2026). Both tables ignored it until the Year filter
@@ -94,6 +97,8 @@ export function VendorsTab({ onDrill, filterQuery = '' }: {
    * showing every year under a bar that said otherwise.
    */
   filterQuery?: string;
+  /** Topbar display currency — every money cell below reads it. */
+  currency?: 'USD' | 'IDR';
 }) {
   const [rows, setRows] = useState<VendorRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -205,13 +210,17 @@ export function VendorsTab({ onDrill, filterQuery = '' }: {
                   <td className="num">{formatNumber(r.poCount)}</td>
                   <td className="num">{formatNumber(r.lineCount)}</td>
                   <td className="num">
-                    {r.spendConverted ? formatMoney(r.spendUsd, 'USD') : `${DASH} (unrated ccy)`}
+                    {/* The unrated-currency caveat is a USD problem only: the
+                        rupiah total needs no rate, so IDR always has a figure. */}
+                    {currency === 'IDR' || r.spendConverted
+                      ? formatCurrency(r.spendUsd, r.spendIdr, currency)
+                      : `${DASH} (unrated ccy)`}
                   </td>
                   <td className="num">{formatNumber(r.materials)}</td>
                   <td className="num">{formatNumber(r.areas)}</td>
                   <td className="num">{r.otdPct === null ? DASH : `${r.otdPct}%`}</td>
                   <td className="num">{r.avgDaysLate === null ? DASH : r.avgDaysLate}</td>
-                  <td className="num">{formatMoney(r.openExposureUsd, 'USD')}</td>
+                  <td className="num">{formatCurrency(r.openExposureUsd, r.openExposureIdr, currency)}</td>
                 </tr>
               ))}
             </tbody>
@@ -230,8 +239,8 @@ export function VendorsTab({ onDrill, filterQuery = '' }: {
       <VendorOtdBars onOpenVendor={setOpen} />
     </div>
 
-    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} />}
-    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} />}
+    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} />}
+    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} currency={currency} />}
     </>
   );
 }
@@ -468,8 +477,12 @@ function SupplierContact({ code, supplier }: { code: string; supplier: any }) {
 }
 
 export function VendorModal({
-  code, onClose, onDrill,
-}: { code: string; onClose: () => void; onDrill: (t: string, l: string) => void }) {
+  code, onClose, onDrill, currency = 'USD',
+}: {
+  code: string; onClose: () => void; onDrill: (t: string, l: string) => void;
+  /** Topbar display currency — every money cell below reads it. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -501,14 +514,14 @@ export function VendorModal({
 
               {/* v1's 11 Vendor-360 bio KPIs */}
               <div className="ent-kpis">
-                <Bio label="Total Spending" value={d.bio.spendUsd === null ? `${DASH} (unrated ccy present)` : formatMoney(d.bio.spendUsd, 'USD')} />
+                <Bio label="Total Spending" value={currency === 'USD' && d.bio.spendUsd === null ? `${DASH} (unrated ccy present)` : formatCurrency(d.bio.spendUsd, d.bio.spendIdr, currency)} />
                 <Bio label="# POs" value={formatNumber(d.bio.poCount)} />
                 <Bio label="Materials Supplied" value={formatNumber(d.bio.materialsSupplied)} />
                 <Bio label="Areas Served" value={formatNumber(d.bio.areasServed)} />
                 <Bio label="On-Time % (≤ deliv+7d)" value={d.bio.otdPct === null ? DASH : `${d.bio.otdPct}%`} title={d.bio.otdCaveat} />
                 <Bio label="Avg Days Late" value={d.bio.avgDaysLate === null ? DASH : String(d.bio.avgDaysLate)} />
-                <Bio label="Open Exposure" value={formatMoney(d.bio.openExposureUsd, 'USD')} />
-                <Bio label="Delivered, Not Invoiced" value={formatMoney(d.bio.deliveredNotInvoicedUsd, 'USD')} />
+                <Bio label="Open Exposure" value={formatCurrency(d.bio.openExposureUsd, d.bio.openExposureIdr, currency)} />
+                <Bio label="Delivered, Not Invoiced" value={formatCurrency(d.bio.deliveredNotInvoicedUsd, d.bio.deliveredNotInvoicedIdr, currency)} />
                 <Bio label="GR Reversal Rate" value={d.bio.reversalRatePct === null ? DASH : `${d.bio.reversalRatePct}%`} />
                 <Bio label="Active" value={`${formatDate(d.bio.firstSeen)} → ${formatDate(d.bio.lastSeen)}`} />
                 <Bio label="On-Time vs Requested" value={DASH} title={d.bio.onTimeVsRequestedReason} />
@@ -525,8 +538,8 @@ export function VendorModal({
               </p>
 
               <TwoCol
-                left={<MiniBars title="Spend by month (USD)" rows={d.spendByMonth.map((m: any) => ({ label: m.monthKey, value: m.usd, count: m.lines }))} money />}
-                right={<MiniBars title="Supply to area / plant (USD)" rows={d.byArea.map((a: any) => ({ label: a.plantName, value: a.usd, count: a.lines }))} money />}
+                left={<MiniBars title={`Spend by month (${currency})`} rows={d.spendByMonth.map((m: any) => ({ label: m.monthKey, value: currency === 'IDR' ? m.idr : m.usd, count: m.lines }))} money currency={currency} />}
+                right={<MiniBars title={`Supply to area / plant (${currency})`} rows={d.byArea.map((a: any) => ({ label: a.plantName, value: currency === 'IDR' ? a.idr : a.usd, count: a.lines }))} money currency={currency} />}
               />
 
               {/* v1's v3 popup pair: area-share donut + delivery-aging histogram (G3.3) */}
@@ -547,7 +560,7 @@ export function VendorModal({
                 right={[false, false, true, true, true, false]}
                 rows={d.materials.map((m: any) => [
                   m.materialCode ?? '(service)', m.description, formatNumber(m.lines),
-                  formatNumber(m.qty, 1), formatMoney(m.usd, 'USD'), formatDate(m.lastPo),
+                  formatNumber(m.qty, 1), formatCurrency(m.usd, m.idr, currency), formatDate(m.lastPo),
                 ])}
                 sortValues={d.materials.map((m: any) => [
                   m.materialCode, m.description, m.lines, m.qty, m.usd, m.lastPo,
@@ -566,7 +579,7 @@ export function VendorModal({
                   </span>
                 )}
               </h4>
-              <PoHistoryTable rows={d.poHistory} />
+              <PoHistoryTable rows={d.poHistory} currency={currency} />
 
               <h4 className="ent-h">GR history <span className="muted">(newest {d.grHistory.length}, cap {d.caps.grHistory})</span></h4>
               <SimpleTable
@@ -598,7 +611,13 @@ function mgtAg(v: number | null | undefined): string {
   if (v === null || v === undefined) return 'num';
   return 'num ag ' + (Number(v) > 14 ? 'bd' : Number(v) > 7 ? 'wn' : 'ok');
 }
-export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => void }) {
+export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
+  onDrill: (t: string, l: string) => void;
+  /** Global filter bar, as a query string — the charts below honour it. */
+  filterQuery?: string;
+  /** Topbar display currency — every money cell below reads it. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [category, setCategory] = useState<string>('');
   const [group, setGroup] = useState<string>('');
@@ -628,8 +647,8 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
     <>
       {/* v1's Analysis by Material Group charts, on top (5 Aug 2026). */}
       <div className="chart-grid">
-        <ChartPanel chartId="items_by_category" onDrill={onDrill} />
-        <ChartPanel chartId="e2e_by_category" onDrill={onDrill} />
+        <ChartPanel chartId="items_by_category" onDrill={onDrill} currency={currency} filterQuery={filterQuery} />
+        <ChartPanel chartId="e2e_by_category" onDrill={onDrill} currency={currency} filterQuery={filterQuery} />
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
@@ -820,14 +839,18 @@ export function MaterialsTab({ onDrill }: { onDrill: (t: string, l: string) => v
         </div>
       </div>
 
-      {open && <MaterialModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} />}
+      {open && <MaterialModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} />}
     </>
   );
 }
 
 export function MaterialModal({
-  code, onClose, onDrill,
-}: { code: string; onClose: () => void; onDrill: (t: string, l: string) => void }) {
+  code, onClose, onDrill, currency = 'USD',
+}: {
+  code: string; onClose: () => void; onDrill: (t: string, l: string) => void;
+  /** Topbar display currency — every money cell below reads it. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -859,7 +882,7 @@ export function MaterialModal({
                 <Bio label="PO lines" value={formatNumber(d.kpis.lineCount)} />
                 <Bio label="Vendors" value={`${formatNumber(d.kpis.vendorCount)}${d.kpis.soleSource ? ' 🔴 sole source' : ''}`} />
                 <Bio label="Total qty" value={formatNumber(d.kpis.totalQty, 1)} />
-                <Bio label="Spend USD" value={formatMoney(d.kpis.spendUsd, 'USD')} />
+                <Bio label={`Spend ${currency}`} value={formatCurrency(d.kpis.spendUsd, d.kpis.spendIdr, currency)} />
                 <Bio label="Avg unit price" value={d.kpis.avgUnitPrice === null ? DASH : formatNumber(d.kpis.avgUnitPrice, 2)} title={d.kpis.avgUnitPriceNote} />
                 <Bio label="Group / category" value={`${d.materialGroup ?? DASH} · ${d.category ?? DASH}`} />
               </div>
@@ -884,7 +907,7 @@ export function MaterialModal({
               />
 
               <h4 className="ent-h">Purchase Orders for this material <span className="muted">· {formatNumber(d.kpis.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
-              <PoHistoryTable rows={d.poHistory} vendor />
+              <PoHistoryTable rows={d.poHistory} vendor currency={currency} />
             </>
           )}
         </div>
@@ -986,8 +1009,11 @@ function TwoCol({ left, right }: { left: React.ReactNode; right: React.ReactNode
 }
 
 function MiniBars({
-  title, rows, money = false,
-}: { title: string; rows: { label: string; value: number | null; count: number }[]; money?: boolean }) {
+  title, rows, money = false, currency = 'USD',
+}: {
+  title: string; rows: { label: string; value: number | null; count: number }[];
+  money?: boolean; currency?: 'USD' | 'IDR';
+}) {
   const max = Math.max(...rows.map((r) => r.value ?? 0), 1);
   return (
     <div className="ent-mini">
@@ -999,7 +1025,7 @@ function MiniBars({
           <span className="ent-bar-track">
             <span className="ent-bar" style={{ width: `${((r2.value ?? 0) / max) * 100}%` }} />
           </span>
-          <span className="ent-bar-val">{money ? formatMoney(r2.value, 'USD') : formatNumber(r2.value, 2)}</span>
+          <span className="ent-bar-val">{money ? formatMoney(r2.value, currency) : formatNumber(r2.value, 2)}</span>
         </div>
       ))}
     </div>
@@ -1031,7 +1057,9 @@ function SimpleTable({ prefKey, head, rows, sortValues, right }: {
   return <ToolTable prefKey={prefKey} columns={columns} rows={data} maxHeight="300px" className="data" />;
 }
 
-function PoHistoryTable({ rows, vendor = false }: { rows: Record<string, any>[]; vendor?: boolean }) {
+function PoHistoryTable({ rows, vendor = false, currency = 'USD' }: {
+  rows: Record<string, any>[]; vendor?: boolean; currency?: 'USD' | 'IDR';
+}) {
   const columns: ToolTableColumn<Record<string, any>>[] = [
     { key: 'poNo', label: 'PO', render: (r) => r.poNo },
     { key: 'poItem', label: 'Item', right: true, render: (r) => r.poItem },
@@ -1046,7 +1074,9 @@ function PoHistoryTable({ rows, vendor = false }: { rows: Record<string, any>[];
     { key: 'priceUnit', label: 'Price unit', right: true, render: (r) => r.priceUnit ?? DASH },
     { key: 'currencyCode', label: 'Ccy', render: (r) => r.currencyCode },
     { key: 'netOrderValue', label: 'Value', right: true, render: (r) => formatMoney(r.netOrderValue) },
-    { key: 'netOrderValueUsd', label: 'Value USD', right: true, render: (r) => formatMoney(r.netOrderValueUsd, 'USD') },
+    // The document-currency column beside this one never converts; this one
+    // follows the toggle.
+    { key: 'netOrderValueUsd', label: `Value ${currency}`, right: true, render: (r) => formatCurrency(r.netOrderValueUsd, r.netOrderValueIdr, currency) },
     {
       key: 'status', label: 'Status',
       render: (r) => <span className={'bs ' + (STATUS_PILL[String(r.status)] ?? 'sl')}>{r.status}</span>,

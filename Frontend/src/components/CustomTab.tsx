@@ -35,7 +35,11 @@ interface ChartSpec extends KpiSpec {
 
 interface Saved { kpis: KpiSpec[]; charts: ChartSpec[] }
 
-export function CustomTab({ onDrill }: { onDrill: (t: string, l: string) => void }) {
+export function CustomTab({ onDrill, currency = 'USD' }: {
+  onDrill: (t: string, l: string) => void;
+  /** Topbar display currency, for measures that do not name one. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [vocab, setVocab] = useState<Vocab | null>(null);
   const [saved, setSaved] = useState<Saved>({ kpis: [], charts: [] });
   const [msg, setMsg] = useState<string | null>(null);
@@ -77,7 +81,7 @@ export function CustomTab({ onDrill }: { onDrill: (t: string, l: string) => void
           <h2>My KPIs</h2>
           <div className="kpi-grid">
             {saved.kpis.map((k, i) => (
-              <CustomKpiCard key={`${k.title}-${i}`} spec={k} onDrill={onDrill}
+              <CustomKpiCard key={`${k.title}-${i}`} spec={k} onDrill={onDrill} currency={currency}
                 onRemove={() => void persist({ ...saved, kpis: saved.kpis.filter((_, j) => j !== i) })} />
             ))}
           </div>
@@ -85,7 +89,7 @@ export function CustomTab({ onDrill }: { onDrill: (t: string, l: string) => void
       )}
 
       {saved.charts.map((c, i) => (
-        <CustomChartPanel key={`${c.title}-${i}`} spec={c} onDrill={onDrill}
+        <CustomChartPanel key={`${c.title}-${i}`} spec={c} onDrill={onDrill} currency={currency}
           onRemove={() => void persist({ ...saved, charts: saved.charts.filter((_, j) => j !== i) })} />
       ))}
 
@@ -226,8 +230,11 @@ function Builder({
 // ────────────────────────────────────────────────────────────── saved cards
 
 export function CustomKpiCard({
-  spec, onDrill, onRemove,
-}: { spec: KpiSpec; onDrill: (t: string, l: string) => void; onRemove: () => void }) {
+  spec, onDrill, onRemove, currency = 'USD',
+}: {
+  spec: KpiSpec; onDrill: (t: string, l: string) => void; onRemove: () => void;
+  currency?: 'USD' | 'IDR';
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState(false);
 
@@ -235,14 +242,21 @@ export function CustomKpiCard({
     api.post<Record<string, any>>('/api/v1/custom/kpi', spec).then(setD).catch(() => setErr(true));
   }, [spec]);
 
-  const isMoney = spec.measure?.includes('usd') || spec.measure?.includes('value');
+  // The measure names its own currency (net_order_value_idr / _usd), so that
+  // wins; the toggle only decides for a measure that does not say, such as a
+  // document-currency column. This used to label EVERY money measure 'USD',
+  // which mislabelled an IDR measure by a factor of ~16,000.
+  const measureCcy: 'USD' | 'IDR' | null =
+    spec.measure?.includes('_idr') ? 'IDR' : spec.measure?.includes('_usd') ? 'USD' : null;
+  const isMoney = measureCcy !== null || (spec.measure?.includes('value') ?? false);
+  const moneyCcy = measureCcy ?? currency;
 
   return (
     <div className="kpi" data-sev="neutral" style={{ position: 'relative' }}>
       <button className="cu-x" title="Remove this card" onClick={onRemove}>×</button>
       <div className="v">
         {err ? DASH : !d ? '…' : d.value === null ? DASH
-          : isMoney ? formatMoney(Number(d.value), 'USD') : formatNumber(Number(d.value), 2)}
+          : isMoney ? formatMoney(Number(d.value), moneyCcy) : formatNumber(Number(d.value), 2)}
       </div>
       <div className="l">{spec.title}</div>
       <div className="s">
@@ -256,8 +270,11 @@ export function CustomKpiCard({
 }
 
 export function CustomChartPanel({
-  spec, onDrill, onRemove,
-}: { spec: ChartSpec; onDrill: (t: string, l: string) => void; onRemove: () => void }) {
+  spec, onDrill, onRemove, currency = 'USD',
+}: {
+  spec: ChartSpec; onDrill: (t: string, l: string) => void; onRemove: () => void;
+  currency?: 'USD' | 'IDR';
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -267,7 +284,14 @@ export function CustomChartPanel({
       .catch((e: Error) => setErr(e.message));
   }, [spec]);
 
-  const isMoney = spec.measure?.includes('usd') || spec.measure?.includes('value');
+  // The measure names its own currency (net_order_value_idr / _usd), so that
+  // wins; the toggle only decides for a measure that does not say, such as a
+  // document-currency column. This used to label EVERY money measure 'USD',
+  // which mislabelled an IDR measure by a factor of ~16,000.
+  const measureCcy: 'USD' | 'IDR' | null =
+    spec.measure?.includes('_idr') ? 'IDR' : spec.measure?.includes('_usd') ? 'USD' : null;
+  const isMoney = measureCcy !== null || (spec.measure?.includes('value') ?? false);
+  const moneyCcy = measureCcy ?? currency;
   const max = Math.max(...(d?.points ?? []).map((p2: any) => p2.value ?? 0), 1);
 
   return (
@@ -289,7 +313,7 @@ export function CustomChartPanel({
             />
           </span>
           <span className="ent-bar-val">
-            {p2.value === null ? DASH : isMoney ? formatMoney(Number(p2.value), 'USD') : formatNumber(Number(p2.value), 2)}
+            {p2.value === null ? DASH : isMoney ? formatMoney(Number(p2.value), moneyCcy) : formatNumber(Number(p2.value), 2)}
           </span>
         </div>
       ))}

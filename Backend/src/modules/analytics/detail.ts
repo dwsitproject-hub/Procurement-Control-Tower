@@ -533,13 +533,7 @@ function buildDetailWhere(
     params.push(filters.year);
     where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY') = ANY($${params.length})`);
   }
-  for (const [key, col] of [['prDocType', 'd.pr_doc_type'], ['poDocType', 'd.po_doc_type']] as const) {
-    const vals = filters[key];
-    if (vals && vals.length > 0 && omit !== key) {
-      params.push(vals);
-      where.push(`${col} = ANY($${params.length})`);
-    }
-  }
+  // prDocType / poDocType are FACETS (above), which applies them.
 
   // Toggles are NOT omitted for any facet: they narrow the population the
   // reader is looking at rather than one dimension of it, so a facet count

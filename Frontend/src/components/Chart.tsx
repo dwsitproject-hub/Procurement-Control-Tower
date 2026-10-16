@@ -22,7 +22,36 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 // v1's MC2 material-category palette + the six PO-approval bands - any
 // single-series bar chart whose bucket labels match gets per-bar colours.
+// Keyed on the SPEND category, which is what every category axis in the
+// product now shows. The sixteen values below are core.dim_spend_category's,
+// plus the two placeholders the transform assigns; anything the mapping file
+// adds later simply falls through to the rotating palette, which is why a
+// missing key costs nothing. v1's material-category names are kept at the
+// bottom because a saved custom chart can still group by material_category.
 export const CATEGORY_COLORS: Record<string, string> = {
+  // ── spend categories ──
+  'MRO GENERAL': '#2E75B6',
+  'MRO SPECIFIC': '#0D9488',
+  'CHEMICAL REFINERY': '#ED7D31',
+  // Carved out of Chemical by the business, so deliberately NOT its shade.
+  'BLEACHING EARTH': '#B45309',
+  'SODIUM METHYLATE': '#A16207',
+  PACKAGING: '#DB2777',
+  'FUEL & ENERGY': '#F59E0B',
+  FUEL: '#FBBF24',
+  COAL: '#374151',
+  METHANOL: '#9333EA',
+  FERTILIZER: '#4CAF50',
+  HEVE: '#1F3864',
+  'OFFICE IT': '#38BDF8',
+  'CAPEX OPS': '#C0392B',
+  'CAPEX PROJ': '#E11D48',
+  SERVICES: '#7C3AED',
+  UNIT: '#0EA5E9',
+  // Deliberately visible rather than folded into a business category.
+  '(no material code)': '#64748B',
+  '(unmapped)': '#94a3b8',
+  // ── v1's material categories, for custom charts that still group by them ──
   Service: '#7C3AED',
   'Spare Parts-General': '#2E75B6',
   'Spare Parts-Factory': '#0D9488',

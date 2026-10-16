@@ -1737,14 +1737,22 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM ${PRI} WHERE dataset_version_id = $1 AND status IN ${OPEN}
            GROUP BY 1,2 ORDER BY 1`,
   },
+  // Spend category, like every other category axis in the product (16 Oct
+  // 2026). On the PR grain that means the requisition's OWN material — an
+  // unapproved PR has no order to inherit a category from — which is why this
+  // pairs the derived expression with ownSpendCategory rather than
+  // spendCategory. See the items_by_category note below.
   {
     chartId: 'unapproved_by_category', seriesKey: 'items', seriesLabel: 'Unapproved PR items', unit: 'count',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    filterAlias: 'pri.',
+    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
+                 ${PR_SPEND_CAT} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('matCat', min(material_category),'status','Unapproved PR')) AS drill
-            FROM ${PRI} WHERE dataset_version_id = $1 AND status = 'Unapproved PR'
+                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
+                                      'status','Unapproved PR')) AS drill
+            FROM ${PRI} pri
+           WHERE pri.dataset_version_id = $1 AND pri.status = 'Unapproved PR'
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   {
@@ -1883,14 +1891,15 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'sourcing_by_category', seriesKey: 'days', seriesLabel: 'Median sourcing (days)', unit: 'days',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY sourcing_days)::numeric AS value,
                  count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,
                                       'measureNotNull','sourcing')) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND sourcing_days IS NOT NULL AND NOT is_sto
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   {
@@ -1913,22 +1922,24 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'po_value_by_category', seriesKey: 'value', seriesLabel: 'Net order value (USD)', unit: 'usd',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
   },
   {
     chartId: 'po_value_by_category', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
   },
   {
@@ -1985,13 +1996,14 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'delivery_by_category', seriesKey: 'days', seriesLabel: 'Median delivery (days)', unit: 'days',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY delivery_days)::numeric AS value,
                  count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'hasReceipt',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'hasReceipt',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND delivery_days IS NOT NULL
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   {
@@ -2032,22 +2044,31 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1,2 ORDER BY 1`,
   },
   /*
-   * The three items_by_category series group by SPEND category, not by the
-   * material-group-range category they used to.
+   * EVERY category axis in the product groups by SPEND category, not by the
+   * material-group-range category they used to (16 Oct 2026, extending the
+   * 15 Sep change that did it for this page alone).
    *
-   * Asked for on 15 Sep 2026 so the Material Group page reads in the same
-   * categories as the Executive Summary's "Where the value is". The two
-   * dimensions genuinely differ: material_category is derived from material
-   * group NUMBER RANGES in code, while spend category comes from the business
-   * mapping file (material code, code prefix, then material group) with the
-   * CAPEX OPS/PROJ split by plant. A page that showed "Chemical" beside an
-   * Executive Summary showing "CHEMICAL REFINERY" invited the question of
-   * which one was right.
+   * The two dimensions genuinely differ: material_category is derived from
+   * material group NUMBER RANGES in code, while spend category comes from the
+   * business mapping file (material code, code prefix, then material group)
+   * with the CAPEX OPS/PROJ split by plant. A page that showed "Chemical"
+   * beside an Executive Summary showing "CHEMICAL REFINERY" invited the
+   * question of which one was right, and that question is now gone from the
+   * whole product rather than from one page.
    *
-   * The PR grain has no spend_category column, so it is derived inline from
-   * the shared generator — the same expression the transform uses to fill
-   * fact_po_line.spend_category, and the same one ownSpendCategory filters
-   * with, which is what keeps the bars and their drills in agreement.
+   * material_category is NOT dropped. It still populates, packages/rules still
+   * computes it, the golden fixtures that assert v1's values still have a
+   * column to assert against, and a saved custom chart can still group by it.
+   * What changed is which one the pages SHOW.
+   *
+   * Two grains, two expressions, one rule:
+   *   - PO lines read the stored fact_po_line.spend_category column (020).
+   *   - PR items derive it inline from the shared generator — the same
+   *     expression the transform uses to fill that column, and the same one
+   *     ownSpendCategory filters with, which is what keeps a bar and its drill
+   *     in agreement. A requisition with no order has no order to inherit a
+   *     category from, so its own material decides; that is the difference
+   *     between ownSpendCategory and spendCategory.
    */
   /*
    * status_mix and po_value_by_month, moved out of mart.ts on 16 Sep 2026.
@@ -2172,47 +2193,50 @@ export const PARITY_CHARTS: ChartSpec[] = [
              AND requisition_date IS NOT NULL AND aging_days > 150
            GROUP BY 1, 2 ORDER BY 1`,
   },
+  // ── "Item Category by Amount Spend" (Material Group page) ──
+  //
+  // Was "Items by Spend Category": PR-item COUNTS, with the valuation riding
+  // along as a label annotation. Renamed and re-measured on 16 Oct 2026 — the
+  // bars are now committed order value, so this is the same measure, the same
+  // grain and the same vocabulary as the Executive Summary's "Where the value
+  // is", and the two pages tie out instead of inviting the question of which
+  // one is right.
+  //
+  // That moves it from the PR grain to the PO grain, which is the point: the
+  // amount a buyer means by "spend" is what was ORDERED, not what was asked
+  // for. Its drill therefore opens PO lines. The chartId still says "items"
+  // because saved tab layouts and the mart rows are keyed on it; the title in
+  // charts.ts is what the page shows.
+  //
+  // BOTH twins order by the IDR total rather than by their own measure. The
+  // axis takes a bucket's position from the first series that mentions it, so
+  // ordering each twin by its own sum would reshuffle the bars as the display
+  // toggle moves — and the USD sum is NULL wherever a line has no FX rate,
+  // which would sort real spend to the bottom. The rupiah total needs no rate
+  // and is complete.
   {
-    chartId: 'items_by_category', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
-    filterAlias: 'pri.',
-    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
-                 ${PR_SPEND_CAT} AS bucket_label,
-                 count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
-                                      'notDeleted',true)) AS drill
-            FROM ${PRI} pri
-           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
-           GROUP BY 1,2 ORDER BY 3 DESC`,
+    chartId: 'items_by_category', seriesKey: 'value', seriesLabel: 'Amount spent (USD)', unit: 'usd',
+    sql: `SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND spend_category IS NOT NULL
+           GROUP BY 1,2 ORDER BY sum(net_order_value_idr) DESC NULLS LAST`,
   },
-  // Annotation series (label_*): not drawn as bars - the per-category PR
-  // valuation rides in the bar labels and tooltips, in both currencies so the
-  // display toggle picks the right one (user ask 5 Aug 2026).
   {
-    chartId: 'items_by_category', seriesKey: 'label_amount',
-    filterAlias: 'pri.', seriesLabel: 'Value (USD)', unit: 'usd',
-    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
-                 ${PR_SPEND_CAT} AS bucket_label,
-                 sum(pri.total_value_usd)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
-                                      'notDeleted',true)) AS drill
-            FROM ${PRI} pri
-           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
-           GROUP BY 1,2 ORDER BY count(*) DESC`,
-  },
-  {
-    chartId: 'items_by_category', seriesKey: 'label_amount_idr',
-    filterAlias: 'pri.', seriesLabel: 'Value (IDR)', unit: 'idr',
-    sql: `SELECT ${PR_SPEND_CAT} AS bucket_key,
-                 ${PR_SPEND_CAT} AS bucket_label,
-                 sum(pri.total_value_idr)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_item','filters',
-                   jsonb_build_object('ownSpendCategory', min(${PR_SPEND_CAT}),
-                                      'notDeleted',true)) AS drill
-            FROM ${PRI} pri
-           WHERE pri.dataset_version_id = $1 AND NOT pri.is_deleted
-           GROUP BY 1,2 ORDER BY count(*) DESC`,
+    chartId: 'items_by_category', seriesKey: 'value_idr', seriesLabel: 'Amount spent (IDR)', unit: 'idr',
+    sql: `SELECT spend_category AS bucket_key, spend_category AS bucket_label,
+                 sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
+                 jsonb_build_object('grain','po_line','filters',
+                   jsonb_build_object('spendCategory', min(spend_category),
+                                      'notSto',true,'notDeleted',true)) AS drill
+            FROM ${POL}
+           WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+             AND spend_category IS NOT NULL
+           GROUP BY 1,2 ORDER BY sum(net_order_value_idr) DESC NULLS LAST`,
   },
   {
     chartId: 'e2e_by_category', seriesKey: 'days', seriesLabel: 'Avg E2E (days)', unit: 'days',
@@ -2483,43 +2507,47 @@ export const PARITY_CHARTS: ChartSpec[] = [
   // ── v1's ch-po-catcnt: lines AND documents per material category ──
   {
     chartId: 'po_count_by_category', seriesKey: 'items', seriesLabel: 'PO line items', unit: 'count',
-    sql: `SELECT COALESCE(material_category,'(uncategorised)') AS bucket_key,
-                 COALESCE(material_category,'(uncategorised)') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   {
     chartId: 'po_count_by_category', seriesKey: 'documents', seriesLabel: 'PO count', unit: 'count',
-    sql: `SELECT COALESCE(material_category,'(uncategorised)') AS bucket_key,
-                 COALESCE(material_category,'(uncategorised)') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  count(DISTINCT po_no)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC`,
   },
   // ── v1's ch-po-matval: PO Amount by Material Category ──
   {
     chartId: 'po_amount_by_matcat', seriesKey: 'value', seriesLabel: 'Amount (USD)', unit: 'usd',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
   },
   {
     chartId: 'po_amount_by_matcat', seriesKey: 'value_idr', seriesLabel: 'Amount (IDR)', unit: 'idr',
-    sql: `SELECT COALESCE(material_category,'Other') AS bucket_key,
-                 COALESCE(material_category,'Other') AS bucket_label,
+    sql: `SELECT spend_category AS bucket_key,
+                 spend_category AS bucket_label,
                  sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
-                   jsonb_build_object('matCat', min(material_category),'notSto',true,'notDeleted',true)) AS drill
+                   jsonb_build_object('spendCategory', min(spend_category),'notSto',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
+              AND spend_category IS NOT NULL
            GROUP BY 1,2 ORDER BY 3 DESC NULLS LAST`,
   },
   // ── v1's ch-po-pgrp: PR Status by Purchasing Group. Outstanding counts PR

@@ -65,12 +65,20 @@ export interface VendorRow {
   poCount: number;
   lineCount: number;
   spendUsd: number | null;
+  /**
+   * The same spend in rupiah. Carried BESIDE the USD figure rather than instead
+   * of it, because the display toggle picks one and the two are not
+   * interchangeable: net_order_value_idr is populated for every line, so this
+   * is complete even where spendUsd is null for want of an FX rate.
+   */
+  spendIdr: number | null;
   spendConverted: boolean;
   materials: number;
   areas: number;
   otdPct: number | null;
   avgDaysLate: number | null;
   openExposureUsd: number | null;
+  openExposureIdr: number | null;
 }
 
 /**
@@ -87,6 +95,7 @@ const VENDOR_SORT: Record<string, string> = {
   poCount: 'count(DISTINCT pol.po_no)',
   lineCount: 'count(*)',
   spendUsd: 'sum(pol.net_order_value_usd)',
+  spendIdr: 'sum(pol.net_order_value_idr)',
   materials: 'count(DISTINCT pol.material_code)',
   areas: 'count(DISTINCT pol.plant)',
   otdPct: `(count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL
@@ -94,6 +103,7 @@ const VENDOR_SORT: Record<string, string> = {
            / NULLIF(count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL), 0)`,
   avgDaysLate: 'avg(pol.receipt_date - pol.delivery_date) FILTER (WHERE pol.receipt_date > pol.delivery_date)',
   openExposureUsd: 'sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0)',
+  openExposureIdr: 'sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0)',
 };
 
 export type SortSpec = { key: string; dir: 'asc' | 'desc' } | null;
@@ -132,8 +142,10 @@ export async function vendorList(
   params.push(limit);
   const rows = await query<{
     vendor_code: string; vendor_name: string; po_count: number; line_count: number;
-    spend_usd: number | null; unconverted: number; materials: number; areas: number;
-    otd_num: number; otd_den: number; avg_late: number | null; open_usd: number | null;
+    spend_usd: number | null; spend_idr: number | null; unconverted: number;
+    materials: number; areas: number;
+    otd_num: number; otd_den: number; avg_late: number | null;
+    open_usd: number | null; open_idr: number | null;
     po_email: string | null; in_coupa: boolean;
   }>(
     `SELECT pol.vendor_code,
@@ -141,6 +153,7 @@ export async function vendorList(
             count(DISTINCT pol.po_no)::int AS po_count,
             count(*)::int AS line_count,
             sum(pol.net_order_value_usd) AS spend_usd,
+            sum(pol.net_order_value_idr) AS spend_idr,
             count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unconverted,
             count(DISTINCT pol.material_code)::int AS materials,
             count(DISTINCT pol.plant)::int AS areas,
@@ -150,6 +163,7 @@ export async function vendorList(
             avg(pol.receipt_date - pol.delivery_date)
               FILTER (WHERE pol.receipt_date > pol.delivery_date) AS avg_late,
             sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_idr,
             -- Supplier master is current state, not a versioned fact, so it is
             -- read live and joined per vendor. A LATERAL keeps it one row even
             -- if the master ever holds duplicates of a number.
@@ -180,12 +194,16 @@ export async function vendorList(
       // Strict rule: if any line failed to convert, the USD total is incomplete
       // and must not present as a full figure.
       spendUsd: r.unconverted > 0 ? null : r.spend_usd,
+      // No equivalent strictness in rupiah: every line has an IDR value, so
+      // there is no incomplete-total case to guard against.
+      spendIdr: r.spend_idr,
       spendConverted: r.unconverted === 0,
       materials: r.materials,
       areas: r.areas,
       otdPct: r.otd_den > 0 ? Math.round((r.otd_num / r.otd_den) * 1000) / 10 : null,
       avgDaysLate: r.avg_late === null ? null : Math.round(Number(r.avg_late) * 10) / 10,
       openExposureUsd: r.open_usd,
+      openExposureIdr: r.open_idr,
     })),
   };
 }
@@ -203,15 +221,18 @@ export async function vendorDetail(
 
   const bio = await queryOne<{
     vendor_name: string; po_count: number; line_count: number; spend_usd: number | null;
+    spend_idr: number | null;
     unconverted: number; materials: number; areas: number; first_seen: string; last_seen: string;
     otd_num: number; otd_den: number; avg_late: number | null;
-    open_usd: number | null; grir_usd: number | null; rev_101: number; rev_reversals: number;
+    open_usd: number | null; open_idr: number | null;
+    grir_usd: number | null; grir_idr: number | null; rev_101: number; rev_reversals: number;
     otdr_num: number; otdr_den: number;
   }>(
     `SELECT max(pol.vendor_name) AS vendor_name,
             count(DISTINCT pol.po_no)::int AS po_count,
             count(*)::int AS line_count,
             sum(pol.net_order_value_usd) AS spend_usd,
+            sum(pol.net_order_value_idr) AS spend_idr,
             count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unconverted,
             count(DISTINCT pol.material_code)::int AS materials,
             count(DISTINCT pol.plant)::int AS areas,
@@ -223,8 +244,11 @@ export async function vendorDetail(
             avg(pol.receipt_date - pol.delivery_date)
               FILTER (WHERE pol.receipt_date > pol.delivery_date) AS avg_late,
             sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_idr,
             sum(pol.still_invoice_val_usd)
               FILTER (WHERE COALESCE(pol.still_deliver_qty,0) = 0 AND COALESCE(pol.still_invoice_val,0) > 0) AS grir_usd,
+            sum(pol.still_invoice_val_idr)
+              FILTER (WHERE COALESCE(pol.still_deliver_qty,0) = 0 AND COALESCE(pol.still_invoice_val,0) > 0) AS grir_idr,
             sum(pol.receipt_count)::int AS rev_101,
             sum(pol.reversal_count)::int AS rev_reversals,
             count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.need_by_date IS NOT NULL
@@ -247,17 +271,18 @@ export async function vendorDetail(
     params,
   );
 
-  const spendByMonth = await query<{ mk: string; usd: number | null; n: number }>(
-    `SELECT to_char(pol.document_date,'YYYY-MM') AS mk, sum(pol.net_order_value_usd) AS usd, count(*)::int AS n
+  const spendByMonth = await query<{ mk: string; usd: number | null; idr: number | null; n: number }>(
+    `SELECT to_char(pol.document_date,'YYYY-MM') AS mk, sum(pol.net_order_value_usd) AS usd,
+            sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
       GROUP BY 1 ORDER BY 1`,
     params,
   );
 
-  const byArea = await query<{ plant: string; plant_name: string; usd: number | null; n: number }>(
+  const byArea = await query<{ plant: string; plant_name: string; usd: number | null; idr: number | null; n: number }>(
     `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name,
-            sum(pol.net_order_value_usd) AS usd, count(*)::int AS n
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
@@ -268,11 +293,12 @@ export async function vendorDetail(
   // Materials supplied (v1's v3-mt)
   const materials = await query<{
     material_code: string | null; descr: string; lines: number; qty: number | null;
-    usd: number | null; last_po: string;
+    usd: number | null; idr: number | null; last_po: string;
   }>(
     `SELECT pol.material_code, left(max(pol.short_text), 60) AS descr,
             count(*)::int AS lines, sum(pol.order_qty) AS qty,
-            sum(pol.net_order_value_usd) AS usd, max(pol.document_date)::text AS last_po
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
+            max(pol.document_date)::text AS last_po
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
       GROUP BY pol.material_code ORDER BY usd DESC NULLS LAST LIMIT 100`,
@@ -285,7 +311,8 @@ export async function vendorDetail(
             left(pol.short_text, 60) AS "shortText", pol.order_qty AS "orderQty",
             pol.order_unit AS "orderUnit", pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
-            pol.net_order_value_usd AS "netOrderValueUsd", pol.status, pol.receipt_date AS "receiptDate",
+            pol.net_order_value_usd AS "netOrderValueUsd",
+            pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
             pol.gr_completion_pct AS "grCompletionPct",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
@@ -391,6 +418,7 @@ export async function vendorDetail(
       poCount: bio.po_count,
       lineCount: bio.line_count,
       spendUsd: totalUnconverted > 0 ? null : bio.spend_usd,
+      spendIdr: bio.spend_idr,
       spendByCurrency: byCcy.map((c) => ({
         currency: c.ccy,
         amount: c.amount,
@@ -403,7 +431,9 @@ export async function vendorDetail(
       otdCaveat: 'On-time = receipt within 7 days of the PO delivery date (EINDT). EINDT equals the document date on 37.4% of all lines, so treat as indicative.',
       avgDaysLate: bio.avg_late === null ? null : Math.round(Number(bio.avg_late) * 10) / 10,
       openExposureUsd: bio.open_usd,
+      openExposureIdr: bio.open_idr,
       deliveredNotInvoicedUsd: bio.grir_usd,
+      deliveredNotInvoicedIdr: bio.grir_idr,
       reversalRatePct:
         bio.rev_101 > 0 ? Math.round((bio.rev_reversals / bio.rev_101) * 1000) / 10 : null,
       // v1's v3x-otdr. Computed against the requested date (EBAN-LFDAT) the
@@ -416,14 +446,15 @@ export async function vendorDetail(
           ? `${bio.otdr_den} lines carry both a receipt and a requested date.`
           : 'Requested delivery date not present in this export (V-M01 / D4).',
     },
-    spendByMonth: spendByMonth.map((m) => ({ monthKey: m.mk, usd: m.usd, lines: m.n })),
-    byArea: byArea.map((a) => ({ plant: a.plant, plantName: a.plant_name, usd: a.usd, lines: a.n })),
+    spendByMonth: spendByMonth.map((m) => ({ monthKey: m.mk, usd: m.usd, idr: m.idr, lines: m.n })),
+    byArea: byArea.map((a) => ({ plant: a.plant, plantName: a.plant_name, usd: a.usd, idr: a.idr, lines: a.n })),
     materials: materials.map((m) => ({
       materialCode: m.material_code,
       description: m.descr,
       lines: m.lines,
       qty: m.qty,
       usd: m.usd,
+      idr: m.idr,
       lastPo: m.last_po,
     })),
     poHistory: decorate(poHistory),
@@ -636,12 +667,12 @@ export async function materialDetail(
 
   const head = await queryOne<{
     descr: string; grp: string | null; cat: string | null; lines: number; vendors: number;
-    qty: number | null; usd: number | null; avg_price: number | null;
+    qty: number | null; usd: number | null; idr: number | null; avg_price: number | null;
   }>(
     `SELECT left(max(pol.short_text), 80) AS descr, max(pol.material_group) AS grp,
             max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors, sum(pol.order_qty) AS qty,
-            sum(pol.net_order_value_usd) AS usd,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
             avg(pol.unit_price) FILTER (WHERE NOT pol.is_sto AND NOT pol.is_token_price AND pol.unit_price > 0) AS avg_price
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.material_code = ${mp}`,
@@ -728,7 +759,8 @@ export async function materialDetail(
             pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
             pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
-            pol.net_order_value_usd AS "netOrderValueUsd", pol.status, pol.receipt_date AS "receiptDate",
+            pol.net_order_value_usd AS "netOrderValueUsd",
+            pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.material_code = ${mp}
@@ -746,6 +778,7 @@ export async function materialDetail(
       vendorCount: head.vendors,
       totalQty: head.qty,
       spendUsd: head.usd,
+      spendIdr: head.idr,
       avgUnitPrice: head.avg_price === null ? null : Math.round(Number(head.avg_price) * 100) / 100,
       avgUnitPriceNote: 'IDR lines only, STO and token prices excluded',
       soleSource: head.vendors === 1,
@@ -1059,7 +1092,7 @@ export async function topMaterialsSpend(
   versionId: number,
   scope: readonly ScopeEntry[],
   limit = 10,
-): Promise<{ rows: TopMaterialRow[]; totalUsd: number | null }> {
+): Promise<{ rows: TopMaterialRow[]; totalUsd: number | null; totalIdr: number | null }> {
   const { where, params } = scoped(versionId, scope, 'pol');
   const rows = await query<TopMaterialRow>(
     `SELECT pol.material_code AS "materialCode",
@@ -1076,11 +1109,12 @@ export async function topMaterialsSpend(
       LIMIT ${Math.min(Math.max(limit, 1), 50)}`,
     params,
   );
-  const tot = await queryOne<{ usd: number | null }>(
-    `SELECT sum(pol.net_order_value_usd)::float AS usd
+  const tot = await queryOne<{ usd: number | null; idr: number | null }>(
+    `SELECT sum(pol.net_order_value_usd)::float AS usd,
+            sum(pol.net_order_value_idr)::float AS idr
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted`,
     params,
   );
-  return { rows, totalUsd: tot?.usd ?? null };
+  return { rows, totalUsd: tot?.usd ?? null, totalIdr: tot?.idr ?? null };
 }

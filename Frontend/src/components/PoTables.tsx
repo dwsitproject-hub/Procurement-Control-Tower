@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { formatMoney, formatNumber } from '../lib/format';
+import { formatCurrency, formatMoney, formatNumber } from '../lib/format';
 /**
  * The Vendor/Material 360 popups are loaded on demand. They live in
  * EntityViews alongside the two full pages, so importing them statically here
@@ -18,17 +18,22 @@ const MaterialModal = lazy(() => import('./EntityViews').then((m) => ({ default:
 
 interface VendorRow {
   vendorCode: string; vendorName: string | null; poCount: number; lineCount: number;
-  spendUsd: number | null; materials: number; areas: number;
+  spendUsd: number | null; spendIdr: number | null; materials: number; areas: number;
 }
 interface MaterialRow {
   materialCode: string; description: string | null; lines: number; qty: number | null;
   spendUsd: number | null; spendIdr: number | null; lastPo: string | null;
 }
 
-export function PoTables({ onDrill }: { onDrill: (token: string, label: string) => void }) {
+export function PoTables({ onDrill, currency = 'USD' }: {
+  onDrill: (token: string, label: string) => void;
+  /** Topbar display currency. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [vendors, setVendors] = useState<VendorRow[] | null>(null);
   const [materials, setMaterials] = useState<MaterialRow[] | null>(null);
   const [materialsTotal, setMaterialsTotal] = useState<number | null>(null);
+  const [materialsTotalIdr, setMaterialsTotalIdr] = useState<number | null>(null);
   const [openVendor, setOpenVendor] = useState<string | null>(null);
   const [openMaterial, setOpenMaterial] = useState<string | null>(null);
 
@@ -37,14 +42,17 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
     api.get<{ rows: VendorRow[] }>('/api/v1/entity/top-vendors-spend?limit=10')
       .then((d) => { if (!cancelled) setVendors(d.rows); })
       .catch(() => { if (!cancelled) setVendors([]); });
-    api.get<{ rows: MaterialRow[]; totalUsd: number | null }>('/api/v1/entity/top-materials-spend?limit=10')
-      .then((d) => { if (!cancelled) { setMaterials(d.rows); setMaterialsTotal(d.totalUsd); } })
+    api.get<{ rows: MaterialRow[]; totalUsd: number | null; totalIdr: number | null }>('/api/v1/entity/top-materials-spend?limit=10')
+      .then((d) => {
+        if (!cancelled) { setMaterials(d.rows); setMaterialsTotal(d.totalUsd); setMaterialsTotalIdr(d.totalIdr); }
+      })
       .catch(() => { if (!cancelled) setMaterials([]); });
     return () => { cancelled = true; };
   }, []);
 
-  const vendorSum = (vendors ?? []).reduce((a, v) => a + (v.spendUsd ?? 0), 0);
-  const materialSum = (materials ?? []).reduce((a, m) => a + (m.spendUsd ?? 0), 0);
+  const pick = (usd: number | null, idr: number | null) => (currency === 'IDR' ? idr : usd) ?? 0;
+  const vendorSum = (vendors ?? []).reduce((a, v) => a + pick(v.spendUsd, v.spendIdr), 0);
+  const materialSum = (materials ?? []).reduce((a, m) => a + pick(m.spendUsd, m.spendIdr), 0);
 
   return (
     <>
@@ -59,7 +67,7 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
                   <th className="num"># POs</th>
                   <th className="num">Lines</th>
                   <th className="num">Materials</th>
-                  <th className="num">Spend (USD)</th>
+                  <th className="num">Spend ({currency})</th>
                 </tr>
               </thead>
               <tbody>
@@ -77,7 +85,7 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
                     <td className="num">{formatNumber(v.poCount)}</td>
                     <td className="num">{formatNumber(v.lineCount)}</td>
                     <td className="num">{formatNumber(v.materials)}</td>
-                    <td className="num">{v.spendUsd === null ? '—' : formatMoney(v.spendUsd, 'USD')}</td>
+                    <td className="num">{formatCurrency(v.spendUsd, v.spendIdr, currency)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -85,7 +93,7 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
                 <tfoot>
                   <tr className="po-tbl-total">
                     <td colSpan={4}>Σ top {vendors.length} vendors</td>
-                    <td className="num">{formatMoney(vendorSum, 'USD')}</td>
+                    <td className="num">{formatMoney(vendorSum, currency)}</td>
                   </tr>
                 </tfoot>
               )}
@@ -102,7 +110,7 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
                   <th>Material</th>
                   <th>Description</th>
                   <th className="num">Lines</th>
-                  <th className="num">Spend (USD)</th>
+                  <th className="num">Spend ({currency})</th>
                   <th>Last PO</th>
                 </tr>
               </thead>
@@ -120,7 +128,7 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
                     <td>{m.materialCode}</td>
                     <td>{m.description ?? '—'}</td>
                     <td className="num">{formatNumber(m.lines)}</td>
-                    <td className="num">{m.spendUsd === null ? '—' : formatMoney(m.spendUsd, 'USD')}</td>
+                    <td className="num">{formatCurrency(m.spendUsd, m.spendIdr, currency)}</td>
                     <td>{m.lastPo ?? '—'}</td>
                   </tr>
                 ))}
@@ -129,8 +137,11 @@ export function PoTables({ onDrill }: { onDrill: (token: string, label: string) 
                 <tfoot>
                   <tr className="po-tbl-total">
                     <td colSpan={3}>Σ top {materials.length} materials</td>
-                    <td className="num">{formatMoney(materialSum, 'USD')}</td>
-                    <td className="muted">{materialsTotal !== null ? `of ${formatMoney(materialsTotal, 'USD')} total` : ''}</td>
+                    <td className="num">{formatMoney(materialSum, currency)}</td>
+                    <td className="muted">{(() => {
+                      const t = currency === 'IDR' ? materialsTotalIdr : materialsTotal;
+                      return t !== null ? `of ${formatMoney(t, currency)} total` : '';
+                    })()}</td>
                   </tr>
                 </tfoot>
               )}

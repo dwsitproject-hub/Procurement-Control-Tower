@@ -803,14 +803,22 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // v1's mgx drill: each category's counts open as rows (G3.4).
     const fp = sessionFingerprint(ctx.sid);
     // The mgt summary counts PR items (v1's grain), so its drills do too.
+    //
+    // ownSpendCategory, not matCat: the summary has grouped by SPEND category
+    // since 15 Sep 2026 but these tokens still filtered material_category, so
+    // every row opened an empty drill — the bucket label ('CHEMICAL REFINERY')
+    // simply does not exist in that column. "own" because the table derives the
+    // category from the requisition's own material (PRI_SPEND_CAT in
+    // entity.ts); reaching through linked orders instead would drop every
+    // requisition that has no order yet, which on this page is the point.
     const categories = (out['categories'] as Record<string, unknown>[]).map((c) => ({
       ...c,
       drillAll: issueDrillToken(
-        { grain: 'pr_item', filters: { notDeleted: true, matCat: c['category'] }, label: `${c['category']} — all PR items` } as DrillPredicate,
+        { grain: 'pr_item', filters: { notDeleted: true, ownSpendCategory: c['category'] }, label: `${c['category']} — all PR items` } as DrillPredicate,
         v.id, ctx.scope, fp,
       ),
       drillOpen: issueDrillToken(
-        { grain: 'pr_item', filters: { notDeleted: true, matCat: c['category'], scopeOpen: true }, label: `${c['category']} — open items` } as DrillPredicate,
+        { grain: 'pr_item', filters: { notDeleted: true, ownSpendCategory: c['category'], scopeOpen: true }, label: `${c['category']} — open items` } as DrillPredicate,
         v.id, ctx.scope, fp,
       ),
     }));

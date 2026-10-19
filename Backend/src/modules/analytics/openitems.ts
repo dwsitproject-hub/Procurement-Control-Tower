@@ -201,7 +201,7 @@ export interface OpenItemsSummary {
    */
   categoryFilter: {
     applied: CategorySectionFilter;
-    options: Record<keyof CategorySectionFilter, { value: string; count: number }[]>;
+    options: Record<keyof CategorySectionFilter, { value: string; count: number; label?: string }[]>;
   };
   money: MoneyCards;
   totalOpen: number;
@@ -348,16 +348,28 @@ export interface CategorySectionFilter {
   plant: string[];
   prType: string[];
   poType: string[];
+  /**
+   * The cards of "Where the backlog sits" (19 Oct 2026): an open stage's
+   * STATUS ('Unapproved PR'...) or one of the two after-delivery states
+   * ('deliveredNotInvoiced', 'invoicedNotPaid'). Empty = the open stages, as
+   * the table has always counted.
+   */
+  stage: string[];
 }
 
-const SECTION_COL: Record<keyof CategorySectionFilter, string> = {
+/** The two after-delivery cards, which are states rather than statuses. */
+const MONEY_STAGES = ['deliveredNotInvoiced', 'invoicedNotPaid'] as const;
+
+type ColumnFilter = Exclude<keyof CategorySectionFilter, 'stage'>;
+
+const SECTION_COL: Record<ColumnFilter, string> = {
   plant: 'd.plant',
   prType: 'd.pr_doc_type',
   poType: 'd.po_doc_type',
 };
 
 /** The Detail Table parameter each section filter maps to (detail.ts). */
-const SECTION_DETAIL_PARAM: Record<keyof CategorySectionFilter, string> = {
+const SECTION_DETAIL_PARAM: Record<ColumnFilter, string> = {
   plant: 'plant',
   prType: 'prDocType',
   poType: 'poDocType',
@@ -368,7 +380,7 @@ export async function openItemsSummary(
   asOfDate: string,
   scope: readonly ScopeEntry[],
   filter: GlobalFilter,
-  section: CategorySectionFilter = { plant: [], prType: [], poType: [] },
+  section: CategorySectionFilter = { plant: [], prType: [], poType: [], stage: [] },
 ): Promise<OpenItemsSummary> {
   const w = buildWhere(versionId, scope, filter);
 
@@ -419,7 +431,7 @@ export async function openItemsSummary(
   const dw = buildWhere(versionId, scope, filter);
   // The options are counted before the section's own filters are added.
   const sectionOptions = {} as OpenItemsSummary['categoryFilter']['options'];
-  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+  for (const k of Object.keys(SECTION_COL) as ColumnFilter[]) {
     sectionOptions[k] = (await query<{ value: string; n: number }>(
       `SELECT ${SECTION_COL[k]} AS value, count(*)::int AS n
          FROM core.v_detail d WHERE ${dw.sql} AND ${SECTION_COL[k]} IS NOT NULL
@@ -427,9 +439,25 @@ export async function openItemsSummary(
       dw.params,
     )).map((x) => ({ value: x.value, count: x.n }));
   }
-  const catParams = [...dw.params];
-  let catSql = dw.sql;
-  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+  // Stages: chosen cards replace the default "every open stage". The two
+  // after-delivery cards count DELIVERED lines, so the base then widens to the
+  // page's whole population and the cards themselves select the rows.
+  const stageStatuses = section.stage.filter((x) => OPEN_STAGES.some((s2) => s2.status === x));
+  const stageMoney = section.stage.filter((x) => (MONEY_STAGES as readonly string[]).includes(x));
+  const stageOn = stageStatuses.length + stageMoney.length > 0;
+  const cw = stageOn ? buildWhere(versionId, scope, filter, false) : dw;
+  const catParams = [...cw.params];
+  let catSql = cw.sql;
+  if (stageOn) {
+    const ors: string[] = [];
+    if (stageStatuses.length > 0) {
+      catParams.push(stageStatuses);
+      ors.push(`d.status = ANY($${catParams.length})`);
+    }
+    for (const m of stageMoney) ors.push(`(${MONEY_STATE_SQL[m]})`);
+    catSql += ` AND (${ors.join(' OR ')})`;
+  }
+  for (const k of Object.keys(SECTION_COL) as ColumnFilter[]) {
     if (section[k].length === 0) continue;
     catParams.push(section[k]);
     catSql += ` AND ${SECTION_COL[k]} = ANY($${catParams.length})`;
@@ -447,9 +475,14 @@ export async function openItemsSummary(
   // Carried into every click from the table, so the rows opened are the rows
   // the table counted.
   const sectionDetail: Record<string, string> = {};
-  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+  for (const k of Object.keys(SECTION_COL) as ColumnFilter[]) {
     if (section[k].length > 0) sectionDetail[SECTION_DETAIL_PARAM[k]] = section[k].join(',');
   }
+  // With stages chosen, a click opens THOSE stages' rows: the Detail Table's
+  // oiStage filter reads the same values with the same OR.
+  const stageDetail: Record<string, string> = stageOn
+    ? { oiStage: [...stageStatuses, ...stageMoney].join(',') }
+    : { status: ALL_STAGE_STATUSES };
 
   // ── after delivery: money still in flight ────────────────────────────
   //
@@ -567,9 +600,22 @@ export async function openItemsSummary(
       // with no material category is reported and left unclickable.
       detailFilter: (r['desk'] === '(none)'
         ? {}
-        : { status: ALL_STAGE_STATUSES, spendCategory: String(r['desk']), ...sectionDetail }) as Record<string, string>,
+        : { ...stageDetail, spendCategory: String(r['desk']), ...sectionDetail }) as Record<string, string>,
     })),
-    categoryFilter: { applied: section, options: sectionOptions },
+    categoryFilter: {
+      applied: section,
+      options: {
+        ...sectionOptions,
+        // The eight cards, in their order on the page, with the card's count.
+        stage: [
+          ...stages.map((s2) => ({ value: s2.detailFilter['status']!, label: s2.name, count: s2.count })),
+          { value: 'deliveredNotInvoiced', label: moneyCard('deliveredNotInvoiced').name,
+            count: moneyCard('deliveredNotInvoiced').count },
+          { value: 'invoicedNotPaid', label: moneyCard('invoicedNotPaid').name,
+            count: moneyCard('invoicedNotPaid').count },
+        ],
+      },
+    },
     money: {
       deliveredNotInvoiced: moneyCard('deliveredNotInvoiced'),
       invoicedNotPaid: moneyCard('invoicedNotPaid'),

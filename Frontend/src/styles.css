@@ -287,7 +287,11 @@ table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, tra
 .scroll-top > div { height: 1px; }
 
 /* The backlog table's own filter row on Open Items. */
-.oi-cat-filters { margin: .25rem 0 .6rem; align-items: center; }
+/* The backlog table's filters: the header bar's look, sitting inside a panel
+   (19 Oct 2026) - so no float margin and a flat border instead of a shadow. */
+.gf-bar.oi-cat-filters {
+  margin: .25rem 0 .6rem; box-shadow: none; border: 1px solid var(--border); background: var(--bg);
+}
 
 /* ── drill modal — v1's dd-modal look ── */
 .modal header h3 { font-weight: 800; }
@@ -1220,3 +1224,13 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 .dt-btn-primary:hover { filter: brightness(1.08); }
 .dt-btn-danger { color: var(--crit); }
 .dt-btn-danger:hover { border-color: var(--crit); }
+
+/* Master > Materials: Materials / Material groups sub-tabs (19 Oct 2026). */
+.ms-subtabs { margin: .2rem 0 .7rem; }
+.ms-subtabs .asn-btn[aria-selected="true"] .muted { color: rgba(255,255,255,.75); }
+
+/* Category 360 / Material 360 popups: the Plant filter, in the header bar's
+   look but flat inside the modal (19 Oct 2026). */
+.gf-bar.cat360-filters {
+  margin: 0 0 .6rem; box-shadow: none; border: 1px solid var(--border); background: var(--bg);
+}

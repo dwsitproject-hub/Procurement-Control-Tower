@@ -1215,7 +1215,9 @@ export function buildRouter(): Router {
     // The backlog table's own Plant / PR Type / PO Type filters.
     const list = (k: string): string[] => String((req.query as Record<string, unknown>)[k] ?? '')
       .split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 300);
-    const section = { plant: list('catPlant'), prType: list('catPrType'), poType: list('catPoType') };
+    const section = {
+      plant: list('catPlant'), prType: list('catPrType'), poType: list('catPoType'), stage: list('catStage'),
+    };
     try {
       res.json({
         datasetVersionId: v.id,

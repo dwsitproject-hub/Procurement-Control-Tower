@@ -29,6 +29,9 @@ interface MasterTable {
   total: number;
   totalUnfiltered: number;
   truncated: boolean;
+  /** 0-based page and page size (100) - every master table pages its rows. */
+  page?: number;
+  pageSize?: number;
   versionScoped: boolean;
   sortKey: string | null;
   sortDir: 'asc' | 'desc';
@@ -44,6 +47,8 @@ interface MasterPage {
   label: string;
   blurb: string;
   datasetVersionId: number;
+  /** Show the tables as sub-tabs, one at a time (Materials / Material groups). */
+  tabbed?: boolean;
   tables: MasterTable[];
 }
 
@@ -77,6 +82,9 @@ export function MasterTab({ section, onSection }: {
   const [actionErr, setActionErr] = useState<string | null>(null);
   /** Bumped after any write, so the page reloads with the change applied. */
   const [nonce, setNonce] = useState(0);
+  /** Page per table, by position; and the open sub-tab on a tabbed master. */
+  const [pages, setPages] = useState<number[]>([]);
+  const [tabIdx, setTabIdx] = useState(0);
 
   /**
    * Hide or revert, confirmed. Both are reversible, and the confirmation says
@@ -115,7 +123,10 @@ export function MasterTab({ section, onSection }: {
 
   // A new master starts with a clear search: carrying a vendor code into the
   // document-type list shows an empty table and looks like missing data.
-  useEffect(() => { setTerm(''); setApplied(''); setSort(null); }, [active]);
+  useEffect(() => { setTerm(''); setApplied(''); setSort(null); setTabIdx(0); }, [active]);
+  // A new search or sort starts every table from its first page: page 7 of the
+  // old order is not a place in the new one.
+  useEffect(() => { setPages([]); }, [active, applied, sort]);
 
   useEffect(() => {
     const t = setTimeout(() => setApplied(term), 250);
@@ -129,13 +140,14 @@ export function MasterTab({ section, onSection }: {
     const p = new URLSearchParams();
     if (applied.trim() !== '') p.set('q', applied.trim());
     if (sort) { p.set('sort', sort.key); p.set('dir', sort.dir); }
+    pages.forEach((n, i) => { if (n > 0) p.set(`page${i}`, String(n)); });
     const qs = p.toString() === '' ? '' : `?${p.toString()}`;
     api.get<MasterPage>(`/api/v1/master/${active}${qs}`)
       .then((d) => { if (!dead) { setPage(d); setErr(null); } })
       .catch((e: Error) => { if (!dead) setErr(e.message); })
       .finally(() => { if (!dead) setBusy(false); });
     return () => { dead = true; };
-  }, [active, applied, sort, nonce]);
+  }, [active, applied, sort, nonce, pages]);
 
   useEffect(() => load(), [load]);
 
@@ -204,7 +216,24 @@ export function MasterTab({ section, onSection }: {
         </div>
       </div>
 
-      {page?.tables.map((t) => (
+      {page?.tabbed && page.tables.length > 1 && (
+        <div className="admin-subnav ms-subtabs" role="tablist" aria-label={`${page.label} tables`}>
+          {page.tables.map((t, i) => (
+            <button
+              key={t.name}
+              type="button"
+              className="asn-btn"
+              role="tab"
+              aria-selected={tabIdx === i}
+              onClick={() => setTabIdx(i)}
+            >
+              {t.name} <span className="muted">{formatNumber(t.total)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {page?.tables.map((t, ti) => (page.tabbed && ti !== tabIdx ? null : (
         <div className="panel" key={t.name}>
           <h3 className="pr-tbl-h">
             {t.name}{' '}
@@ -243,12 +272,6 @@ export function MasterTab({ section, onSection }: {
             </span>
           </p>
 
-          {t.truncated && (
-            <p className="note">
-              <span className="bs sa">showing the first {formatNumber(t.rows.length)}</span>{' '}
-              Narrow the search to see the rest — the page does not page through a master.
-            </p>
-          )}
 
           {t.rows.length === 0 ? (
             <p className="muted" style={{ marginTop: '.5rem' }}>
@@ -341,6 +364,45 @@ export function MasterTab({ section, onSection }: {
             </div>
           )}
 
+          {/* 100 rows a page, every table (19 Oct 2026). */}
+          {t.total > (t.pageSize ?? 100) && (() => {
+            const size = t.pageSize ?? 100;
+            const cur = t.page ?? 0;
+            const last = Math.max(0, Math.ceil(t.total / size) - 1);
+            const go = (n: number) => setPages((p) => {
+              const next = [...p];
+              next[ti] = Math.min(Math.max(0, n), last);
+              return next;
+            });
+            const nums: number[] = [];
+            for (let i = 0; i <= last; i += 1) if (i === 0 || i === last || Math.abs(i - cur) <= 2) nums.push(i);
+            return (
+              <div className="dt-pager">
+                <span className="muted">
+                  {formatNumber(cur * size + 1)}–{formatNumber(Math.min((cur + 1) * size, t.total))} of {formatNumber(t.total)}
+                </span>
+                <span className="dt-pages">
+                  <button className="dt-btn" disabled={cur === 0} onClick={() => go(cur - 1)}>‹ Prev</button>
+                  {nums.map((n2, idx) => (
+                    <span key={n2}>
+                      {idx > 0 && nums[idx - 1] !== n2 - 1 && <span className="muted">…</span>}
+                      <button
+                        className="dt-btn"
+                        aria-current={n2 === cur ? 'page' : undefined}
+                        style={n2 === cur ? { borderColor: 'var(--accent)', fontWeight: 700 } : {}}
+                        onClick={() => go(n2)}
+                      >
+                        {n2 + 1}
+                      </button>
+                    </span>
+                  ))}
+                  <button className="dt-btn" disabled={cur >= last} onClick={() => go(cur + 1)}>Next ›</button>
+                  <span className="muted">page {cur + 1} of {formatNumber(last + 1)}</span>
+                </span>
+              </div>
+            );
+          })()}
+
           {/* Hidden rows, listed so they can be restored. A tombstone the
               reader cannot see is a row that is simply gone, and "reversible"
               would be a promise the page could not keep. */}
@@ -348,7 +410,10 @@ export function MasterTab({ section, onSection }: {
             <div className="me-hidden">
               <p className="me-ro-h">Hidden rows</p>
               <ul>
-                {t.marks!.filter((m) => m.state === 'hidden').map((m) => (
+                {/* One entry per row: a material hidden on both sides (orders
+                    and SAP master) carries two marks with the same key. */}
+                {t.marks!.filter((m, i, all) => m.state === 'hidden'
+                  && all.findIndex((x) => x.state === 'hidden' && sameKey(x.key, m.key)) === i).map((m) => (
                   <li key={JSON.stringify(m.key)}>
                     <code>{Object.values(m.key).join(' / ')}</code>{' '}
                     <span className="muted">hidden by {m.by}, {m.at.slice(0, 16)}</span>{' '}
@@ -362,7 +427,7 @@ export function MasterTab({ section, onSection }: {
             </div>
           )}
         </div>
-      ))}
+      )))}
 
       {actionErr && (
         <div className="panel"><p className="note"><span className="bs spdel">error</span> {actionErr}</p></div>

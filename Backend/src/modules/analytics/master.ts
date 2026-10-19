@@ -67,6 +67,11 @@ export interface MasterPageSpec {
   icon: string;
   blurb: string;
   tables: MasterTableSpec[];
+  /**
+   * Show the tables as sub-tabs, one at a time, rather than stacked
+   * (Materials, 19 Oct 2026: "Materials" and "Material groups").
+   */
+  tabbed?: boolean;
 }
 
 const C = (key: string, label: string, numeric = false, decimals?: number): MasterColumn => {
@@ -135,29 +140,11 @@ export const MASTER_PAGES: MasterPageSpec[] = [
       searchCols: ['vendor_code', 'vendor_name'],
     }],
   },
-  {
-    id: 'material-master',
-    label: 'Material Master',
-    icon: '🧾',
-    blurb: 'The SAP material master. Its category is the fallback the spend-category '
-      + 'mapping resolves to when no business rule matches.',
-    tables: [{
-      name: 'Material master',
-      relation: 'core.dim_material_master',
-      note: 'From the Mat group export. FOURTH in the category resolution order, after '
-        + 'an exact material rule, a code-prefix rule and a material-group rule — so it '
-        + 'covers what the business mapping does not name.',
-      columns: [
-        C('materialCode', 'Material'),
-        C('description', 'Description'),
-        C('category', 'Category'),
-      ],
-      select: `material_code AS "materialCode", description, category`,
-      from: 'core.dim_material_master',
-      orderBy: 'material_code',
-      searchCols: ['material_code', 'description', 'category'],
-    }],
-  },
+  // 'material-master' was its own page until 19 Oct 2026. Its rows are now
+  // part of the Materials table (FULL JOIN below), with its description and
+  // category as their own columns and their edits still written to
+  // core.dim_material_master through that relation's overrides - so the sync
+  // re-apply, the badges and Revert behave exactly as they did on the old page.
   {
     id: 'purchasing-groups',
     label: 'Purchasing Groups',
@@ -233,38 +220,52 @@ export const MASTER_PAGES: MasterPageSpec[] = [
     blurb: 'Item reference data, and the spend category each material resolves to. '
       + 'The category rules used to be their own page; attached to the material they '
       + 'answer the question people actually ask — why is this one Chemical?',
+    tabbed: true,
     tables: [
       {
         name: 'Materials',
         relation: 'core.dim_material',
-        note: 'Accumulated from the exports rather than loaded from a master, so a '
-          + 'material appears once it has been requisitioned or ordered. Category is '
+        note: 'Every material seen on an order, together with the SAP material master '
+          + '(the Mat group export) - "Found in" says which. Category is '
           + 'resolved by the same rule that stamps the orders, and "Category from" says '
           + 'which step produced it — search it for "code prefix" to see the carve-outs, or '
           + '"manual" for the categories an Admin chose here.',
         columns: [
           C('materialCode', 'Material'), C('description', 'Description'),
+          C('masterDescription', 'SAP master description'),
           C('materialGroup', 'Group'), C('baseUom', 'UOM'),
           C('category', 'Category'), C('categoryVia', 'Category from'),
+          C('masterCategory', 'SAP master category'),
           C('firstSeen', 'First seen'), C('lastSeen', 'Last seen'),
+          C('foundIn', 'Found in'),
         ],
         // Resolved LIVE from the mapping rather than read off the facts: this
         // master lists every material ever seen, including ones the current
         // dataset never ordered and which therefore have no fact row to read a
         // category from. Generated from packages/rules, so it is the same rule
         // the transform stamps the facts with.
-        select: `m.material_code AS "materialCode", m.description,
+        // One row per material from EITHER source (19 Oct 2026): the materials
+        // seen on orders and the SAP material master, which were two pages.
+        // 11,130 of 11,131 master rows match a material seen on orders; the
+        // rest - on either side - are kept, with "Found in" saying which.
+        select: `COALESCE(m.material_code, mm.material_code) AS "materialCode", m.description,
+                 mm.description AS "masterDescription",
                  m.material_group AS "materialGroup", m.base_uom AS "baseUom",
-                 ${spendCategorySql('m.material_code', 'm.material_group')} AS category,
-                 ${spendCategorySourceSql('m.material_code', 'm.material_group')} AS "categoryVia",
-                 m.first_seen::text AS "firstSeen", m.last_seen::text AS "lastSeen"`,
-        from: 'core.dim_material m',
-        orderBy: 'm.material_code',
+                 ${spendCategorySql('COALESCE(m.material_code, mm.material_code)', 'm.material_group')} AS category,
+                 ${spendCategorySourceSql('COALESCE(m.material_code, mm.material_code)', 'm.material_group')} AS "categoryVia",
+                 mm.category AS "masterCategory",
+                 m.first_seen::text AS "firstSeen", m.last_seen::text AS "lastSeen",
+                 CASE WHEN m.material_code IS NULL THEN 'SAP master only'
+                      WHEN mm.material_code IS NULL THEN 'orders only'
+                      ELSE 'orders + SAP master' END AS "foundIn"`,
+        from: 'core.dim_material m FULL JOIN core.dim_material_master mm ON mm.material_code = m.material_code',
+        orderBy: 'COALESCE(m.material_code, mm.material_code)',
         // The category and its source are searchable too - the note above
         // promises "search it for code prefix", which only these make true.
-        searchCols: ['m.material_code', 'm.description', 'm.material_group', 'm.base_uom',
-          `(${spendCategorySql('m.material_code', 'm.material_group')})`,
-          `(${spendCategorySourceSql('m.material_code', 'm.material_group')})`],
+        searchCols: ['COALESCE(m.material_code, mm.material_code)', 'm.description', 'mm.description', 'm.material_group', 'm.base_uom',
+          'mm.category',
+          `(${spendCategorySql('COALESCE(m.material_code, mm.material_code)', 'm.material_group')})`,
+          `(${spendCategorySourceSql('COALESCE(m.material_code, mm.material_code)', 'm.material_group')})`],
       },
       {
         name: 'Material groups',
@@ -354,8 +355,12 @@ export const MASTER_PAGES: MasterPageSpec[] = [
 
 export const MASTER_BY_ID = new Map(MASTER_PAGES.map((p) => [p.id, p]));
 
-/** Row cap. These are code lists, but dim_material can run to five figures. */
-const MAX_ROWS = 5000;
+/**
+ * Rows per page (19 Oct 2026). Every table pages through its rows rather than
+ * stopping at a cap: the old 5,000-row cap left a third of the Materials
+ * table reachable only by searching for it.
+ */
+export const MASTER_PAGE_SIZE = 100;
 
 export interface MasterTableResult {
   name: string;
@@ -363,11 +368,15 @@ export interface MasterTableResult {
   note: string;
   columns: MasterColumn[];
   rows: Record<string, unknown>[];
-  /** Rows matching the search, before the cap. */
+  /** Rows matching the search. */
   total: number;
   /** Rows in the table with no search applied. */
   totalUnfiltered: number;
+  /** Always false since pagination; kept so an older page does not break. */
   truncated: boolean;
+  /** 0-based page of these rows, and the page size. */
+  page: number;
+  pageSize: number;
   versionScoped: boolean;
   /** Echoed so the UI marks the right header, including when a key was rejected. */
   sortKey: string | null;
@@ -386,14 +395,16 @@ export async function loadMasterPage(
   versionId: number,
   q: string,
   sort?: { key: string; dir: 'asc' | 'desc' },
-): Promise<{ id: string; label: string; blurb: string; tables: MasterTableResult[] } | null> {
+  /** Page per table, by the table's position on the page; missing = first page. */
+  pages: number[] = [],
+): Promise<{ id: string; label: string; blurb: string; tabbed: boolean; tables: MasterTableResult[] } | null> {
   const page = MASTER_BY_ID.get(id);
   if (!page) return null;
 
   const search = q.trim();
   const tables: MasterTableResult[] = [];
 
-  for (const t of page.tables) {
+  for (const [ti, t] of page.tables.entries()) {
     const params: unknown[] = [];
     const clauses: string[] = [];
 
@@ -445,8 +456,11 @@ export async function loadMasterPage(
       ? `"${sort!.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST`
       : t.orderBy;
 
+    const lastPage = Math.max(0, Math.ceil(total / MASTER_PAGE_SIZE) - 1);
+    const pageNo = Math.min(Math.max(0, Math.trunc(pages[ti] ?? 0) || 0), lastPage);
     const rows = await query<Record<string, unknown>>(
-      `SELECT ${t.select} FROM ${t.from} ${where} ORDER BY ${order} LIMIT ${MAX_ROWS}`,
+      `SELECT ${t.select} FROM ${t.from} ${where} ORDER BY ${order}
+        LIMIT ${MASTER_PAGE_SIZE} OFFSET ${pageNo * MASTER_PAGE_SIZE}`,
       [...params],
     );
 
@@ -458,14 +472,16 @@ export async function loadMasterPage(
       rows,
       total,
       totalUnfiltered: unfiltered?.n ?? 0,
-      truncated: total > rows.length,
+      truncated: false,
+      page: pageNo,
+      pageSize: MASTER_PAGE_SIZE,
       versionScoped: t.versionScoped === true,
       sortKey: sortable ? sort!.key : null,
       sortDir: sortable && sort!.dir === 'desc' ? 'desc' : 'asc',
     });
   }
 
-  return { id: page.id, label: page.label, blurb: page.blurb, tables };
+  return { id: page.id, label: page.label, blurb: page.blurb, tabbed: page.tabbed === true, tables };
 }
 
 /** The sub-nav, with a row count per page so an empty master is visible up front. */

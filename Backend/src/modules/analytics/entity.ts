@@ -660,10 +660,31 @@ export async function materialDetail(
   versionId: number,
   scope: readonly ScopeEntry[],
   materialCode: string,
+  /**
+   * The popup's own Plant filter (19 Oct 2026). Empty = every plant, as the
+   * popup always showed. Every figure below narrows with it; the plant list
+   * offered does not, so a second plant can be added.
+   */
+  plants: readonly string[] = [],
 ): Promise<Record<string, unknown> | null> {
-  const { where, params } = scoped(versionId, scope, 'pol');
+  const s0 = scoped(versionId, scope, 'pol');
+  const params = s0.params;
   params.push(materialCode);
   const mp = `$${params.length}`;
+
+  const plantOptions = await query<{ plant: string; plant_name: string; n: number }>(
+    `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name, count(*)::int AS n
+       FROM core.fact_po_line pol
+       LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+      WHERE ${s0.where} AND pol.material_code = ${mp} AND pol.plant IS NOT NULL
+      GROUP BY pol.plant ORDER BY 3 DESC, 1`,
+    params,
+  );
+  let where = s0.where;
+  if (plants.length > 0) {
+    params.push([...plants]);
+    where += ` AND pol.plant = ANY($${params.length})`;
+  }
 
   const head = await queryOne<{
     descr: string; grp: string | null; cat: string | null; lines: number; vendors: number;
@@ -797,6 +818,213 @@ export async function materialDetail(
     areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, lines: x.n })),
     poHistory: decorate(poHistory),
     caps: { poHistory: 200 },
+    plantOptions: plantOptions.map((x) => ({ value: x.plant, label: `${x.plant} ${x.plant_name === x.plant ? '' : x.plant_name}`.trim(), count: x.n })),
+  };
+}
+
+// ─────────────────────────────────────────────────────────── category detail
+
+/**
+ * Category 360 (19 Oct 2026): one spend category, drawn like the Material 360
+ * popup, opened from the Material Group page's category charts and summary.
+ *
+ * Population: the category's PO lines, STO and deleted lines excluded - the
+ * basis of the "Item Category by Amount Spend" bars and of the summary's stage
+ * averages. The category is the line's own (the column 020 materialised), as
+ * on both charts. The PR-item figures use the summary's own rule (the
+ * requisition's material, PRI_SPEND_CAT) so they equal its Items / Open.
+ *
+ * `filter` is the page's filter bar with the popup's Plant choice already
+ * folded into its plants; `optionsFilter` is the filter bar alone, which the
+ * plant list is counted under so choosing one plant still offers the others.
+ */
+export async function categoryDetail(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  category: string,
+  filter: GlobalFilter = {},
+  optionsFilter: GlobalFilter = filter,
+): Promise<Record<string, unknown> | null> {
+  const lineWhere = (f: GlobalFilter): { where: string; params: unknown[] } => {
+    const s0 = scoped(versionId, scope, 'pol');
+    s0.params.push(category);
+    let where = `${s0.where} AND ${POL_SPEND_CAT} = $${s0.params.length} AND NOT pol.is_sto AND NOT pol.is_deleted`;
+    const gf = buildFilterClause(f, 'po_line', 'pol.', s0.params.length + 1);
+    s0.params.push(...gf.params);
+    where += gf.sql;
+    return { where, params: s0.params };
+  };
+  const { where, params } = lineWhere(filter);
+
+  const head = await queryOne<{
+    lines: number; pos: number; vendors: number; materials: number; plants: number;
+    usd: number | null; idr: number | null; unrated: number;
+    open_usd: number | null; open_idr: number | null;
+    avg_src: number | null; avg_poa: number | null; avg_dlt: number | null; avg_e2e: number | null;
+  }>(
+    `SELECT count(*)::int AS lines, count(DISTINCT pol.po_no)::int AS pos,
+            count(DISTINCT pol.vendor_code)::int AS vendors,
+            count(DISTINCT pol.material_code)::int AS materials,
+            count(DISTINCT pol.plant)::int AS plants,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
+            count(*) FILTER (WHERE pol.net_order_value_usd IS NULL)::int AS unrated,
+            sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_idr,
+            avg(pol.sourcing_days) FILTER (WHERE pol.sourcing_days >= 0) AS avg_src,
+            avg(pol.po_approval_days) FILTER (WHERE pol.po_approval_days >= 0) AS avg_poa,
+            avg(pol.delivery_days) FILTER (WHERE pol.delivery_days >= 0) AS avg_dlt,
+            avg(pol.receipt_date - pri.requisition_date)
+              FILTER (WHERE pol.receipt_date - pri.requisition_date >= 0) AS avg_e2e
+       FROM core.fact_po_line pol
+       LEFT JOIN core.fact_pr_item pri
+         ON pri.dataset_version_id = pol.dataset_version_id
+        AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
+      WHERE ${where}`,
+    params,
+  );
+
+  // The summary's PR-grain figures, same rule, same filter.
+  const ps = scoped(versionId, scope, 'pri');
+  ps.params.push(category);
+  const priCat = `$${ps.params.length}`;
+  const pgf = buildFilterClause(filter, 'pr_item', 'pri.', ps.params.length + 1);
+  ps.params.push(...pgf.params);
+  const pr = await queryOne<{ items: number; open_n: number; avg_pra: number | null }>(
+    `SELECT count(*)::int AS items,
+            count(*) FILTER (WHERE pri.status IN ('Unapproved PR','PR Approved-No PO')
+              OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                          WHERE _pl.dataset_version_id = pri.dataset_version_id
+                            AND _pl.pr_no = pri.pr_no AND _pl.pr_item = pri.pr_item
+                            AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')))::int AS open_n,
+            avg(pri.release_final_date - pri.requisition_date)
+              FILTER (WHERE pri.release_final_date - pri.requisition_date >= 0) AS avg_pra
+       FROM core.fact_pr_item pri
+      WHERE ${ps.where} AND NOT pri.is_deleted AND ${PRI_SPEND_CAT} = ${priCat}${pgf.sql}`,
+    ps.params,
+  );
+
+  if ((!head || head.lines === 0) && (!pr || pr.items === 0)) {
+    // Nothing under this filter - still answer, so the popup can offer the
+    // plants and say so, rather than a 404 for a real category.
+    const opt = lineWhere(optionsFilter);
+    const anyAtAll = await queryOne<{ n: number }>(
+      `SELECT count(*)::int AS n FROM core.fact_po_line pol WHERE ${opt.where}`, opt.params,
+    );
+    if ((anyAtAll?.n ?? 0) === 0) return null;
+  }
+
+  // Monthly spend of the top six vendors (by rupiah, which needs no rate).
+  const spendByVendor = await query<{
+    code: string | null; name: string | null; mk: string; usd: number | null; idr: number | null; n: number;
+  }>(
+    `WITH v6 AS (
+       SELECT pol.vendor_code FROM core.fact_po_line pol
+        WHERE ${where} GROUP BY 1 ORDER BY sum(pol.net_order_value_idr) DESC NULLS LAST LIMIT 6)
+     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+            to_char(pol.document_date,'YYYY-MM') AS mk,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
+       FROM core.fact_po_line pol JOIN v6 ON v6.vendor_code IS NOT DISTINCT FROM pol.vendor_code
+      WHERE ${where} AND pol.document_date IS NOT NULL
+      GROUP BY 1, 3 ORDER BY 3`,
+    params,
+  );
+
+  const vendorShare = await query<{ code: string | null; name: string | null; usd: number | null; idr: number | null; n: number }>(
+    `SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
+       FROM core.fact_po_line pol
+      WHERE ${where}
+      GROUP BY pol.vendor_code ORDER BY idr DESC NULLS LAST LIMIT 10`,
+    params,
+  );
+
+  const areaShare = await query<{ plant: string; plant_name: string; usd: number | null; idr: number | null; n: number }>(
+    `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
+       FROM core.fact_po_line pol
+       LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+      WHERE ${where}
+      GROUP BY pol.plant ORDER BY idr DESC NULLS LAST LIMIT 12`,
+    params,
+  );
+
+  const topMaterials = await query<{
+    code: string; descr: string; grp: string | null; lines: number; vendors: number;
+    usd: number | null; idr: number | null;
+  }>(
+    `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
+            max(pol.material_group) AS grp, count(*)::int AS lines,
+            count(DISTINCT pol.vendor_code)::int AS vendors,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr
+       FROM core.fact_po_line pol
+      WHERE ${where} AND pol.material_code IS NOT NULL
+      GROUP BY pol.material_code ORDER BY idr DESC NULLS LAST LIMIT 100`,
+    params,
+  );
+
+  const poHistory = await query<Record<string, unknown>>(
+    `SELECT pol.po_no AS "poNo", pol.po_item AS "poItem", pol.document_date AS "documentDate",
+            pol.material_code AS "materialCode", left(pol.short_text, 60) AS "shortText",
+            pol.plant, pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
+            pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
+            pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
+            pol.net_order_value_usd AS "netOrderValueUsd",
+            pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
+            pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
+       FROM core.fact_po_line pol
+      WHERE ${where}
+      ORDER BY pol.document_date DESC NULLS LAST, pol.po_no DESC LIMIT 200`,
+    params,
+  );
+
+  const opt = lineWhere(optionsFilter);
+  const plantOptions = await query<{ plant: string; plant_name: string; n: number }>(
+    `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name, count(*)::int AS n
+       FROM core.fact_po_line pol
+       LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+      WHERE ${opt.where} AND pol.plant IS NOT NULL
+      GROUP BY pol.plant ORDER BY 3 DESC, 1`,
+    opt.params,
+  );
+
+  const h = head ?? {
+    lines: 0, pos: 0, vendors: 0, materials: 0, plants: 0, usd: null, idr: null, unrated: 0,
+    open_usd: null, open_idr: null, avg_src: null, avg_poa: null, avg_dlt: null, avg_e2e: null,
+  };
+  return {
+    category,
+    kpis: {
+      lineCount: h.lines,
+      poCount: h.pos,
+      vendorCount: h.vendors,
+      materialCount: h.materials,
+      plantCount: h.plants,
+      // USD only when every line carried a rate - the module's rule.
+      spendUsd: h.unrated > 0 ? null : h.usd,
+      spendIdr: h.idr,
+      unratedLines: h.unrated,
+      openCommitUsd: h.open_usd,
+      openCommitIdr: h.open_idr,
+      prItems: pr?.items ?? 0,
+      openPrItems: pr?.open_n ?? 0,
+      avgPra: pr?.avg_pra ?? null,
+      avgSrc: h.avg_src,
+      avgPoa: h.avg_poa,
+      avgDlt: h.avg_dlt,
+      avgE2e: h.avg_e2e,
+    },
+    spendByVendor: spendByVendor.map((x) => ({
+      vendorCode: x.code, vendorName: x.name, monthKey: x.mk, usd: x.usd, idr: x.idr, lines: x.n,
+    })),
+    vendorShare: vendorShare.map((x) => ({ vendorCode: x.code, vendorName: x.name, usd: x.usd, idr: x.idr, lines: x.n })),
+    areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, idr: x.idr, lines: x.n })),
+    topMaterials: topMaterials.map((m) => ({
+      materialCode: m.code, description: m.descr, materialGroup: m.grp, lines: m.lines,
+      vendors: m.vendors, spendUsd: m.usd, spendIdr: m.idr, soleSource: m.vendors === 1,
+    })),
+    poHistory: decorate(poHistory),
+    plantOptions: plantOptions.map((x) => ({ value: x.plant, label: `${x.plant} ${x.plant_name === x.plant ? '' : x.plant_name}`.trim(), count: x.n })),
+    caps: { poHistory: 200, topMaterials: 100, vendorShare: 10, areaShare: 12 },
   };
 }
 
@@ -810,6 +1038,13 @@ export async function materialGroupPage(
   materialGroup: string | null = null,
   limit = 150,
   offset = 0,
+  /**
+   * The filter bar, for the category SUMMARY only (19 Oct 2026): it sits under
+   * the two category charts, which follow the bar, and opens the Category 360
+   * popup, which does too - so all three now count one population. The
+   * explorer and risk lists below stay the full catalogue, as before.
+   */
+  filter: GlobalFilter = {},
 ): Promise<Record<string, unknown>> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -818,6 +1053,10 @@ export async function materialGroupPage(
   // (PRA on PR items; SRC/POA/DLT/E2E on PO lines). Blank categories are
   // dropped like v1's Boolean filter.
   const priScoped = scoped(versionId, scope, 'pri');
+  const priGf = buildFilterClause(filter, 'pr_item', 'pri.', priScoped.params.length + 1);
+  priScoped.params.push(...priGf.params);
+  const polGf = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  const polParams = [...params, ...polGf.params];
   const priSummary = await query<{
     cat: string; items: number; open_n: number; avg_pra: number | null;
   }>(
@@ -830,7 +1069,7 @@ export async function materialGroupPage(
             avg(pri.release_final_date - pri.requisition_date)
               FILTER (WHERE pri.release_final_date - pri.requisition_date >= 0) AS avg_pra
        FROM core.fact_pr_item pri
-      WHERE ${priScoped.where} AND NOT pri.is_deleted
+      WHERE ${priScoped.where} AND NOT pri.is_deleted${priGf.sql}
       GROUP BY 1`,
     priScoped.params,
   );
@@ -847,9 +1086,9 @@ export async function materialGroupPage(
        LEFT JOIN core.fact_pr_item pri
          ON pri.dataset_version_id = pol.dataset_version_id
         AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
-      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
+      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted${polGf.sql}
       GROUP BY 1`,
-    params,
+    polParams,
   );
   const polByCat = new Map(polSummary.map((x) => [x.cat, x]));
 

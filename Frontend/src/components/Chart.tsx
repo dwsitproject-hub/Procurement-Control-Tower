@@ -151,6 +151,7 @@ export function ChartPanel({
   onApplyFilter,
   variant = 'bar',
   currency = 'USD',
+  onBucketClick,
 }: {
   chartId: string;
   onDrill: (token: string, label: string) => void;
@@ -166,8 +167,17 @@ export function ChartPanel({
   variant?: 'bar' | 'doughnut';
   /** Money charts with an IDR twin series switch to it when 'IDR'. */
   currency?: 'USD' | 'IDR';
+  /**
+   * When set, a click on a bar - or on its axis label, or anywhere along its
+   * row - hands the bucket to the page instead of opening the row list
+   * (19 Oct 2026: the Material Group page opens its Category 360 popup).
+   */
+  onBucketClick?: (bucketKey: string, bucketLabel: string) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
+  // Read at click time, so a new callback each render does not rebuild the chart.
+  const bucketClick = useRef(onBucketClick);
+  bucketClick.current = onBucketClick;
   const chart = useRef<ChartJS | null>(null);
   const [data, setData] = useState<ChartResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -470,7 +480,17 @@ export function ChartPanel({
         maintainAspectRatio: false,
         animation: false,
         indexAxis: horizontal ? 'y' : 'x',
-        onClick: (e, elements) => {
+        onHover: (e, elements, c) => {
+          if (!bucketClick.current) return;
+          c.canvas.style.cursor = elements.length > 0 || bucketAt(c, e) !== null ? 'pointer' : 'default';
+        },
+        onClick: (e, elements, c) => {
+          if (bucketClick.current) {
+            const idx = elements[0]?.index ?? bucketAt(c, e);
+            const b = idx === null ? undefined : data.buckets[idx];
+            if (b) bucketClick.current(b.key, b.label);
+            return;
+          }
           const el = elements[0];
           if (!el) return;
           const series = shownSeries[el.datasetIndex];
@@ -527,6 +547,48 @@ export function ChartPanel({
     };
   }, [data, onDrill, variant, currency, chartId]);
 
+  /**
+   * The bucket under the pointer by position on the category axis: its tick
+   * label, or the empty part of its row beside a short bar. Null outside the
+   * band of rows (the legend, the value axis).
+   */
+  function bucketAt(
+    c: ChartJS,
+    e: { x: number | null; y: number | null },
+  ): number | null {
+    if (!data || e.x === null || e.y === null) return null;
+    const horiz = HORIZONTAL_CHARTS.has(chartId);
+    const ax = horiz ? c.scales['y'] : c.scales['x'];
+    const area = c.chartArea;
+    if (!ax || !area) return null;
+    // Across the rows only: a horizontal chart's labels sit left of the plot,
+    // a vertical chart's below it.
+    if (horiz ? (e.y < area.top || e.y > area.bottom || e.x > area.right)
+      : (e.x < area.left || e.x > area.right || e.y < area.top)) return null;
+    // A vertical chart's labels are rotated below the plot: the tick under the
+    // pointer is the nearest one on x, which getValueForPixel gives.
+    const v = ax.getValueForPixel(horiz ? e.y : e.x);
+    if (v === undefined || v === null) return null;
+    const i = Math.round(Number(v));
+    return i >= 0 && i < data.buckets.length ? i : null;
+  }
+
+  /**
+   * A click OUTSIDE the plot - on a category's axis label. Chart.js calls its
+   * onClick only inside the plot area, so the label needs the canvas's own
+   * listener; inside the plot this returns null and the chart handles it.
+   */
+  function outsideBucket(ev: React.MouseEvent<HTMLCanvasElement>): number | null {
+    const c = chart.current;
+    if (!c || !bucketClick.current) return null;
+    const a = c.chartArea;
+    const r = ev.currentTarget.getBoundingClientRect();
+    const x = ev.clientX - r.left;
+    const y = ev.clientY - r.top;
+    if (!a || (x >= a.left && x <= a.right && y >= a.top && y <= a.bottom)) return null;
+    return bucketAt(c, { x, y });
+  }
+
   if (error) {
     return (
       <div className="panel">
@@ -556,7 +618,27 @@ export function ChartPanel({
       ) : (
         <>
           <div className="chart-box" style={boxHeight ? { height: boxHeight } : undefined}>
-            <canvas ref={canvas} role="img" aria-label={data.title} />
+            <canvas
+              ref={canvas}
+              role="img"
+              aria-label={data.title}
+              onClick={(ev) => {
+                const i = outsideBucket(ev);
+                const b = i === null ? undefined : data.buckets[i];
+                if (b) bucketClick.current?.(b.key, b.label);
+              }}
+              onMouseMove={(ev) => {
+                const c = chart.current;
+                if (!c || !bucketClick.current) return;
+                const a = c.chartArea;
+                const r = ev.currentTarget.getBoundingClientRect();
+                const x = ev.clientX - r.left;
+                const y = ev.clientY - r.top;
+                // Inside the plot, the chart's own onHover sets the cursor.
+                if (a && x >= a.left && x <= a.right && y >= a.top && y <= a.bottom) return;
+                ev.currentTarget.style.cursor = outsideBucket(ev) === null ? 'default' : 'pointer';
+              }}
+            />
           </div>
           {(data.notes.length > 0 || onApplyFilter) && (
             <p className="note">

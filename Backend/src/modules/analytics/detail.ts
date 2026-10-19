@@ -220,6 +220,12 @@ export interface DetailFilters {
   /** The requisition's / the order's SAP document type (037). */
   prDocType?: string[];
   poDocType?: string[];
+  /**
+   * Open Items stages (19 Oct 2026): open statuses and/or the after-delivery
+   * states 'deliveredNotInvoiced' / 'invoicedNotPaid', OR'd - the backlog
+   * table's Stages filter, so a click opens the rows it counted.
+   */
+  oiStage?: string[];
   search?: string;
   /**
    * One of the four age bands, or 'past-sla' for everything beyond the first.
@@ -254,7 +260,7 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'oiStage', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
 
@@ -302,12 +308,19 @@ const DELIVERED_NOT_INVOICED =
  *   Invoicing and Payment page rather than quietly counting more.
  *
  * 'voided' and 'draft' are excluded because neither is a debt.
+ *
+ * Written as an UNCORRELATED row IN (19 Oct 2026), not a correlated EXISTS:
+ * the same rows, but Postgres builds the set once and hashes it. Under the
+ * Open Items Stages filter this predicate is OR'd with a status test, and an
+ * OR'd correlated EXISTS ran once per row - 11.5 s for one category against
+ * well under one. The NULL guards keep IN from answering NULL where EXISTS
+ * answered false.
  */
-const INVOICED_NOT_PAID = `EXISTS (
-  SELECT 1 FROM ops.coupa_invoice_line il
+const INVOICED_NOT_PAID = `(d.po_no, d.po_item) IN (
+  SELECT cpl.sap_po_no, cpl.sap_po_item FROM ops.coupa_invoice_line il
     JOIN ops.coupa_po_line cpl ON cpl.order_line_id = il.order_line_id
     JOIN ops.v_coupa_invoice i ON i.id = il.invoice_id
-   WHERE cpl.sap_po_no = d.po_no AND cpl.sap_po_item = d.po_item
+   WHERE cpl.sap_po_no IS NOT NULL AND cpl.sap_po_item IS NOT NULL
      AND NOT i.paid AND i.status NOT IN ('voided', 'draft'))`;
 
 /** Exported so the Open Items cards count exactly what the table will show. */
@@ -376,6 +389,7 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     year: list('year')?.filter((y) => /^\d{4}$/.test(y)),
     prDocType: list('prDocType'),
     poDocType: list('poDocType'),
+    oiStage: list('oiStage'),
     search: q['q'] === undefined ? undefined : String(q['q']),
     ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
     moneyState: q['moneyState'] === undefined ? undefined : String(q['moneyState']),
@@ -419,6 +433,7 @@ export function describeDetailFilters(
     ['year', 'Year'],
     ['prDocType', 'PR Type'],
     ['poDocType', 'PO Type'],
+    ['oiStage', 'Stage'],
   ];
   for (const [key, label] of listLabels) {
     const v = filters[key] as string[] | undefined;
@@ -534,6 +549,21 @@ function buildDetailWhere(
     where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY') = ANY($${params.length})`);
   }
   // prDocType / poDocType are FACETS (above), which applies them.
+  if (filters.oiStage && filters.oiStage.length > 0) {
+    const OPEN = ['Unapproved PR', 'PR Approved-No PO', 'PO-Not Approved', 'HOLD PO', 'PO-No GR', 'Partially Delivered'];
+    const statuses = filters.oiStage.filter((x) => OPEN.includes(x));
+    const ors: string[] = [];
+    if (statuses.length > 0) {
+      params.push(statuses);
+      ors.push(`d.status = ANY($${params.length})`);
+    }
+    for (const m of filters.oiStage) {
+      if (MONEY_STATE_SQL[m]) ors.push(`(${MONEY_STATE_SQL[m]})`);
+    }
+    // Only known values are honoured; none known matches nothing rather than
+    // silently widening to every row.
+    where.push(ors.length > 0 ? `(${ors.join(' OR ')})` : 'false');
+  }
 
   // Toggles are NOT omitted for any facet: they narrow the population the
   // reader is looking at rather than one dimension of it, so a facet count

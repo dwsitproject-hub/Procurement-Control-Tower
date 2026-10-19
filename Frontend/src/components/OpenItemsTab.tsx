@@ -3,6 +3,7 @@ import { api, type Finding, type Kpi } from '../lib/api';
 import { formatKpi, formatNumber } from '../lib/format';
 import { DetailTable } from './DetailTable';
 import { DetailModal } from './DetailModal';
+import { FilterDropdown } from './FilterDropdown';
 
 const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartPanel })));
 
@@ -88,14 +89,15 @@ interface MoneyCards {
   coupaCoverage: { unpaidInvoices: number; matchedInvoices: number } | null;
 }
 /** The backlog table's own filters (openitems.ts CategorySectionFilter). */
-interface CatFilter { plant: string[]; prType: string[]; poType: string[] }
+interface CatFilter { stage: string[]; plant: string[]; prType: string[]; poType: string[] }
+/** In display order: Stages first, as the cards above are what it selects. */
 const CAT_FILTER_LABELS: Record<keyof CatFilter, string> = {
-  plant: 'Plant', prType: 'PR Type', poType: 'PO Type',
+  stage: 'Stages', plant: 'Plant', prType: 'PR Type', poType: 'PO Type',
 };
 const CAT_FILTER_PARAM: Record<keyof CatFilter, string> = {
-  plant: 'catPlant', prType: 'catPrType', poType: 'catPoType',
+  stage: 'catStage', plant: 'catPlant', prType: 'catPrType', poType: 'catPoType',
 };
-const NO_CAT_FILTER: CatFilter = { plant: [], prType: [], poType: [] };
+const NO_CAT_FILTER: CatFilter = { stage: [], plant: [], prType: [], poType: [] };
 
 interface Summary {
   asOfDate: string; pastSlaDays: number; lateDays: number;
@@ -108,7 +110,7 @@ interface Summary {
   filterIgnored?: string[];
   categoryFilter?: {
     applied: CatFilter;
-    options: Record<keyof CatFilter, { value: string; count: number }[]>;
+    options: Record<keyof CatFilter, { value: string; count: number; label?: string }[]>;
   };
 }
 
@@ -615,43 +617,27 @@ export function OpenItemsTab({
             Grouped by what is being bought rather than by who files it. Requisition and order
             stages are counted together, because a category&apos;s open work is both.
           </p>
-          {/* This table's own filters (7 Oct 2026): several values per
-              filter, combined across filters. The cards above are unchanged
-              by them. */}
+          {/* This table's own filters (7 Oct 2026), drawn like the page
+              header's (19 Oct 2026): several values per filter, combined
+              across filters. Stages are the cards above; with none chosen the
+              table counts every open stage, as it always has. The cards
+              themselves are not narrowed by these. */}
           {sum.categoryFilter && (
-            <div className="dt-facets oi-cat-filters">
-              {(Object.keys(CAT_FILTER_LABELS) as (keyof CatFilter)[]).map((k) => {
-                const opts = sum.categoryFilter!.options[k] ?? [];
-                const on = catFilter[k];
-                return (
-                  <details key={k} className="dt-facet">
-                    <summary>
-                      {CAT_FILTER_LABELS[k]}
-                      {on.length > 0 && <span className="dt-badge">{on.length}</span>}
-                    </summary>
-                    <div className="dt-facet-list">
-                      {opts.length === 0 && <span className="muted">no values</span>}
-                      {opts.map((o) => (
-                        <label key={o.value} className="dt-chip">
-                          <input
-                            type="checkbox"
-                            checked={on.includes(o.value)}
-                            onChange={() => setCatFilter((cur) => ({
-                              ...cur,
-                              [k]: cur[k].includes(o.value)
-                                ? cur[k].filter((v) => v !== o.value)
-                                : [...cur[k], o.value],
-                            }))}
-                          />
-                          {o.value} <span className="muted">({formatNumber(o.count)})</span>
-                        </label>
-                      ))}
-                    </div>
-                  </details>
-                );
-              })}
+            <div className="gf-bar oi-cat-filters">
+              <span className="gf-label">Table filters</span>
+              {(Object.keys(CAT_FILTER_LABELS) as (keyof CatFilter)[]).map((k) => (
+                <FilterDropdown
+                  key={k}
+                  label={CAT_FILTER_LABELS[k]}
+                  options={(sum.categoryFilter!.options[k] ?? []).map((o) => ({
+                    value: o.value, label: o.label, count: o.count,
+                  }))}
+                  selected={catFilter[k]}
+                  onChange={(next) => setCatFilter((cur) => ({ ...cur, [k]: next }))}
+                />
+              ))}
               {catFilterQuery !== '' && (
-                <button className="dt-btn" onClick={() => setCatFilter(NO_CAT_FILTER)}>
+                <button className="gf-btn gf-clear" onClick={() => setCatFilter(NO_CAT_FILTER)}>
                   Clear table filters
                 </button>
               )}
@@ -831,7 +817,12 @@ export function OpenItemsTab({
           // An exact handoff is the figure's OWN population, which is not
           // always the open stages - imposing them on top would open a table
           // whose count is smaller than the number clicked.
-          initial={focus.exact ? focus.init : { ...sum.detailFilter, ...focus.init }}
+          // A backlog row under the Stages filter carries its own stages
+          // (oiStage), which replace the page's open statuses: delivered lines
+          // are in two of them, and the open-status list would empty those.
+          initial={focus.exact ? focus.init : focus.init['oiStage']
+            ? { ...Object.fromEntries(Object.entries(sum.detailFilter).filter(([k2]) => k2 !== 'status')), ...focus.init }
+            : { ...sum.detailFilter, ...focus.init }}
           globalQuery={filterQuery}
           onClose={() => setFocus(null)}
         />

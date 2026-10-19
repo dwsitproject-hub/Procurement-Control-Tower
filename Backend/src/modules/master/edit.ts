@@ -57,7 +57,13 @@ export interface EditField {
    * spend category (038): it is not a column of dim_material but the first
    * step of the category rule, so it is written to its own table.
    */
-  store?: 'material_category';
+  store?: 'material_category' | 'material_master';
+  /**
+   * For store 'material_master': the column in core.dim_material_master. The
+   * field's own `col` is a distinct pseudo-name (master_description) because
+   * values are keyed by col and both tables have a `description`.
+   */
+  linkedCol?: string;
   /** Where a 'choice' field's allowed values come from (choicesFor). */
   choices?: 'spend_categories';
   /**
@@ -200,9 +206,24 @@ export const EDIT_SPECS: EditSpec[] = [
       },
       { col: 'first_seen', key: 'firstSeen', label: 'First seen', kind: 'date', effect: 'label' },
       { col: 'last_seen', key: 'lastSeen', label: 'Last seen', kind: 'date', effect: 'label' },
+      // The SAP material master's own fields (19 Oct 2026: the Material Master
+      // page became part of this table). Written to core.dim_material_master
+      // through ITS overrides, exactly as that page did, so the sync re-apply,
+      // the badge and Revert are unchanged. Its category is the fourth step of
+      // the category rule, after the manual choice, the mapping file and the
+      // group - so it moves a figure only where nothing earlier matches.
+      {
+        col: 'master_description', key: 'masterDescription', label: 'SAP master description', kind: 'text',
+        effect: 'label', store: 'material_master', linkedCol: 'description',
+      },
+      {
+        col: 'master_category', key: 'masterCategory', label: 'SAP master category', kind: 'text',
+        effect: 'recompute', store: 'material_master', linkedCol: 'category',
+      },
     ],
     readOnly: [
       { key: 'categoryVia', label: 'Category from', reason: 'Which rule produced the category - it reads "manual" once a category is chosen here.' },
+      { key: 'foundIn', label: 'Found in', reason: 'Whether the material is on orders, in the SAP material master, or both.' },
     ],
     allowAdd: true,
     allowDelete: true,
@@ -375,6 +396,7 @@ async function writeStored(
   c: pg.PoolClient, key: Record<string, unknown>, stored: Array<[EditField, unknown]>, actor: string | null,
 ): Promise<void> {
   for (const [f, v] of stored) {
+    if (f.store === 'material_master') continue; // written by linkedWrite()
     if (f.store === 'material_category') {
       const code = String(key['material_code']);
       if (v === null || v === undefined || v === '') {
@@ -478,6 +500,145 @@ async function findOverride(
 
 // ─────────────────────────────────────────────────────────── the actions
 
+/** Relations a spec writes besides its own (Materials -> the SAP material master). */
+export function linkedRelations(spec: EditSpec): string[] {
+  return spec.fields.some((f) => f.store === 'material_master') ? ['core.dim_material_master'] : [];
+}
+
+/** A spec's values split into its OWN (incl. its own stores) and the linked relation's. */
+function ownAndLinked(spec: EditSpec, vals: Record<string, unknown>): {
+  own: Record<string, unknown>; linked: Record<string, unknown>;
+} {
+  const own: Record<string, unknown> = {};
+  const linked: Record<string, unknown> = {};
+  for (const [col, v] of Object.entries(vals)) {
+    const f = spec.fields.find((x) => x.col === col);
+    if (f?.store === 'material_master' && f.linkedCol) linked[f.linkedCol] = v;
+    else own[col] = v;
+  }
+  return { own, linked };
+}
+
+async function addTx(
+  c: pg.PoolClient, spec: EditSpec, key: Record<string, unknown>, vals: Record<string, unknown>, actor: string,
+): Promise<void> {
+  const { direct, stored } = splitVals(spec, vals);
+  if (spec.fx) {
+    if (await findOverride(c, spec.relation, key)) throw new EditError('a manual rate already exists for that currency and month - edit it instead');
+  } else if (await readRow(c, spec, key)) {
+    throw new EditError('that code already exists - edit it instead');
+  }
+  await c.query(
+    `INSERT INTO app.master_override (relation, row_key, action, vals, admin_added, created_by, updated_by)
+     VALUES ($1, $2::jsonb, 'upsert', $3::jsonb, true, $4, $4)`,
+    [spec.relation, JSON.stringify(key), JSON.stringify(vals), actor],
+  );
+  if (!spec.fx) {
+    await upsertRow(c, spec, { ...spec.insertDefaults, ...direct, ...key }, Object.keys(direct));
+    await writeStored(c, key, stored, actor);
+  }
+}
+
+async function editTx(
+  c: pg.PoolClient, spec: EditSpec, key: Record<string, unknown>, vals: Record<string, unknown>, actor: string,
+): Promise<void> {
+  const { direct, stored } = splitVals(spec, vals);
+  const existing = await findOverride(c, spec.relation, key);
+  if (existing?.action === 'delete') throw new EditError('that row is hidden - restore it first');
+  if (existing) {
+    await c.query(
+      `UPDATE app.master_override SET vals = vals || $2::jsonb, updated_by = $3, updated_at = now() WHERE id = $1`,
+      [existing.id, JSON.stringify(vals), actor],
+    );
+  } else {
+    const original = spec.fx ? null : await readRow(c, spec, key);
+    if (!spec.fx && !original) throw new EditError('no such row');
+    await c.query(
+      `INSERT INTO app.master_override (relation, row_key, action, vals, original, created_by, updated_by)
+       VALUES ($1, $2::jsonb, 'upsert', $3::jsonb, $4::jsonb, $5, $5)`,
+      [spec.relation, JSON.stringify(key), JSON.stringify(vals), original ? JSON.stringify(original) : null, actor],
+    );
+  }
+  if (!spec.fx) {
+    if (Object.keys(direct).length > 0) {
+      await upsertRow(c, spec, { ...spec.insertDefaults, ...direct, ...key }, Object.keys(direct));
+    }
+    await writeStored(c, key, stored, actor);
+  }
+}
+
+/**
+ * Write the linked relation's fields: an edit of its row when SAP has one, an
+ * administrator's own row when it does not - the two things the Material
+ * Master page's Edit and Add did.
+ */
+async function linkedWrite(
+  c: pg.PoolClient, relation: string, key: Record<string, unknown>, vals: Record<string, unknown>, actor: string,
+): Promise<void> {
+  if (Object.keys(vals).length === 0) return;
+  const spec = requireSpec(relation);
+  const lkey = readKey(spec, Object.fromEntries(spec.keys.map((k) => [k.key, key[k.col]])));
+  if ((await readRow(c, spec, lkey)) || (await findOverride(c, relation, lkey))) {
+    await editTx(c, spec, lkey, vals, actor);
+  } else {
+    await addTx(c, spec, lkey, vals, actor);
+  }
+}
+
+/** Hide one relation's row; false when it has neither a row nor an override. */
+async function hideTx(c: pg.PoolClient, spec: EditSpec, key: Record<string, unknown>, actor: string): Promise<boolean> {
+  const existing = await findOverride(c, spec.relation, key);
+  if (existing?.admin_added) {
+    await c.query(`DELETE FROM app.master_override WHERE id = $1`, [existing.id]);
+    await deleteRow(c, spec, key);
+    await clearStored(c, spec, key);
+    return true;
+  }
+  if (existing?.action === 'delete') return true; // already hidden
+  const current = await readRow(c, spec, key);
+  if (!current && !existing) return false;
+  // The snapshot is the row BEFORE any override, so a restore undoes the
+  // edits too rather than resurrecting the edited version.
+  const original = existing?.original ?? current;
+  if (existing) {
+    await c.query(
+      `UPDATE app.master_override SET action = 'delete', vals = '{}'::jsonb, original = $2::jsonb,
+              updated_by = $3, updated_at = now() WHERE id = $1`,
+      [existing.id, JSON.stringify(original), actor],
+    );
+  } else {
+    await c.query(
+      `INSERT INTO app.master_override (relation, row_key, action, original, created_by, updated_by)
+       VALUES ($1, $2::jsonb, 'delete', $3::jsonb, $4, $4)`,
+      [spec.relation, JSON.stringify(key), JSON.stringify(original), actor],
+    );
+  }
+  await deleteRow(c, spec, key);
+  // A manual category goes with the row, so a restore brings the material
+  // back to its rule-decided category rather than to a choice that was
+  // made for a row someone then removed.
+  await clearStored(c, spec, key);
+  return true;
+}
+
+/** Undo one relation's override; false when there is none. */
+async function revertTx(c: pg.PoolClient, spec: EditSpec, key: Record<string, unknown>): Promise<boolean> {
+  const existing = await findOverride(c, spec.relation, key);
+  if (!existing) return false;
+  await c.query(`DELETE FROM app.master_override WHERE id = $1`, [existing.id]);
+  if (spec.fx) return true;
+  // Reverting hands the category back to the rules as well.
+  await clearStored(c, spec, key);
+  if (existing.admin_added) {
+    await deleteRow(c, spec, key);
+  } else if (existing.original) {
+    await upsertRow(c, spec, existing.original, Object.keys(existing.original).filter(
+      (col) => !spec.keys.some((k) => k.col === col),
+    ));
+  }
+  return true;
+}
+
 /** Add a row that SAP does not have. */
 export async function addRow(relation: string, input: Record<string, unknown>, actor: string): Promise<void> {
   const spec = requireSpec(relation);
@@ -485,23 +646,16 @@ export async function addRow(relation: string, input: Record<string, unknown>, a
   const key = readKey(spec, input);
   const vals = readVals(spec, input, true);
   await checkChoices(spec, vals);
-  const { direct, stored } = splitVals(spec, vals);
+  const { own, linked } = ownAndLinked(spec, vals);
   await transaction(async (c) => {
-    if (spec.fx) {
-      if (await findOverride(c, relation, key)) throw new EditError('a manual rate already exists for that currency and month - edit it instead');
-    } else if (await readRow(c, spec, key)) {
-      throw new EditError('that code already exists - edit it instead');
-    }
-    await c.query(
-      `INSERT INTO app.master_override (relation, row_key, action, vals, admin_added, created_by, updated_by)
-       VALUES ($1, $2::jsonb, 'upsert', $3::jsonb, true, $4, $4)`,
-      [relation, JSON.stringify(key), JSON.stringify(vals), actor],
-    );
-    if (!spec.fx) {
-      await upsertRow(c, spec, { ...spec.insertDefaults, ...direct, ...key }, Object.keys(direct));
-      await writeStored(c, key, stored, actor);
-    }
+    await addTx(c, spec, key, own, actor);
+    for (const r of linkedRelations(spec)) await linkedWrite(c, r, key, nonEmpty(linked), actor);
   });
+}
+
+/** Only the values actually given - an ADD sends every field, mostly empty. */
+function nonEmpty(vals: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(vals).filter(([, v]) => v !== null && v !== undefined && v !== ''));
 }
 
 /** Change fields on an existing row. The first edit snapshots the SAP row. */
@@ -510,98 +664,55 @@ export async function editRow(relation: string, input: Record<string, unknown>, 
   const key = readKey(spec, input);
   const vals = readVals(spec, input, false);
   await checkChoices(spec, vals);
-  const { direct, stored } = splitVals(spec, vals);
+  const { own, linked } = ownAndLinked(spec, vals);
   await transaction(async (c) => {
-    const existing = await findOverride(c, relation, key);
-    if (existing?.action === 'delete') throw new EditError('that row is hidden - restore it first');
-    if (existing) {
-      await c.query(
-        `UPDATE app.master_override SET vals = vals || $2::jsonb, updated_by = $3, updated_at = now() WHERE id = $1`,
-        [existing.id, JSON.stringify(vals), actor],
-      );
-    } else {
-      const original = spec.fx ? null : await readRow(c, spec, key);
-      if (!spec.fx && !original) throw new EditError('no such row');
-      await c.query(
-        `INSERT INTO app.master_override (relation, row_key, action, vals, original, created_by, updated_by)
-         VALUES ($1, $2::jsonb, 'upsert', $3::jsonb, $4::jsonb, $5, $5)`,
-        [relation, JSON.stringify(key), JSON.stringify(vals), original ? JSON.stringify(original) : null, actor],
-      );
-    }
-    if (!spec.fx) {
-      if (Object.keys(direct).length > 0) {
-        await upsertRow(c, spec, { ...spec.insertDefaults, ...direct, ...key }, Object.keys(direct));
+    if (Object.keys(own).length > 0) {
+      // A material only the SAP master knows has no row here to edit; say so
+      // rather than invent one, which would also claim it was seen on orders.
+      if (linkedRelations(spec).length > 0 && !spec.fx
+        && !(await readRow(c, spec, key)) && !(await findOverride(c, relation, key))) {
+        throw new EditError('this material is only in the SAP master - only its SAP master fields can be edited');
       }
-      await writeStored(c, key, stored, actor);
+      await editTx(c, spec, key, own, actor);
     }
+    for (const r of linkedRelations(spec)) await linkedWrite(c, r, key, linked, actor);
   });
 }
 
 /**
  * Hide a row. An administrator's own row is removed outright - there is no SAP
  * version to protect. A SAP row becomes a tombstone the sync respects, holding
- * the whole row so a restore can put it back exactly.
+ * the whole row so a restore can put it back exactly. A Materials row is hidden
+ * on BOTH sides: hiding only the orders side would leave the SAP master half
+ * on the list, now labelled "SAP master only".
  */
 export async function hideRow(relation: string, input: Record<string, unknown>, actor: string): Promise<void> {
   const spec = requireSpec(relation);
   if (!spec.allowDelete) throw new EditError('rows cannot be deleted from this table');
   const key = readKey(spec, input);
   await transaction(async (c) => {
-    const existing = await findOverride(c, relation, key);
-    if (existing?.admin_added) {
-      await c.query(`DELETE FROM app.master_override WHERE id = $1`, [existing.id]);
-      await deleteRow(c, spec, key);
-      await clearStored(c, spec, key);
-      return;
+    let any = await hideTx(c, spec, key, actor);
+    for (const r of linkedRelations(spec)) {
+      any = (await hideTx(c, requireSpec(r), key, actor)) || any;
     }
-    const current = await readRow(c, spec, key);
-    if (!current && !existing) throw new EditError('no such row');
-    // The snapshot is the row BEFORE any override, so a restore undoes the
-    // edits too rather than resurrecting the edited version.
-    const original = existing?.original ?? current;
-    if (existing) {
-      await c.query(
-        `UPDATE app.master_override SET action = 'delete', vals = '{}'::jsonb, original = $2::jsonb,
-                updated_by = $3, updated_at = now() WHERE id = $1`,
-        [existing.id, JSON.stringify(original), actor],
-      );
-    } else {
-      await c.query(
-        `INSERT INTO app.master_override (relation, row_key, action, original, created_by, updated_by)
-         VALUES ($1, $2::jsonb, 'delete', $3::jsonb, $4, $4)`,
-        [relation, JSON.stringify(key), JSON.stringify(original), actor],
-      );
-    }
-    await deleteRow(c, spec, key);
-    // A manual category goes with the row, so a restore brings the material
-    // back to its rule-decided category rather than to a choice that was
-    // made for a row someone then removed.
-    await clearStored(c, spec, key);
+    if (!any) throw new EditError('no such row');
   });
 }
 
 /**
  * Undo an override: an edit goes back to the SAP values it replaced, a hidden
  * row comes back as it was. An FX override simply stops applying from the next
- * recompute.
+ * recompute. On Materials both sides are reverted.
  */
 export async function revertRow(relation: string, input: Record<string, unknown>, actor: string): Promise<void> {
   const spec = requireSpec(relation);
   const key = readKey(spec, input);
   await transaction(async (c) => {
-    const existing = await findOverride(c, relation, key);
-    if (!existing) throw new EditError('nothing to revert - this row has no override');
-    await c.query(`DELETE FROM app.master_override WHERE id = $1`, [existing.id]);
-    if (spec.fx) return;
-    // Reverting hands the category back to the rules as well.
-    await clearStored(c, spec, key);
-    if (existing.admin_added) {
-      await deleteRow(c, spec, key);
-    } else if (existing.original) {
-      await upsertRow(c, spec, existing.original, Object.keys(existing.original).filter(
-        (col) => !spec.keys.some((k) => k.col === col),
-      ));
+    let any = await revertTx(c, spec, key);
+    for (const r of linkedRelations(spec)) {
+      any = (await revertTx(c, requireSpec(r), key)) || any;
     }
+    if (!any) throw new EditError('nothing to revert - this row has no override');
     void actor;
   });
 }

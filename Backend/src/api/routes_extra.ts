@@ -12,12 +12,13 @@ import argon2 from 'argon2';
 import { queryOne, query } from '../db/client.js';
 import { recordAudit } from '../modules/audit/audit.js';
 import {
-  addRow, editRow, EditError, editSpecFor, fieldsForPage, hideRow, overridesFor, pendingFxOverrides, revertRow,
+  addRow, editRow, EditError, editSpecFor, fieldsForPage, hideRow, linkedRelations, overridesFor,
+  pendingFxOverrides, revertRow,
 } from '../modules/master/edit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
 import { sessionFingerprint } from '../modules/auth/session.js';
 import {
-  approverBottlenecks, materialDetail, materialGroupPage, requisitionerDemand,
+  approverBottlenecks, categoryDetail, materialDetail, materialGroupPage, requisitionerDemand,
   topMaterialsSpend, vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
 } from '../modules/analytics/entity.js';
 import {
@@ -40,7 +41,7 @@ import {
   shareLastResult,
 } from '../modules/ingest/share_poller.js';
 import { loadEnv } from '../config/env.js';
-import { parseGlobalFilter } from '../modules/analytics/globalfilter.js';
+import { mergeIntoPredicate, parseGlobalFilter, type GlobalFilter } from '../modules/analytics/globalfilter.js';
 
 /** `?sort=<key>&dir=asc|desc` from a table header; the callee whitelists the key. */
 function sortOf(q: Record<string, unknown>): { key: string; dir: 'asc' | 'desc' } | null {
@@ -73,6 +74,11 @@ function shareEnvPath(): string {
 /** Argon2id with the same parameters as the seeder and the login path. */
 async function hashPassword(pw: string): Promise<string> {
   return argon2.hash(pw, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
+}
+
+/** A popup's Plant filter: `popPlant=a,b` (`plant` is the filter bar's), capped like the other list params. */
+function popupPlants(q: Record<string, unknown>): string[] {
+  return String(q['popPlant'] ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 300);
 }
 
 export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
@@ -108,7 +114,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // The id selects a fixed query from the registry; it never reaches SQL, so
     // an unknown id is a 404 rather than a malformed statement. The sort key is
     // checked against the page's own columns for the same reason.
-    const page = await loadMasterPage(String(req.params.id), v.id, q, sort);
+    // One page number per table on the master page: page0, page1, ...
+    const pages = [0, 1, 2, 3, 4, 5].map((i) => Number(query[`page${i}`] ?? 0) || 0);
+    const page = await loadMasterPage(String(req.params.id), v.id, q, sort, pages);
     if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
 
     // Only an Admin is told what is editable, and the marks on overridden rows.
@@ -127,7 +135,13 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
           keys: spec.keys, fields: await fieldsForPage(spec), readOnly: spec.readOnly,
           allowAdd: spec.allowAdd, allowDelete: spec.allowDelete, note: spec.note, fx: spec.fx === true,
         };
-        t['marks'] = await overridesFor(spec.relation);
+        // A table that edits a second relation (Materials writes the SAP
+        // master's description and category to core.dim_material_master)
+        // carries that relation's marks too, so an edit there is badged here.
+        t['marks'] = [
+          ...await overridesFor(spec.relation),
+          ...(await Promise.all(linkedRelations(spec).map((r2) => overridesFor(r2)))).flat(),
+        ];
         if (spec.fx) t['pendingFx'] = await pendingFxOverrides();
       }
     }
@@ -215,7 +229,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/entity/material/:code', role('analyst', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const detail = await materialDetail(v.id, ctx.scope, String(req.params.code));
+    // The popup's own Plant filter (19 Oct 2026).
+    const plants = popupPlants(req.query as Record<string, unknown>);
+    const detail = await materialDetail(v.id, ctx.scope, String(req.params.code), plants);
     if (!detail) throw new HttpProblem(404, 'not-found', 'Material not found or outside your data scope');
 
     const fp = sessionFingerprint(ctx.sid);
@@ -225,8 +241,54 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       ...detail,
       drill: {
         allLines: issueDrillToken(
-          { grain: 'po_line', filters: { materialCode: req.params.code }, label: `Material ${req.params.code} — all PO lines` } as DrillPredicate,
+          mergeIntoPredicate(
+            { grain: 'po_line', filters: { materialCode: req.params.code }, label: `Material ${req.params.code} — all PO lines` },
+            plants.length > 0 ? { plant: plants } : {},
+          ) as unknown as DrillPredicate,
           v.id, ctx.scope, fp,
+        ),
+      },
+    });
+  }));
+
+  // Category 360 (19 Oct 2026): the Material Group page's category charts and
+  // summary open this instead of a row list. It follows the filter bar, as the
+  // two charts that open it do; its own Plant filter narrows that further.
+  r.get('/api/v1/entity/category', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await version();
+    const q = req.query as Record<string, unknown>;
+    // A query parameter, not a path segment: names carry '&' and spaces.
+    const category = String(q['name'] ?? '').trim();
+    if (category === '') throw new HttpProblem(400, 'bad-request', 'name (the spend category) is required');
+    const gf = parseGlobalFilter(q);
+    const plants = popupPlants(q);
+    // The popup's plants within the filter bar's: both apply, so a plant the
+    // bar excludes stays excluded (an empty overlap matches nothing).
+    const eff: GlobalFilter = plants.length === 0 ? gf : {
+      ...gf,
+      plant: gf.plant?.length ? (plants.filter((p2) => gf.plant!.includes(p2)).length > 0
+        ? plants.filter((p2) => gf.plant!.includes(p2)) : ['(no plant in both)']) : plants,
+    };
+    const detail = await categoryDetail(v.id, ctx.scope, category, eff, gf);
+    if (!detail) throw new HttpProblem(404, 'not-found', 'Category not found or outside your data scope');
+
+    const fp = sessionFingerprint(ctx.sid);
+    const mk = (grain: 'po_line' | 'pr_item', filters: Record<string, unknown>, label: string) => issueDrillToken(
+      mergeIntoPredicate({ grain, filters, label }, eff) as unknown as DrillPredicate, v.id, ctx.scope, fp,
+    );
+    res.json({
+      datasetVersionId: v.id,
+      asOfDate: v.asOfDate,
+      ...detail,
+      drill: {
+        allLines: mk('po_line', { ownSpendCategory: category, notSto: true, notDeleted: true }, `${category} — all PO lines`),
+        prItems: mk('pr_item', { notDeleted: true, ownSpendCategory: category }, `${category} — all PR items`),
+        openPrItems: mk('pr_item', { notDeleted: true, ownSpendCategory: category, scopeOpen: true }, `${category} — open items`),
+        openCommitment: mk(
+          'po_line',
+          { ownSpendCategory: category, notSto: true, notDeleted: true, hasOpenCommitment: true },
+          `${category} — open commitment`,
         ),
       },
     });
@@ -792,6 +854,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/entity/material-groups', role('analyst', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
     const out = await materialGroupPage(
       v.id,
       ctx.scope,
@@ -800,6 +863,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       req.query.materialGroup === undefined ? null : String(req.query.materialGroup),
       Math.min(Number(req.query.limit ?? 150), 500),
       Math.max(Number(req.query.offset ?? 0), 0),
+      gf,
     );
     // v1's mgx drill: each category's counts open as rows (G3.4).
     const fp = sessionFingerprint(ctx.sid);
@@ -814,12 +878,13 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // requisition that has no order yet, which on this page is the point.
     const categories = (out['categories'] as Record<string, unknown>[]).map((c) => ({
       ...c,
+      // The summary follows the filter bar (19 Oct 2026), so its drills do.
       drillAll: issueDrillToken(
-        { grain: 'pr_item', filters: { notDeleted: true, ownSpendCategory: c['category'] }, label: `${c['category']} — all PR items` } as DrillPredicate,
+        mergeIntoPredicate({ grain: 'pr_item', filters: { notDeleted: true, ownSpendCategory: c['category'] }, label: `${c['category']} — all PR items` }, gf) as unknown as DrillPredicate,
         v.id, ctx.scope, fp,
       ),
       drillOpen: issueDrillToken(
-        { grain: 'pr_item', filters: { notDeleted: true, ownSpendCategory: c['category'], scopeOpen: true }, label: `${c['category']} — open items` } as DrillPredicate,
+        mergeIntoPredicate({ grain: 'pr_item', filters: { notDeleted: true, ownSpendCategory: c['category'], scopeOpen: true }, label: `${c['category']} — open items` }, gf) as unknown as DrillPredicate,
         v.id, ctx.scope, fp,
       ),
     }));

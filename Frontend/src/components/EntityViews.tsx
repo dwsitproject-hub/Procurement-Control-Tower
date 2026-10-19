@@ -7,6 +7,7 @@ import {
 } from 'chart.js';
 import { api } from '../lib/api';
 import { CATEGORY_COLORS, ChartPanel } from './Chart';
+import { FilterDropdown } from './FilterDropdown';
 
 ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
 import { DASH, FLAG_META, formatCurrency, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
@@ -625,6 +626,8 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [open, setOpen] = useState<string | null>(null);
+  /** The Category 360 popup (19 Oct 2026), by spend category. */
+  const [cat360, setCat360] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
@@ -632,14 +635,16 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
   }, [search]);
 
   useEffect(() => {
-    const q = new URLSearchParams({ limit: String(limit) });
+    // The filter bar too: the category summary follows it (19 Oct 2026).
+    const q = new URLSearchParams(filterQuery);
+    q.set('limit', String(limit));
     if (category) q.set('category', category);
     if (group) q.set('materialGroup', group);
     if (debounced) q.set('q', debounced);
     api.get<Record<string, any>>(`/api/v1/entity/material-groups?${q.toString()}`)
       .then(setD)
       .catch(() => setD(null));
-  }, [category, group, debounced, limit]);
+  }, [category, group, debounced, limit, filterQuery]);
 
   if (!d) return <div className="center-msg"><div className="spinner" />Loading material groups…</div>;
 
@@ -647,8 +652,9 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
     <>
       {/* v1's Analysis by Material Group charts, on top (5 Aug 2026). */}
       <div className="chart-grid">
-        <ChartPanel chartId="items_by_category" onDrill={onDrill} currency={currency} filterQuery={filterQuery} />
-        <ChartPanel chartId="e2e_by_category" onDrill={onDrill} currency={currency} filterQuery={filterQuery} />
+        {/* A bar or its label opens the Category 360 popup (19 Oct 2026). */}
+        <ChartPanel chartId="items_by_category" onDrill={onDrill} currency={currency} filterQuery={filterQuery} onBucketClick={(k) => setCat360(k)} />
+        <ChartPanel chartId="e2e_by_category" onDrill={onDrill} currency={currency} filterQuery={filterQuery} onBucketClick={(k) => setCat360(k)} />
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
@@ -673,23 +679,24 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
                 <tr
                   key={c.category}
                   className={`ent-row ${i % 2 ? '' : 're'}${category === c.category ? ' ent-row--sel' : ''}`}
-                  title={`Click to filter the material list to ${c.category}`}
-                  onClick={() => setCategory(category === c.category ? '' : c.category)}
+                  title={`Open ${c.category} 360`}
+                  onClick={() => setCat360(c.category)}
                 >
-                  <td style={{ fontWeight: 700, color: CATEGORY_COLORS[c.category] ?? 'inherit' }}>{c.category}</td>
+                  <td style={{ fontWeight: 700, color: CATEGORY_COLORS[c.category] ?? 'inherit' }}>
+                    <button className="cu-link" style={{ fontWeight: 700, color: 'inherit' }} onClick={(e) => { e.stopPropagation(); setCat360(c.category); }}>
+                      {c.category}
+                    </button>
+                  </td>
+                  {/* The counts open the 360 too; its own buttons list the rows. */}
                   <td className="num">
-                    {c.drillAll ? (
-                      <button className="cu-link" onClick={(e) => { e.stopPropagation(); onDrill(c.drillAll, `${c.category} — all PR items`); }}>
-                        {formatNumber(c.items)}
-                      </button>
-                    ) : formatNumber(c.items)}
+                    <button className="cu-link" onClick={(e) => { e.stopPropagation(); setCat360(c.category); }}>
+                      {formatNumber(c.items)}
+                    </button>
                   </td>
                   <td className="num">
-                    {c.drillOpen ? (
-                      <button className="cu-link" style={{ color: 'var(--crit)', fontWeight: 700 }} onClick={(e) => { e.stopPropagation(); onDrill(c.drillOpen, `${c.category} — open items`); }}>
-                        {formatNumber(c.open)}
-                      </button>
-                    ) : formatNumber(c.open)}
+                    <button className="cu-link" style={{ color: 'var(--crit)', fontWeight: 700 }} onClick={(e) => { e.stopPropagation(); setCat360(c.category); }}>
+                      {formatNumber(c.open)}
+                    </button>
                   </td>
                   <td className="num">{c.pctOpen}%</td>
                   <td className={mgtAg(c.avgPra)}>{c.avgPra === null ? DASH : Number(c.avgPra).toFixed(1)}</td>
@@ -702,12 +709,24 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
             </tbody>
           </table>
         </div>
-        <p className="note">PR items per category (deleted excluded); stage averages over non-negative spans. Click a category to filter the material list; click a count to open its rows.</p>
+        <p className="note">PR items per category (deleted excluded), under the filter bar like the charts above; stage averages over non-negative spans. Click a category or any of its figures for its 360 view; filter the material list by category below.</p>
       </div>
 
       <div className="panel">
         <div className="dt-toolbar">
           <h3 className="pr-tbl-h" style={{ margin: 0 }}>Material Explorer — click a material for vendors, areas &amp; price history{category ? ` · ${category}` : ''}</h3>
+          {/* The category filter moved here when a summary click began opening
+              the 360 popup (19 Oct 2026). */}
+          <select
+            className="dt-search"
+            style={{ flex: 'none', width: 180 }}
+            value={category}
+            onChange={(e) => { setCategory(e.target.value); setLimit(150); }}
+            aria-label="Spend category"
+          >
+            <option value="">All spend categories</option>
+            {d.categories.map((c: any) => <option key={c.category} value={c.category}>{c.category}</option>)}
+          </select>
           <select
             className="dt-search"
             style={{ flex: 'none', width: 160 }}
@@ -840,25 +859,214 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
       </div>
 
       {open && <MaterialModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} />}
+      {cat360 && (
+        <CategoryModal
+          category={cat360}
+          onClose={() => setCat360(null)}
+          onDrill={onDrill}
+          currency={currency}
+          filterQuery={filterQuery}
+        />
+      )}
     </>
   );
 }
 
+/**
+ * Category 360 (19 Oct 2026): a spend category drawn like the Material 360
+ * popup - figures, the top vendors' monthly spend, vendor and area shares, its
+ * materials (each opening its own Material 360) and its newest PO lines.
+ * Follows the filter bar, like the charts that open it, and has its own Plant
+ * filter on top.
+ */
+export function CategoryModal({
+  category, onClose, onDrill, currency = 'USD', filterQuery = '',
+}: {
+  category: string; onClose: () => void; onDrill: (t: string, l: string) => void;
+  currency?: 'USD' | 'IDR';
+  filterQuery?: string;
+}) {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [plants, setPlants] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [mat, setMat] = useState<string | null>(null);
+
+  useEffect(() => {
+    let gone = false;
+    const q = new URLSearchParams(filterQuery);
+    q.set('name', category);
+    if (plants.length > 0) q.set('popPlant', plants.join(','));
+    setBusy(true);
+    setErr(null);
+    api.get<Record<string, any>>(`/api/v1/entity/category?${q.toString()}`)
+      .then((r) => { if (!gone) setD(r); })
+      .catch((e: Error) => { if (!gone) setErr(e.message); })
+      .finally(() => { if (!gone) setBusy(false); });
+    return () => { gone = true; };
+  }, [category, plants, filterQuery]);
+
+  const k = d?.kpis;
+  const money = (usd: number | null, idr: number | null) => formatCurrency(usd, idr, currency);
+  const days = (v: number | null | undefined) => (v === null || v === undefined ? DASH : `${Number(v).toFixed(1)} d`);
+  const scopeNote = plants.length > 0 ? ` · plant ${plants.join(', ')}` : '';
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={`${category} 360`} onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h3>
+            🏷️ <span style={{ color: CATEGORY_COLORS[category] ?? 'inherit' }}>{category}</span>{' '}
+            <span className="muted">spend category 360</span>
+          </h3>
+          <span className="spacer" />
+          {d?.drill?.allLines && (
+            <button className="dt-btn" onClick={() => onDrill(d.drill.allLines, `${category} — all PO lines${scopeNote}`)}>
+              Open all lines
+            </button>
+          )}
+          <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>Close</button>
+        </header>
+        <div className="body">
+          <div className="gf-bar cat360-filters">
+            <span className="gf-label">Filter</span>
+            <FilterDropdown
+              label="Plant"
+              options={d?.plantOptions ?? []}
+              selected={plants}
+              onChange={setPlants}
+            />
+            {plants.length > 0 && (
+              <button className="gf-btn gf-clear" onClick={() => setPlants([])}>Clear</button>
+            )}
+            {filterQuery !== '' && <span className="gf-note">the page's filter bar applies too</span>}
+            {busy && d && <span className="gf-note">updating…</span>}
+          </div>
+
+          {err && <p className="err">{err}</p>}
+          {!d && !err && <div className="center-msg"><div className="spinner" />Loading…</div>}
+          {d && k && (
+            <>
+              <div className="ent-kpis">
+                <Bio label="PO lines" value={`${formatNumber(k.lineCount)} · ${formatNumber(k.poCount)} POs`} />
+                <Bio label="Vendors" value={formatNumber(k.vendorCount)} />
+                <Bio label="Materials" value={formatNumber(k.materialCount)} />
+                <Bio label="Plants" value={formatNumber(k.plantCount)} />
+                <Bio
+                  label={`Spend ${currency}`}
+                  value={money(k.spendUsd, k.spendIdr)}
+                  title={k.unratedLines > 0 ? `${formatNumber(k.unratedLines)} lines have no USD rate; the USD total is withheld` : undefined}
+                />
+                <Bio label="Open commitment" value={money(k.openCommitUsd, k.openCommitIdr)} />
+              </div>
+              <div className="ent-kpis" style={{ marginTop: '.4rem' }}>
+                <Bio label="PR items" value={formatNumber(k.prItems)} />
+                <Bio label="Open PR items" value={`${formatNumber(k.openPrItems)}${k.prItems > 0 ? ` · ${((k.openPrItems / k.prItems) * 100).toFixed(1)}%` : ''}`} />
+                <Bio label="PRA avg" value={days(k.avgPra)} />
+                <Bio label="SRC avg" value={days(k.avgSrc)} />
+                <Bio label="POA avg" value={days(k.avgPoa)} />
+                <Bio label="DLT avg" value={days(k.avgDlt)} />
+                <Bio label="E2E avg" value={days(k.avgE2e)} />
+              </div>
+              <p className="note" style={{ margin: '.3rem 0 0' }}>
+                List the rows:{' '}
+                {d.drill?.prItems && <button className="cu-link" onClick={() => onDrill(d.drill.prItems, `${category} — all PR items${scopeNote}`)}>PR items</button>}
+                {' · '}
+                {d.drill?.openPrItems && <button className="cu-link" onClick={() => onDrill(d.drill.openPrItems, `${category} — open items${scopeNote}`)}>open PR items</button>}
+                {' · '}
+                {d.drill?.openCommitment && <button className="cu-link" onClick={() => onDrill(d.drill.openCommitment, `${category} — open commitment${scopeNote}`)}>open commitment</button>}
+                . PO figures exclude STO and deleted lines; PR figures use the requisition's own material, as the summary does.
+              </p>
+
+              <div className="ent-mini" style={{ marginTop: '.6rem' }}>
+                <div className="ent-h" style={{ marginTop: 0 }}>Spend by month — top vendors ({currency})</div>
+                <PriceTrend
+                  rows={(d.spendByVendor ?? []).map((x: any) => ({
+                    ...x, unitPrice: currency === 'IDR' ? x.idr : x.usd,
+                  }))}
+                  yTitle={`Spend (${currency})`}
+                  empty="No dated spend to chart."
+                />
+                <p className="note" style={{ marginBottom: 0 }}>
+                  The six vendors with the most spend in this category, by PO document month.
+                </p>
+              </div>
+              <TwoCol
+                left={<AreaDonut title={`Suppliers / Vendors — share of PO amount (${currency})`} rows={(d.vendorShare ?? []).map((x: any) => ({ plant: x.vendorCode, plantName: `${x.vendorCode ?? ''} ${x.vendorName ?? ''}`.trim() || '(vendor)', usd: currency === 'IDR' ? x.idr : x.usd }))} />}
+                right={<AreaDonut title={`Areas purchased — share of PO amount (${currency})`} rows={(d.areaShare ?? []).map((x: any) => ({ ...x, usd: currency === 'IDR' ? x.idr : x.usd }))} />}
+              />
+
+              <h4 className="ent-h">
+                Materials in this category{' '}
+                <span className="muted">· top {d.topMaterials.length} of {formatNumber(k.materialCount)} by spend · click one for its Material 360</span>
+              </h4>
+              <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
+                <table className="data dd-tbl">
+                  <thead>
+                    <tr>
+                      <th>Material</th><th>Description</th><th>Mat Grp</th>
+                      <th className="num">Vendors</th><th className="num">Lines</th>
+                      <th className="num">Spend {currency}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.topMaterials.length === 0 && <tr><td colSpan={6} className="muted">No materials with a code.</td></tr>}
+                    {d.topMaterials.map((m: any, i: number) => (
+                      <tr key={m.materialCode} className={`ent-row ${i % 2 ? '' : 're'}`} title="Open Material 360" onClick={() => setMat(m.materialCode)}>
+                        <td style={{ fontWeight: 700, color: 'var(--blue)' }}>{m.materialCode}</td>
+                        <td>{m.description}</td>
+                        <td>{m.materialGroup ?? DASH}</td>
+                        <td className="num">{m.soleSource ? <span title="Sole source">🔴 1</span> : formatNumber(m.vendors)}</td>
+                        <td className="num">{formatNumber(m.lines)}</td>
+                        <td className="num">{money(m.spendUsd, m.spendIdr)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <h4 className="ent-h">Purchase Orders in this category <span className="muted">· {formatNumber(k.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
+              <PoHistoryTable rows={d.poHistory} vendor material currency={currency} />
+            </>
+          )}
+        </div>
+      </div>
+      {mat && (
+        <MaterialModal
+          code={mat}
+          onClose={() => setMat(null)}
+          onDrill={onDrill}
+          currency={currency}
+          initialPlants={plants}
+        />
+      )}
+    </div>
+  );
+}
+
 export function MaterialModal({
-  code, onClose, onDrill, currency = 'USD',
+  code, onClose, onDrill, currency = 'USD', initialPlants = [],
 }: {
   code: string; onClose: () => void; onDrill: (t: string, l: string) => void;
   /** Topbar display currency — every money cell below reads it. */
   currency?: 'USD' | 'IDR';
+  /** Plants to start filtered to - a Category 360's choice, carried in. */
+  initialPlants?: string[];
 }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /** The popup's own Plant filter (19 Oct 2026); empty = every plant. */
+  const [plants, setPlants] = useState<string[]>(initialPlants);
 
   useEffect(() => {
-    api.get<Record<string, any>>(`/api/v1/entity/material/${encodeURIComponent(code)}`)
-      .then(setD)
-      .catch((e: Error) => setErr(e.message));
-  }, [code]);
+    let gone = false;
+    const qs = plants.length > 0 ? `?popPlant=${encodeURIComponent(plants.join(','))}` : '';
+    setErr(null);
+    api.get<Record<string, any>>(`/api/v1/entity/material/${encodeURIComponent(code)}${qs}`)
+      .then((r) => { if (!gone) setD(r); })
+      .catch((e: Error) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+  }, [code, plants]);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -874,6 +1082,13 @@ export function MaterialModal({
           <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>Close</button>
         </header>
         <div className="body">
+          <div className="gf-bar cat360-filters">
+            <span className="gf-label">Filter</span>
+            <FilterDropdown label="Plant" options={d?.plantOptions ?? []} selected={plants} onChange={setPlants} />
+            {plants.length > 0 && (
+              <button className="gf-btn gf-clear" onClick={() => setPlants([])}>Clear</button>
+            )}
+          </div>
           {err && <p className="err">{err}</p>}
           {!d && !err && <div className="center-msg"><div className="spinner" />Loading…</div>}
           {d && (
@@ -950,7 +1165,11 @@ function AreaDonut({ title, rows }: { title: string; rows: Record<string, any>[]
 }
 
 /** v1's material-360 unit-price trend: one line per top-6 vendor (IDR). */
-function PriceTrend({ rows }: { rows: Record<string, any>[] }) {
+function PriceTrend({ rows, yTitle = 'Unit price (IDR equivalent)', empty = 'No IDR unit-price history to chart.' }: {
+  rows: Record<string, any>[];
+  yTitle?: string;
+  empty?: string;
+}) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
   useEffect(() => {
@@ -986,12 +1205,12 @@ function PriceTrend({ rows }: { rows: Record<string, any>[] }) {
         plugins: {
           legend: { display: true, position: 'top', labels: { boxWidth: 10, font: { size: 9 } } },
         },
-        scales: { y: { title: { display: true, text: 'Unit price (IDR equivalent)' } } },
+        scales: { y: { title: { display: true, text: yTitle } } },
       },
     }) as unknown as ChartJS;
     return () => { chart.current?.destroy(); chart.current = null; };
-  }, [rows]);
-  if (rows.length === 0) return <p className="note">No IDR unit-price history to chart.</p>;
+  }, [rows, yTitle]);
+  if (rows.length === 0) return <p className="note">{empty}</p>;
   return <div style={{ height: 240 }}><canvas ref={canvas} /></div>;
 }
 
@@ -1057,13 +1276,21 @@ function SimpleTable({ prefKey, head, rows, sortValues, right }: {
   return <ToolTable prefKey={prefKey} columns={columns} rows={data} maxHeight="300px" className="data" />;
 }
 
-function PoHistoryTable({ rows, vendor = false, currency = 'USD' }: {
-  rows: Record<string, any>[]; vendor?: boolean; currency?: 'USD' | 'IDR';
+function PoHistoryTable({ rows, vendor = false, material = false, currency = 'USD' }: {
+  rows: Record<string, any>[]; vendor?: boolean;
+  /** Material, description and plant columns - the Category 360's list. */
+  material?: boolean;
+  currency?: 'USD' | 'IDR';
 }) {
   const columns: ToolTableColumn<Record<string, any>>[] = [
     { key: 'poNo', label: 'PO', render: (r) => r.poNo },
     { key: 'poItem', label: 'Item', right: true, render: (r) => r.poItem },
     { key: 'documentDate', label: 'Date', render: (r) => formatDate(r.documentDate) },
+    ...(material ? [
+      { key: 'materialCode', label: 'Material', render: (r: Record<string, any>) => r.materialCode ?? DASH },
+      { key: 'shortText', label: 'Description', render: (r: Record<string, any>) => r.shortText ?? DASH },
+      { key: 'plant', label: 'Plant', render: (r: Record<string, any>) => r.plant ?? DASH },
+    ] : []),
     ...(vendor ? [{ key: 'vendorName', label: 'Vendor', render: (r: Record<string, any>) => r.vendorName ?? DASH }] : []),
     { key: 'orderQty', label: 'Qty', right: true, render: (r) => formatNumber(r.orderQty, 2) },
     { key: 'orderUnit', label: 'Unit', render: (r) => r.orderUnit ?? DASH },
@@ -1085,7 +1312,7 @@ function PoHistoryTable({ rows, vendor = false, currency = 'USD' }: {
   ];
   return (
     <ToolTable
-      prefKey={vendor ? 'material_po_history_layout' : 'vendor_po_history_layout'}
+      prefKey={material ? 'category_po_history_layout' : vendor ? 'material_po_history_layout' : 'vendor_po_history_layout'}
       columns={columns}
       rows={rows}
       maxHeight="340px"

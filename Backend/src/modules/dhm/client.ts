@@ -60,8 +60,13 @@ async function timedFetch(url: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(url, { ...init, signal: ctl.signal });
   } catch (e) {
-    const msg = (e as Error).name === 'AbortError' ? `timed out after ${TIMEOUT_MS / 1000}s` : (e as Error).message;
-    throw new DhmError(`Data Hub unreachable: ${msg}`, 0, 'UNAVAILABLE');
+    // Node's fetch says only "fetch failed"; the reason (ENOTFOUND = the name
+    // does not resolve here, ECONNREFUSED, ETIMEDOUT, EHOSTUNREACH...) is on
+    // `cause`, and it is the part an operator can act on.
+    const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+    const why = cause?.code ? `${cause.code}${cause.message ? ` (${cause.message})` : ''}` : (e as Error).message;
+    const msg = (e as Error).name === 'AbortError' ? `timed out after ${TIMEOUT_MS / 1000}s` : why;
+    throw new DhmError(`Data Hub unreachable at ${new URL(url).host}: ${msg}`, 0, 'UNAVAILABLE');
   } finally {
     clearTimeout(t);
   }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { DASH, formatMoney, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * W7 — custom KPI and chart builder. v1's cu-modal and ce-modal.
@@ -78,7 +79,7 @@ export function CustomTab({ onDrill, currency = 'USD' }: {
 
       {saved.kpis.length > 0 && (
         <div className="panel">
-          <h2>My KPIs</h2>
+          <h2><Lbl>My KPIs</Lbl></h2>
           <div className="kpi-grid">
             {saved.kpis.map((k, i) => (
               <CustomKpiCard key={`${k.title}-${i}`} spec={k} onDrill={onDrill} currency={currency}

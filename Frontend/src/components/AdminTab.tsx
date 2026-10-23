@@ -5,6 +5,7 @@ import { CoupaPanel } from './CoupaTab';
 import { UserAccessTab } from './UserAccessTab';
 import { SapUploadTab } from './SapUploadTab';
 import { NotifyTab } from './NotifyTab';
+import { Lbl } from '../lib/labels';
 
 /**
  * W6 — steward tooling. v1's cfg-modal (exclusions), cv-modal (column mapping)
@@ -176,8 +177,8 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
       .catch((e: Error) => setMsg(e instanceof ApiError && e.status === 403 ? 'Steward role required.' : e.message));
   }, []);
 
-  if (msg && !current) return <div className="panel"><h2>Data exclusions</h2><p className="note">{msg}</p></div>;
-  if (!current || !options) return <div className="panel"><h2>Data exclusions</h2><div className="spinner" /></div>;
+  if (msg && !current) return <div className="panel"><h2><Lbl>Data exclusions</Lbl></h2><p className="note">{msg}</p></div>;
+  if (!current || !options) return <div className="panel"><h2><Lbl>Data exclusions</Lbl></h2><div className="spinner" /></div>;
 
   /**
    * The list-valued exclusion keys.
@@ -413,7 +414,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div className="panel">
-      <h2>🎛 Data exclusions</h2>
+      <h2>🎛 <Lbl>Data exclusions</Lbl></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
         Excluded document types, purchasing groups and orgs are removed from <strong>every</strong>
         stage — requisitions, approval steps (AR), sourcing, orders,
@@ -489,7 +490,7 @@ function MappingsPanel() {
 
   return (
     <div className="panel">
-      <h2>🔧 Column mapping</h2>
+      <h2>🔧 <Lbl>Column mapping</Lbl></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
         When SAP renames a column, map the canonical field to the new header here. Mappings are
         server-side and audited — every user sees the same numbers, unlike v1's per-browser storage.
@@ -558,10 +559,10 @@ function FxPanel() {
     api.get<Record<string, any>>('/api/v1/admin/fx').then(setD).catch(() => setD(null));
   }, []);
 
-  if (!d) return <div className="panel"><h2>💱 FX rates</h2><div className="spinner" /></div>;
+  if (!d) return <div className="panel"><h2>💱 <Lbl>FX rates</Lbl></h2><div className="spinner" /></div>;
   return (
     <div className="panel">
-      <h2>💱 FX rates <span className="muted">— policy {d.policy}, year resolved {d.yearResolved ?? DASH}</span></h2>
+      <h2>💱 <Lbl>FX rates</Lbl> <span className="muted">— policy {d.policy}, year resolved {d.yearResolved ?? DASH}</span></h2>
       <div className="table-wrap" style={{ maxHeight: '300px', overflow: 'auto' }}>
         <table className="data">
           <thead>

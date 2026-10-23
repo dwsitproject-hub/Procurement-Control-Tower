@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { DASH, formatDateTime } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * Notifications (6 Aug 2026) — who gets emailed when a scheduled run finishes
@@ -58,7 +59,7 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
   useEffect(load, [load]);
 
   if (!cfg) {
-    return <div className="panel"><h2>📧 Notifications</h2><div className="spinner" /></div>;
+    return <div className="panel"><h2>📧 <Lbl>Notifications</Lbl></h2><div className="spinner" /></div>;
   }
 
   const save = async () => {
@@ -105,7 +106,7 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div className="panel">
-      <h2>📧 Notifications</h2>
+      <h2>📧 <Lbl>Notifications</Lbl></h2>
       <p className="note" style={{ marginTop: 0 }}>
         Emails the outcome of scheduled runs. A mail problem never affects an ingest or a
         sync — sends happen after the work is done, and a failure is recorded here rather
@@ -119,7 +120,7 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
         </p>
       )}
 
-      <h3 className="pr-tbl-h">Recipients</h3>
+      <h3 className="pr-tbl-h"><Lbl>Recipients</Lbl></h3>
       <label className="cu-field" style={{ display: 'block', maxWidth: 620 }}>
         Email addresses — comma or space separated
         <textarea
@@ -132,7 +133,7 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
         />
       </label>
 
-      <h3 className="pr-tbl-h">When to send</h3>
+      <h3 className="pr-tbl-h"><Lbl>When to send</Lbl></h3>
       <div className="dt-toolbar" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
         <label className="dt-check">
           <input type="checkbox" checked={onOk} disabled={!isAdmin}
@@ -181,7 +182,7 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
       </div>
       {msg && <p className="note"><strong>{msg}</strong></p>}
 
-      <h3 className="pr-tbl-h">Mail server <span className="muted">— environment configuration</span></h3>
+      <h3 className="pr-tbl-h"><Lbl>Mail server</Lbl> <span className="muted">— environment configuration</span></h3>
       {/* SMTP_FROM is usually "Display Name <addr>"; the comparison needs the
           address alone. No regex: the angle brackets are the whole grammar. */}
       <div className="table-wrap">
@@ -245,7 +246,7 @@ export function NotifyTab({ isAdmin }: { isAdmin: boolean }) {
 
       {cfg.recent.length > 0 && (
         <>
-          <h3 className="pr-tbl-h">Recent notifications</h3>
+          <h3 className="pr-tbl-h"><Lbl>Recent notifications</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 280, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>

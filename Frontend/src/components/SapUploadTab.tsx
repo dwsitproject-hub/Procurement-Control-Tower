@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../lib/api';
 import { DASH, formatDateTime, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * SAP Data Upload — the manual fallback for when the share-folder sync is not
@@ -459,7 +460,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   };
 
   if (!cfg) {
-    return <div className="panel"><h2>🔁 SAP Data Sync</h2><div className="spinner" /></div>;
+    return <div className="panel"><h2>🔁 <Lbl>SAP Data Sync</Lbl></h2><div className="spinner" /></div>;
   }
 
   const scanOf = (feed: string) => scan?.feeds.find((f) => f.feed === feed);
@@ -473,7 +474,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   return (
     <div className="panel">
       <h2>
-        🔁 SAP Data Sync{' '}
+        🔁 <Lbl>SAP Data Sync</Lbl>{' '}
         <span className="muted">— per file: folder, name pattern, 3 pickup times ({cfg.timezone})</span>
       </h2>
       <p className="note" style={{ marginTop: 0 }}>
@@ -502,7 +503,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         up front.
       */}
       <h3 className="pr-tbl-h">
-        📁 After a run <span className="muted">— move the files aside</span>
+        📁 <Lbl>After a run</Lbl> <span className="muted">— move the files aside</span>
       </h3>
       <p className="note">
         With this on, the files a run consumed are moved out of the pickup folder: into{' '}
@@ -831,7 +832,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
 
       {scan?.feeds.some((f) => f.others.length > 0 || !f.readable) && (
         <>
-          <h3 className="pr-tbl-h">Files that would not be used</h3>
+          <h3 className="pr-tbl-h"><Lbl>Files that would not be used</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -879,7 +880,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
 
       {cfg.recentRuns.length > 0 && (
         <>
-          <h3 className="pr-tbl-h">Recent pickups</h3>
+          <h3 className="pr-tbl-h"><Lbl>Recent pickups</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 220, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -995,7 +996,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
     <SapSyncSection canEdit={canUpload} isAdmin={isAdmin} />
 
     <div className="panel">
-      <h2>⬆️ SAP Data Upload</h2>
+      <h2>⬆️ <Lbl>SAP Data Upload</Lbl></h2>
       <p className="note" style={{ marginTop: 0 }}>
         Manual fallback for when the share-folder sync is not running. Uploaded files go through the
         <strong> same pipeline</strong> as the automatic sync — same validations, same transform,
@@ -1019,7 +1020,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
         </p>
       ) : (
         <>
-          <h3 className="pr-tbl-h">1. Choose the SAP exports</h3>
+          <h3 className="pr-tbl-h"><Lbl>1. Choose the SAP exports</Lbl></h3>
           <div className="table-wrap" style={{ marginBottom: '.6rem' }}>
             <table className="data dd-tbl">
               <thead>
@@ -1169,7 +1170,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
 
       {result && (
         <>
-          <h3 className="pr-tbl-h">Result</h3>
+          <h3 className="pr-tbl-h"><Lbl>Result</Lbl></h3>
           {result.outcome === 'published' && (
             <p className="note">
               <span className="bs sd">published</span>{' '}

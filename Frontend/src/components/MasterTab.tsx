@@ -4,6 +4,7 @@ import { formatNumber } from '../lib/format';
 import {
   MasterEditDialog, rowKey, sameKey, type EditBlock, type RowMark,
 } from './MasterEdit';
+import { Lbl } from '../lib/labels';
 
 /**
  * Master data — one sub-page per reference table (31 Aug 2026).
@@ -151,8 +152,8 @@ export function MasterTab({ section, onSection }: {
 
   useEffect(() => load(), [load]);
 
-  if (err && !index) return <div className="panel"><h2>Master</h2><p className="note">{err}</p></div>;
-  if (!index) return <div className="panel"><h2>Master</h2><div className="spinner" /></div>;
+  if (err && !index) return <div className="panel"><h2><Lbl>Master</Lbl></h2><p className="note">{err}</p></div>;
+  if (!index) return <div className="panel"><h2><Lbl>Master</Lbl></h2><div className="spinner" /></div>;
 
   const fmt = (v: unknown, col: MasterColumn): string => {
     if (v === null || v === undefined || v === '') return '—';

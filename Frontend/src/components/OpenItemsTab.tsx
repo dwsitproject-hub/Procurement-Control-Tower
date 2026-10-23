@@ -4,6 +4,7 @@ import { formatKpi, formatNumber } from '../lib/format';
 import { DetailTable } from './DetailTable';
 import { DetailModal } from './DetailModal';
 import { FilterDropdown } from './FilterDropdown';
+import { Lbl, useLabelText } from '../lib/labels';
 
 const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartPanel })));
 
@@ -187,6 +188,8 @@ export function OpenItemsTab({
 }) {
   const [sum, setSum] = useState<Summary | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /** Renamed titles: a stage card's rename also names its Stages option. */
+  const labelText = useLabelText();
   const [lens, setLens] = useState<Lens>(() => {
     const s = stored(LENS_KEY);
     return s === 'buyer' || s === 'lead' || s === 'mgmt' ? s : 'lead';
@@ -315,7 +318,7 @@ export function OpenItemsTab({
   const pctPast = sum && sum.totalOpen > 0 ? Math.round((sum.totalPastSla / sum.totalOpen) * 100) : 0;
 
   if (err) {
-    return <div className="panel"><h2>Open Items</h2><p className="err">{err}</p></div>;
+    return <div className="panel"><h2><Lbl>Open Items</Lbl></h2><p className="err">{err}</p></div>;
   }
   if (!sum) {
     return <div className="panel" style={{ minHeight: 200 }}><div className="spinner" /></div>;
@@ -431,7 +434,7 @@ export function OpenItemsTab({
       {/* ── stage pipeline ─────────────────────────────────────────── */}
       <div className="panel">
         <h3 className="pr-tbl-h">
-          Where the backlog sits{' '}
+          <Lbl>Where the backlog sits</Lbl>{' '}
           <span className="muted">— an open line sits in exactly one stage</span>
         </h3>
         <p className="note" style={{ marginTop: 0 }}>
@@ -491,7 +494,7 @@ export function OpenItemsTab({
                 className={`oi-stage${isBottleneck ? ' oi-stage--hot' : ''}${isOn ? ' oi-stage--on' : ''}${after ? ' oi-stage--after' : ''}`}
               >
                 <div className="oi-stage-h">
-                  <span className="oi-stage-name">{s.name}</span>
+                  <span className="oi-stage-name"><Lbl k={`oi-stage:${s.key}`}>{s.name}</Lbl></span>
                   {isBottleneck && <span className="oi-tag">Bottleneck</span>}
                   {after && <span className="oi-tag oi-tag--after">after delivery</span>}
                 </div>
@@ -610,7 +613,7 @@ export function OpenItemsTab({
       {showDesks && (
         <div className="panel">
           <h3 className="pr-tbl-h">
-            Backlog by material category{' '}
+            <Lbl>Backlog by material category</Lbl>{' '}
             <span className="muted">— sorted by lines over {sum.lateDays} days</span>
           </h3>
           <p className="note" style={{ marginTop: 0 }}>
@@ -630,7 +633,12 @@ export function OpenItemsTab({
                   key={k}
                   label={CAT_FILTER_LABELS[k]}
                   options={(sum.categoryFilter!.options[k] ?? []).map((o) => ({
-                    value: o.value, label: o.label, count: o.count,
+                    value: o.value,
+                    // A stage option carries its card's name, renamed or not.
+                    label: k === 'stage' && o.label
+                      ? labelText(o.label, `oi-stage:${sum.stages.find((s2) => s2.detailFilter['status'] === o.value)?.key ?? o.value}`)
+                      : o.label,
+                    count: o.count,
                   }))}
                   selected={catFilter[k]}
                   onChange={(next) => setCatFilter((cur) => ({ ...cur, [k]: next }))}

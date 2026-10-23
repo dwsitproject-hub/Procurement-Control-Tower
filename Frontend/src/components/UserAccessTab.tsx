@@ -4,6 +4,7 @@ import {
 } from '@pct/contracts';
 import { api } from '../lib/api';
 import { DASH, formatDateTime } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * User Access (011) — register users, set their department and job role, and
@@ -180,7 +181,7 @@ export function UserAccessTab({ section }: { section: 'users' | 'matrix' }) {
 
       {section === 'users' ? (
         <>
-          <h3 className="pr-tbl-h">Register a new user</h3>
+          <h3 className="pr-tbl-h"><Lbl>Register a new user</Lbl></h3>
           <div className="dt-toolbar" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
             <label className="cu-field">Name
               <input value={nm} onChange={(e) => setNm(e.target.value)} placeholder="Full name" />
@@ -216,7 +217,7 @@ export function UserAccessTab({ section }: { section: 'users' | 'matrix' }) {
             <em>Scope…</em> in the table below.
           </p>
 
-          <h3 className="pr-tbl-h">Users</h3>
+          <h3 className="pr-tbl-h"><Lbl>Users</Lbl></h3>
           <div className="table-wrap dt-scroll">
             <table className="data dd-tbl">
               <thead>

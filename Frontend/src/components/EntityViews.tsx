@@ -11,6 +11,7 @@ import { FilterDropdown } from './FilterDropdown';
 
 ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
 import { DASH, FLAG_META, formatCurrency, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * W3 — Vendor 360 and Material Group views (v1's pg-v360 / pg-mg / mx-modal).
@@ -236,7 +237,7 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
 
     {/* On-time vs late in its own panel below (user decision 5 Aug 2026). */}
     <div className="panel" style={{ marginTop: '1rem' }}>
-      <h3 className="pr-tbl-h">On-time vs late — GR vs PO delivery date, per vendor</h3>
+      <h3 className="pr-tbl-h"><Lbl>On-time vs late — GR vs PO delivery date, per vendor</Lbl></h3>
       <VendorOtdBars onOpenVendor={setOpen} />
     </div>
 
@@ -554,7 +555,7 @@ export function VendorModal({
                 }
               />
 
-              <h4 className="ent-h">Materials supplied <span className="muted">(top {d.materials.length} of cap {d.caps.materials})</span></h4>
+              <h4 className="ent-h"><Lbl>Materials supplied</Lbl> <span className="muted">(top {d.materials.length} of cap {d.caps.materials})</span></h4>
               <SimpleTable
                 prefKey="vendor_materials_layout"
                 head={['Material', 'Description', 'Lines', 'Qty', 'Spend USD', 'Last PO']}
@@ -569,7 +570,7 @@ export function VendorModal({
               />
 
               <h4 className="ent-h">
-                PO history <span className="muted">(newest {d.poHistory.length}, cap {d.caps.poHistory})</span>
+                <Lbl>PO history</Lbl> <span className="muted">(newest {d.poHistory.length}, cap {d.caps.poHistory})</span>
                 {d.poTotals && (
                   <span className="muted">
                     {' '}· Σ all {formatNumber(d.poTotals.lines)} lines / {formatNumber(d.poTotals.pos)} POs:{' '}
@@ -582,7 +583,7 @@ export function VendorModal({
               </h4>
               <PoHistoryTable rows={d.poHistory} currency={currency} />
 
-              <h4 className="ent-h">GR history <span className="muted">(newest {d.grHistory.length}, cap {d.caps.grHistory})</span></h4>
+              <h4 className="ent-h"><Lbl>GR history</Lbl> <span className="muted">(newest {d.grHistory.length}, cap {d.caps.grHistory})</span></h4>
               <SimpleTable
                 prefKey="vendor_gr_history_layout"
                 head={['Mat. doc', 'PO', 'Item', 'Mvt', 'Class', 'Posted', 'Signed qty', 'Material']}
@@ -658,7 +659,7 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
-        <h3 className="pr-tbl-h">Summary by Spend Category <span className="muted">— avg aging metrics (days)</span></h3>
+        <h3 className="pr-tbl-h"><Lbl>Summary by Spend Category</Lbl> <span className="muted">— avg aging metrics (days)</span></h3>
         <div className="table-wrap">
           <table className="data dd-tbl">
             <thead>
@@ -714,7 +715,7 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
 
       <div className="panel">
         <div className="dt-toolbar">
-          <h3 className="pr-tbl-h" style={{ margin: 0 }}>Material Explorer — click a material for vendors, areas &amp; price history{category ? ` · ${category}` : ''}</h3>
+          <h3 className="pr-tbl-h" style={{ margin: 0 }}><Lbl>Material Explorer — click a material for vendors, areas &amp; price history</Lbl>{category ? ` · ${category}` : ''}</h3>
           {/* The category filter moved here when a summary click began opening
               the 360 popup (19 Oct 2026). */}
           <select
@@ -787,7 +788,7 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
 
       <div className="chart-grid" style={{ marginTop: '1rem' }}>
         <div className="panel">
-          <h3 className="pr-tbl-h">Price Volatility — top 50 most erratic unit prices (CV%, IDR)</h3>
+          <h3 className="pr-tbl-h"><Lbl>Price Volatility — top 50 most erratic unit prices (CV%, IDR)</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -824,7 +825,7 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
         </div>
 
         <div className="panel">
-          <h3 className="pr-tbl-h">Single-Source Risk — top 50 by spend · click for material popup</h3>
+          <h3 className="pr-tbl-h"><Lbl>Single-Source Risk — top 50 by spend · click for material popup</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -917,7 +918,7 @@ export function CategoryModal({
         <header>
           <h3>
             🏷️ <span style={{ color: CATEGORY_COLORS[category] ?? 'inherit' }}>{category}</span>{' '}
-            <span className="muted">spend category 360</span>
+            <span className="muted"><Lbl>spend category 360</Lbl></span>
           </h3>
           <span className="spacer" />
           {d?.drill?.allLines && (
@@ -979,7 +980,7 @@ export function CategoryModal({
               </p>
 
               <div className="ent-mini" style={{ marginTop: '.6rem' }}>
-                <div className="ent-h" style={{ marginTop: 0 }}>Spend by month — top vendors ({currency})</div>
+                <div className="ent-h" style={{ marginTop: 0 }}><Lbl>Spend by month — top vendors</Lbl> ({currency})</div>
                 <PriceTrend
                   rows={(d.spendByVendor ?? []).map((x: any) => ({
                     ...x, unitPrice: currency === 'IDR' ? x.idr : x.usd,
@@ -997,7 +998,7 @@ export function CategoryModal({
               />
 
               <h4 className="ent-h">
-                Materials in this category{' '}
+                <Lbl>Materials in this category</Lbl>{' '}
                 <span className="muted">· top {d.topMaterials.length} of {formatNumber(k.materialCount)} by spend · click one for its Material 360</span>
               </h4>
               <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
@@ -1025,7 +1026,7 @@ export function CategoryModal({
                 </table>
               </div>
 
-              <h4 className="ent-h">Purchase Orders in this category <span className="muted">· {formatNumber(k.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
+              <h4 className="ent-h"><Lbl>Purchase Orders in this category</Lbl> <span className="muted">· {formatNumber(k.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
               <PoHistoryTable rows={d.poHistory} vendor material currency={currency} />
             </>
           )}
@@ -1121,7 +1122,7 @@ export function MaterialModal({
                 right={<AreaDonut title="Areas purchased — share of PO amount (USD)" rows={d.areaShare ?? []} />}
               />
 
-              <h4 className="ent-h">Purchase Orders for this material <span className="muted">· {formatNumber(d.kpis.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
+              <h4 className="ent-h"><Lbl>Purchase Orders for this material</Lbl> <span className="muted">· {formatNumber(d.kpis.lineCount)} PO lines (newest {d.poHistory.length}, cap {d.caps.poHistory})</span></h4>
               <PoHistoryTable rows={d.poHistory} vendor currency={currency} />
             </>
           )}

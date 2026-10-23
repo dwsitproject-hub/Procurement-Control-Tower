@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { formatCurrency, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * v1's PR Analysis tables (pr-bneck / pr-reqr): approval bottlenecks per
@@ -39,7 +40,7 @@ export function PrTables({ onDrill, currency = 'USD' }: {
   return (
     <div className="chart-grid" style={{ marginTop: '1rem' }}>
       <div className="panel">
-        <h3 className="pr-tbl-h">Approval Bottlenecks — avg gap per approver (PR Release)</h3>
+        <h3 className="pr-tbl-h"><Lbl>Approval Bottlenecks — avg gap per approver (PR Release)</Lbl></h3>
         <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
           <table className="data dd-tbl">
             <thead>
@@ -85,7 +86,7 @@ export function PrTables({ onDrill, currency = 'USD' }: {
       </div>
 
       <div className="panel">
-        <h3 className="pr-tbl-h">Demand by Requisitioner — top 10 by value</h3>
+        <h3 className="pr-tbl-h"><Lbl>Demand by Requisitioner — top 10 by value</Lbl></h3>
         <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
           <table className="data dd-tbl">
             <thead>

@@ -26,6 +26,7 @@ import {
  * the first paint, and deferring them would only add a round trip.
  */
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { Lbl, LabelProvider } from './lib/labels';
 
 const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
 const OpenItemsTab = lazy(() => import('./components/OpenItemsTab').then((m) => ({ default: m.OpenItemsTab })));
@@ -323,6 +324,8 @@ export default function App() {
     try { return (localStorage.getItem('pct_theme') as ThemeMode) ?? 'auto'; } catch { return 'auto'; }
   });
   useEffect(() => { applyTheme(theme); }, [theme]);
+  /** An Admin's title-edit mode (23 Oct 2026): every title shows a ✎. */
+  const [titleEdit, setTitleEdit] = useState(false);
   const [currency, setCurrency] = useState<'USD' | 'IDR'>(() => {
     try { return (localStorage.getItem('pct_currency') as 'USD' | 'IDR') ?? 'USD'; } catch { return 'USD'; }
   });
@@ -552,7 +555,10 @@ export default function App() {
   })();
   const dataCheckCount = findings.filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT' || f.severity === 'BLOCKER').length;
 
+  const isAdmin = me.roles.includes('admin');
+
   return (
+    <LabelProvider page={tab} editing={isAdmin && titleEdit}>
     <div className="app">
       {/* v1's .bar: navy sticky header */}
       <div className="topbar">
@@ -590,10 +596,28 @@ export default function App() {
         >
           {theme === 'auto' ? '◑ Auto' : theme === 'light' ? '☀ Light' : '☾ Dark'}
         </button>
+        {isAdmin && (
+          <button
+            className="tbtn"
+            aria-pressed={titleEdit}
+            title="Rename section and card titles - a rename applies to every user"
+            style={titleEdit ? { background: 'var(--accent)', borderColor: 'var(--accent)' } : undefined}
+            onClick={() => setTitleEdit(!titleEdit)}
+          >
+            ✎ Titles{titleEdit ? ': on' : ''}
+          </button>
+        )}
         <button className="tbtn" onClick={() => void logout()}>
           Sign out
         </button>
       </div>
+      {isAdmin && titleEdit && (
+        <div className="lbl-bar" role="status">
+          <strong>Title editing is on.</strong> Click ✎ beside any section or card title to rename it —
+          the new name applies to every user straight away. A solid ✎ marks a title already renamed;
+          open it to reset it. Click <em>✎ Titles: on</em> again to finish.
+        </div>
+      )}
 
       {dataset && dataset.datasetVersionId !== null ? (
         <FreshnessBanner data={dataset} />
@@ -806,7 +830,7 @@ export default function App() {
                   return (
                     <div key={sec.title}>
                       <h2 className="sec-h">
-                        {sec.title}
+                        <Lbl k={`sec:${sec.title}`}>{sec.title}</Lbl>
                         {isOverviewSec && dataset?.prDateRange && (
                           <span className="sec-sub">
                             PR Date: {dataset.prDateRange.from} → {dataset.prDateRange.to}
@@ -864,7 +888,7 @@ export default function App() {
                   );
                 })()}
                 {/* v1's 🔥 Open Items — Action Required strip */}
-                <h2 className="sec-h">🔥 Open Items — Action Required <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
+                <h2 className="sec-h">🔥 <Lbl>Open Items — Action Required</Lbl> <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
                 <div className="act-grid">
                   {([
                     ['pr_not_approved', 'Unapproved PRs', 'var(--crit)', 'avg_wait', 'Avg wait'],
@@ -882,7 +906,7 @@ export default function App() {
                         onClick={() => k.drillToken && onDrill(k.drillToken, k.title)}
                       >
                         <span className="act-v">{formatNumber(Number(k.value))}</span>
-                        <span className="act-l">{label}</span>
+                        <span className="act-l"><Lbl>{label}</Lbl></span>
                         {wait !== null && wait !== undefined && (
                           <span className="act-wait">{waitLabel}: {formatNumber(Number(wait))} days</span>
                         )}
@@ -1023,6 +1047,7 @@ export default function App() {
         />
       )}
     </div>
+    </LabelProvider>
   );
 }
 

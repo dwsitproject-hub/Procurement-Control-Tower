@@ -4,6 +4,7 @@ import { ScrollFrame } from './ScrollFrame';
 import {
   FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
 } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /** v1's AW per-column aging warn thresholds (amber above, red above 2x). */
 const AGE_WARN: Record<string, number> = {
@@ -400,7 +401,7 @@ export function DetailTable({
   if (error) {
     return (
       <div className="panel">
-        <h2>Detail table</h2>
+        <h2><Lbl>Detail table</Lbl></h2>
         <p className="err">{error}</p>
       </div>
     );

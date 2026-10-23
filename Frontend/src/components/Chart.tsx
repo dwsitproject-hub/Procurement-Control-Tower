@@ -5,6 +5,7 @@ import {
 } from 'chart.js';
 import { api, type ChartResponse } from '../lib/api';
 import { formatKpi } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 ChartJS.register(
   ArcElement, BarController, BarElement, CategoryScale, DoughnutController,
@@ -611,7 +612,7 @@ export function ChartPanel({
 
   return (
     <div className={WIDE_CHARTS[chartId] ? 'panel chart-wide' : 'panel'}>
-      <h2>{data.title}</h2>
+      <h2><Lbl k={`chart:${chartId}`}>{data.title}</Lbl></h2>
       {data.buckets.length === 0 ? (
         // An empty chart states the reason rather than rendering empty axes.
         <p className="note">{data.notes[0] ?? 'No data for this chart'}</p>

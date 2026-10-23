@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { formatCurrency, formatMoney, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 /**
  * The Vendor/Material 360 popups are loaded on demand. They live in
  * EntityViews alongside the two full pages, so importing them statically here
@@ -58,7 +59,7 @@ export function PoTables({ onDrill, currency = 'USD' }: {
     <>
       <div className="chart-grid" style={{ marginTop: '1rem' }}>
         <div className="panel">
-          <h3 className="pr-tbl-h">Top vendors by spend — click a row for Vendor 360</h3>
+          <h3 className="pr-tbl-h"><Lbl>Top vendors by spend — click a row for Vendor 360</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 340, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -102,7 +103,7 @@ export function PoTables({ onDrill, currency = 'USD' }: {
         </div>
 
         <div className="panel">
-          <h3 className="pr-tbl-h">Top materials by spend — click a row for Material 360</h3>
+          <h3 className="pr-tbl-h"><Lbl>Top materials by spend — click a row for Material 360</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 340, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>

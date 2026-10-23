@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * Coupa integration — TECH_04. Two pieces:
@@ -48,7 +49,7 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
     return () => clearInterval(t);
   }, [running, load]);
 
-  if (!d) return <div className="panel"><h2>🔄 Coupa sync</h2><div className="spinner" /></div>;
+  if (!d) return <div className="panel"><h2>🔄 <Lbl>Coupa sync</Lbl></h2><div className="spinner" /></div>;
 
   const saveConfig = async () => {
     setBusy('save');
@@ -91,7 +92,7 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div className="panel">
-      <h2>🔄 Coupa sync <span className="muted">— {d.configured ? d.host : 'not configured'}</span></h2>
+      <h2>🔄 <Lbl>Coupa sync</Lbl> <span className="muted">— {d.configured ? d.host : 'not configured'}</span></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
         The poller pulls sourcing events, POs, receipts, invoices (payments ride inside invoices)
         and exchange rates incrementally by <code>updated-at</code> watermark. Data lands in the Coupa tab; the SAP

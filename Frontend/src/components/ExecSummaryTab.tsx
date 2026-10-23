@@ -3,6 +3,7 @@ import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
 import { LayoutControls, applyLayout, panelSpan, type TabLayout } from './LayoutEdit';
+import { Lbl } from '../lib/labels';
 
 /**
  * Executive Summary — the one page that states a conclusion rather than
@@ -1362,7 +1363,7 @@ export function ExecSummaryTab({
       id: 'panel:headline',
       node: (
               <div className="panel">
-                <h2>🎯 Executive Summary - Procurement Manage</h2>
+                <h2>🎯 <Lbl>Executive Summary - Procurement Manage</Lbl></h2>
                 {/*
                   Scope stated up front and read from the data rather than typed. The
                   reference design was headed "2025 / annual spend" over a part-year
@@ -1398,7 +1399,7 @@ export function ExecSummaryTab({
                       title={`Click for the figures behind ${t.label}`}
                     >
                       <span className="xs-tile-value">{t.value}</span>
-                      <span className="xs-tile-label">{t.label}</span>
+                      <span className="xs-tile-label"><Lbl>{t.label}</Lbl></span>
                       <span className="xs-tile-sub muted">{t.sub}</span>
                       {/* The period split. Shown under the headline figure rather
                           than replacing it: the tile's own number is the whole
@@ -1425,7 +1426,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Where the value is <span className="muted">— committed value by spend category</span>
+                  <Lbl>Where the value is</Lbl> <span className="muted">— committed value by spend category</span>
                 </h3>
                 {byCategory
                   ? <RankedBars data={byCategory} onFocus={openAlignedFocus} emphasiseTop={5} currency={currency} />
@@ -1492,7 +1493,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Monthly Spend Category{' '}
+                  <Lbl>Monthly Spend Category</Lbl>{' '}
                   <span className="muted">— delivered value by month, stacked by category</span>
                 </h3>
                 {byMonth
@@ -1506,7 +1507,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Transaction size <span className="muted">— share of value against share of lines</span>
+                  <Lbl>Transaction size</Lbl> <span className="muted">— share of value against share of lines</span>
                 </h3>
                 {byBand ? <BandPairs data={byBand} onFocus={openAlignedFocus} /> : <div className="spinner" />}
                 <p className="note" style={{ marginTop: '.5rem' }}>
@@ -1528,7 +1529,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Manage by HO or Site{' '}
+                  <Lbl>Manage by HO or Site</Lbl>{' '}
                   <span className="muted">— who raised the order, by month</span>
                 </h3>
                 {byHoSite
@@ -1548,7 +1549,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Outstanding PR by Days/Months/Quarters/Years{' '}
+                  <Lbl>Outstanding PR by Days/Months/Quarters/Years</Lbl>{' '}
                   <span className="muted">— this month and last, by aging on the day</span>
                 </h3>
                 {prOutstanding
@@ -1562,7 +1563,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  How concentrated <span className="muted">— how few hold most of the value</span>
+                  <Lbl>How concentrated</Lbl> <span className="muted">— how few hold most of the value</span>
                 </h3>
                 <div className="table-wrap">
                   <table className="data dd-tbl">
@@ -1605,7 +1606,7 @@ export function ExecSummaryTab({
       id: 'panel:meaning',
       node: (
               <div className="panel">
-                <h3 className="pr-tbl-h">What this means</h3>
+                <h3 className="pr-tbl-h"><Lbl>What this means</Lbl></h3>
                 <ul className="xs-means">
                   <li>
                     <strong>Value is concentrated.</strong> The top five categories are {pct(top5)} of

@@ -35,6 +35,7 @@ import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync } fro
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
 import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
 import { loadMasterPage, masterIndex } from '../modules/analytics/master.js';
+import { LabelError, listLabels, resetLabel, setLabel } from '../modules/ui/labels.js';
 import { testBody } from '../modules/notify/messages.js';
 import {
   FEED_META, loadShareConfig, nowInZone, recentSlotRuns, scanShare, shareLastArchive,
@@ -181,6 +182,50 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.patch('/api/v1/admin/master/rows', masterEdit('edit', editRow));
   r.post('/api/v1/admin/master/rows/hide', masterEdit('hide', hideRow));
   r.post('/api/v1/admin/master/rows/revert', masterEdit('revert', revertRow));
+
+  /*
+   * Renamed section and card titles (039, 23 Oct 2026). Every signed-in user
+   * reads them - every page draws its titles through them - and only an Admin
+   * changes them, audited like a master edit: a title is what everyone reads
+   * a figure as.
+   */
+  r.get('/api/v1/ui-labels', role('viewer', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json(await listLabels());
+  }));
+
+  r.put('/api/v1/admin/ui-labels', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as { key?: unknown; label?: unknown; defaultText?: unknown };
+    let out: { key: string; label: string };
+    try {
+      out = await setLabel(b.key, b.label, b.defaultText, ctx.principal.email);
+    } catch (e) {
+      if (e instanceof LabelError) throw new HttpProblem(400, 'invalid-label', e.message);
+      throw e;
+    }
+    await recordAudit({
+      action: 'ui.label.set', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome: 'success', objectType: 'ui_label', objectId: out.key,
+      detail: { label: out.label, defaultText: b.defaultText ?? null }, ip: req.ip,
+    });
+    res.json(await listLabels());
+  }));
+
+  r.post('/api/v1/admin/ui-labels/reset', role('admin', async (req, res, ctx) => {
+    const b = (req.body ?? {}) as { key?: unknown };
+    let removed: boolean;
+    try {
+      removed = await resetLabel(b.key);
+    } catch (e) {
+      if (e instanceof LabelError) throw new HttpProblem(400, 'invalid-label', e.message);
+      throw e;
+    }
+    await recordAudit({
+      action: 'ui.label.reset', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome: 'success', objectType: 'ui_label', objectId: String(b.key ?? ''), detail: { removed }, ip: req.ip,
+    });
+    res.json(await listLabels());
+  }));
 
   // ── W3: entity views ─────────────────────────────────────────────────────
 

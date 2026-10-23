@@ -25,7 +25,9 @@ export const COUPA_OBJECTS = [
   'purchase_orders',
   'receiving_transactions',
   'invoices',
-  'exchange_rates',
+  // 'exchange_rates' left on 23 Oct 2026: exchange rates now come from Data Hub
+  // (modules/dhm/fx.ts, 040). ops.coupa_exchange_rate keeps what was synced,
+  // and Coupa's rows in ops.fx_rate_source stay until a DHM rate covers them.
   // Supplier master (payload doc §1.8) — master data rather than transactions,
   // so it is small and changes rarely, but it carries the PO email address that
   // Vendor 360 shows.
@@ -314,46 +316,8 @@ const PROJECT: Record<CoupaObject, (rows: Row[]) => Promise<number>> = {
   purchase_orders: projectPurchaseOrders,
   receiving_transactions: projectReceipts,
   invoices: projectInvoices,
-  exchange_rates: projectExchangeRates,
   suppliers: projectSuppliers,
 };
-
-async function projectExchangeRates(rows: Row[]): Promise<number> {
-  const n2 = await upsert(
-    'ops.coupa_exchange_rate',
-    ['id', 'rate', 'rate_date', 'from_currency', 'to_currency', 'created_at', 'updated_at'],
-    rows
-      .filter((r) => s(obj(r['from-currency'])['code']) !== null && s(obj(r['to-currency'])['code']) !== null)
-      .map((r) => [
-        Number(r['id']), n(r['rate']), d(r['rate-date']),
-        s(obj(r['from-currency'])['code']), s(obj(r['to-currency'])['code']),
-        s(r['created-at']), s(r['updated-at']),
-      ]),
-    'id',
-  );
-  // Refresh the shared FX pair store (010): month-latest Coupa rate per pair,
-  // taking a slot only when more recently updated than what sits there.
-  await query(
-    `INSERT INTO ops.fx_rate_source
-       (from_currency, to_currency, period_year, period_month, rate, source, source_updated_at)
-     SELECT DISTINCT ON (upper(btrim(from_currency)), upper(btrim(to_currency)),
-                         date_part('year', rate_date)::int, date_part('month', rate_date)::int)
-            upper(btrim(from_currency)), upper(btrim(to_currency)),
-            date_part('year', rate_date)::int, date_part('month', rate_date)::smallint,
-            rate, 'coupa', updated_at
-       FROM ops.coupa_exchange_rate
-      WHERE rate_date IS NOT NULL AND rate > 0
-      ORDER BY upper(btrim(from_currency)), upper(btrim(to_currency)),
-               date_part('year', rate_date)::int, date_part('month', rate_date)::int,
-               rate_date DESC, updated_at DESC NULLS LAST
-     ON CONFLICT (from_currency, to_currency, period_year, period_month)
-     DO UPDATE SET rate = EXCLUDED.rate, source = 'coupa',
-                   source_updated_at = EXCLUDED.source_updated_at, updated_at = now()
-      WHERE fx_rate_source.source_updated_at IS NULL
-         OR EXCLUDED.source_updated_at > fx_rate_source.source_updated_at`,
-  );
-  return n2;
-}
 
 /**
  * Bounded-concurrency map. The nested quote-responses fetch is one HTTPS round

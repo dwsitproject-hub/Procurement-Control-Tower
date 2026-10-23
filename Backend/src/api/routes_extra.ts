@@ -32,6 +32,7 @@ import {
 import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
 import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync } from '../modules/coupa/sync.js';
+import { dhmFxStatus, dhmFxSyncInFlight, runDhmFxSync } from '../modules/dhm/fx.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
 import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
 import { loadMasterPage, masterIndex } from '../modules/analytics/master.js';
@@ -1108,6 +1109,29 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       detail: { enabled, intervalMinutes: interval }, ip: req.ip,
     });
     res.json({ enabled, intervalMinutes: interval });
+  }));
+
+  // Data Hub exchange rates (040, 23 Oct 2026): what the last run did, and a
+  // manual run. Fire-and-forget like Coupa's: a first snapshot pages the whole
+  // master; the page polls the status for the outcome.
+  r.get('/api/v1/admin/dhm/fx', role('steward', async (_req, res) => {
+    res.json(await dhmFxStatus());
+  }));
+
+  r.post('/api/v1/admin/dhm/fx/sync', role('steward', async (req, res, ctx) => {
+    if (dhmFxSyncInFlight()) {
+      res.json({ outcome: 'locked' });
+      return;
+    }
+    void runDhmFxSync('manual')
+      .then((out) => recordAudit({
+        action: 'dhm.fx.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+        outcome: out.outcome === 'error' ? 'failure' : 'success',
+        detail: { ...out },
+        ip: req.ip,
+      }))
+      .catch(() => undefined);
+    res.json({ outcome: 'started' });
   }));
 
   r.post('/api/v1/admin/coupa/sync', role('steward', async (req, res, ctx) => {

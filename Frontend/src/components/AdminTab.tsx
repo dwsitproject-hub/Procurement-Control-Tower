@@ -553,6 +553,82 @@ function MappingRow({ col, onSave }: { col: Record<string, any>; onSave: (f: str
 
 // ────────────────────────────────────────────────────────────── FX rates
 
+/**
+ * The Data Hub exchange-rate source (040, 23 Oct 2026): configured or not, the
+ * last run, the field mapping read from the hub's catalog, and Sync now.
+ */
+function DhmFxBox() {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const load = () => api.get<Record<string, any>>('/api/v1/admin/dhm/fx').then(setD).catch((e: Error) => setMsg(e.message));
+  useEffect(() => { void load(); }, []);
+  // While a run is going, look again every few seconds.
+  useEffect(() => {
+    if (!d?.inFlight) return undefined;
+    const t = setTimeout(() => { void load(); }, 4000);
+    return () => clearTimeout(t);
+  }, [d]);
+
+  if (!d) return msg ? <p className="err">{msg}</p> : null;
+  const st = d.state ?? {};
+  const m = st.mapping;
+  return (
+    <div className="panel" style={{ margin: '.8rem 0', background: 'var(--bg)' }}>
+      <h3 className="pr-tbl-h" style={{ marginTop: 0 }}>
+        🛰 <Lbl>Data Hub exchange rates</Lbl>{' '}
+        <span className="muted">— {d.configured ? `${d.host} · master '${d.entity}' · every ${d.intervalMinutes} min` : 'not configured'}</span>
+      </h3>
+      {!d.configured ? (
+        <p className="note">
+          Set <code>DHM_BASE_URL</code>, <code>DHM_PUBLIC_KEY</code> and <code>DHM_PRIVATE_KEY</code> in the
+          server's secrets file (the key pair comes from the Data Hub integrator, with <code>{d.entity}</code> on
+          PCT's allowlist). Until then rates come from the SAP rate file only.
+        </p>
+      ) : (
+        <>
+          <p className="note" style={{ margin: '.2rem 0' }}>
+            Last run:{' '}
+            {st.last_run_at ? (
+              <>
+                <span className={`bs ${st.last_status === 'ok' ? 'ok' : 'spdel'}`}>{st.last_status}</span>{' '}
+                {String(st.last_run_at).slice(0, 16).replace('T', ' ')} ({st.last_trigger})
+              </>
+            ) : 'never'}
+            {' · '}records {formatNumberSafe(d.records?.live)} live, {formatNumberSafe(d.records?.deleted)} deleted
+            {d.records && d.records.live > d.records.usable ? `, ${d.records.live - d.records.usable} unusable` : ''}
+            {' · '}store: {Object.entries(d.storeBySource ?? {}).map(([k, v]) => `${k === 'dhm' ? 'data hub' : k} ${String(v)}`).join(', ') || DASH}
+          </p>
+          {st.last_error && <p className="err" style={{ margin: '.2rem 0' }}>{st.last_error}</p>}
+          {m && (
+            <p className="note" style={{ margin: '.2rem 0' }}>
+              Fields read: from <code>{m.from}</code>, to <code>{m.to}</code>, rate <code>{m.rate}</code>,{' '}
+              {m.date ? <>date <code>{m.date}</code></> : <>year <code>{m.year}</code> + month <code>{m.month}</code></>}
+              {m.fromFactor && <>, from factor <code>{m.fromFactor}</code></>}
+              {m.toFactor && <>, to factor <code>{m.toFactor}</code></>}
+              {m.unused?.length > 0 && <> · not used: {m.unused.join(', ')}</>}
+            </p>
+          )}
+          <button
+            className="dt-btn"
+            disabled={d.inFlight}
+            onClick={() => {
+              setMsg(null);
+              api.post<{ outcome: string }>('/api/v1/admin/dhm/fx/sync')
+                .then(() => setTimeout(() => { void load(); }, 800))
+                .catch((e: Error) => setMsg(e.message));
+            }}
+          >
+            {d.inFlight ? 'Syncing…' : 'Sync now'}
+          </button>
+          {msg && <span className="err" style={{ marginLeft: '.5rem' }}>{msg}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+const formatNumberSafe = (v: unknown): string => (v === null || v === undefined ? DASH : Number(v).toLocaleString('en-GB'));
+
 function FxPanel() {
   const [d, setD] = useState<Record<string, any> | null>(null);
   useEffect(() => {
@@ -577,8 +653,8 @@ function FxPanel() {
                 <td>{r.derivation}</td>
                 <td>{r.pivotCurrency ?? DASH}</td>
                 <td>
-                  <span className={`bs ${r.source === 'coupa' ? 'su' : r.source === 'sap' ? 'sd' : r.source === 'mixed' ? 'sn' : 'sl'}`}>
-                    {r.source ?? 'sap'}
+                  <span className={`bs ${r.source === 'dhm' ? 'ok' : r.source === 'coupa' ? 'su' : r.source === 'sap' ? 'sd' : r.source === 'mixed' ? 'sn' : 'sl'}`}>
+                    {r.source === 'dhm' ? 'data hub' : r.source ?? 'sap'}
                   </span>
                 </td>
                 <td>{r.sourceUpdatedAt ? String(r.sourceUpdatedAt).slice(0, 16) : DASH}</td>
@@ -591,11 +667,14 @@ function FxPanel() {
         Rates are stored per dataset version — a re-published bundle with a corrected rate file never
         changes figures already published.
       </p>
+      <DhmFxBox />
       <p className="note">
-        <strong>Two sources, one table:</strong> the SAP rate file and Coupa's exchange-rate API both
-        feed the shared FX store; for the same currency and period, whichever record was updated most
-        recently wins (SAP timed by its file's modified date, Coupa by its <code>updated-at</code>).
-        New rates take effect at the next recompute.
+        <strong>Two sources, one table:</strong> the SAP rate file and the Data Hub's exchange-rate
+        master both feed the shared FX store; for the same currency and period, whichever record was
+        updated most recently wins (SAP timed by its file's modified date, the Data Hub by its record's
+        update time). Coupa no longer supplies rates: its earlier ones stay only for months the Data Hub
+        does not cover, and a Data Hub rate always replaces them. New rates take effect at the next
+        recompute.
       </p>
       <p className="note">
         <strong>Period basis:</strong> a PO with a booked Coupa invoice converts at its <strong>invoice

@@ -120,6 +120,8 @@ export interface TransformMetrics {
   /** Shared FX pair store (010): pair-months in use per source. */
   fxSourceSap: number;
   fxSourceCoupa: number;
+  /** FX store rows from the Data Hub (040). */
+  fxSourceDhm: number;
 }
 
 export interface TransformResult {
@@ -1346,6 +1348,7 @@ export async function runTransform(
     invoiceDatedFxLines: invoiceDatedLines,
     fxSourceSap: fx.sourceCounts.sap,
     fxSourceCoupa: fx.sourceCounts.coupa,
+    fxSourceDhm: fx.sourceCounts.dhm,
   };
 
   // `contaminated` counts lines where a naive earliest-any-movement date WOULD
@@ -1509,7 +1512,7 @@ async function buildFx(
   table: FxTable;
   rates: ReturnType<typeof buildFxTable>;
   yearResolved: number | null;
-  sourceCounts: { sap: number; coupa: number };
+  sourceCounts: { sap: number; coupa: number; dhm: number };
 }> {
   // The reference rate file's Month column has NO year. Anchor it from the data
   // range rather than v1's hardcoded year 2000.
@@ -1543,7 +1546,7 @@ async function buildFx(
   // most recently wins. The SAP side is timed by the rate file's source_mtime
   // (a same-source re-ingest with the same mtime still refreshes its own row).
   let raw: (typeof excelRaw[number] & { source?: string | null; sourceUpdatedAt?: string | null })[] = excelRaw;
-  const sourceCounts = { sap: excelRaw.length, coupa: 0 };
+  const sourceCounts = { sap: excelRaw.length, coupa: 0, dhm: 0 };
   try {
     const mtimeRow = await query<{ mt: string | null }>(
       `SELECT max(source_mtime)::text AS mt FROM ingest.batch_file
@@ -1601,6 +1604,7 @@ async function buildFx(
     }));
     sourceCounts.sap = merged.filter((r) => r.source === 'sap').length;
     sourceCounts.coupa = merged.filter((r) => r.source === 'coupa').length;
+    sourceCounts.dhm = merged.filter((r) => r.source === 'dhm').length;
   } catch (err) {
     // ops.fx_rate_source absent (fresh install before migration 010) — the
     // batch's own excel rows carry the table alone.

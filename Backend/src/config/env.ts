@@ -111,6 +111,17 @@ export const EnvSchema = z
           'core.supplier.read core.common.read',
       ),
 
+    // Data Hub Management (DHM), the master-data hub (040, 23 Oct 2026):
+    // exchange rates come from its `exchange_rate` master. All optional, like
+    // Coupa's: without them the poller stays off and the Admin FX page says
+    // "not configured". The private key is a secret - env only, never the DB.
+    // DHM_BASE_URL is the API root, e.g. http://test-datahub.kpndomain.com/api
+    DHM_BASE_URL: z.string().url().optional(),
+    DHM_PUBLIC_KEY: z.string().optional(),
+    DHM_PRIVATE_KEY: z.string().optional(),
+    DHM_FX_ENTITY: z.string().regex(/^[a-z][a-z0-9_]*$/).default('exchange_rate'),
+    DHM_FX_SYNC_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
+
     SMTP_HOST: z.string().default('mailhog'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),
     // NOT a boolean. nodemailer's own option is `secure: true|false`, so

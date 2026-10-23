@@ -157,6 +157,16 @@ Admin tab gets a **Coupa panel**: enable toggle, interval field, per-object stat
 
 ## Exchange rates as a second FX source (added 5 Aug 2026, payload doc v3.0)
 
+> **Superseded 23 Oct 2026.** Exchange rates now come from Data Hub Management
+> (DHM), not Coupa: `exchange_rates` left `COUPA_OBJECTS`, and
+> `Backend/src/modules/dhm/fx.ts` syncs DHM's `exchange_rate` master into the
+> same `ops.fx_rate_source` store as source `dhm` (migration 040). A DHM rate
+> always replaces a Coupa one for the same pair and month; Coupa rows stay only
+> where DHM has none. Against the SAP rate file, the latest update still wins.
+> Configure with `DHM_BASE_URL`, `DHM_PUBLIC_KEY`, `DHM_PRIVATE_KEY` (secrets
+> file); status and Sync now are on Admin → FX rates. The section below is kept
+> as the history of how Coupa rates worked.
+
 `GET /api/exchange_rates` syncs into `ops.coupa_exchange_rate` (migration 009)
 under the same watermark mechanism as the other objects.
 

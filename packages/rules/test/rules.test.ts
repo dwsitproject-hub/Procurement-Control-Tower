@@ -5,6 +5,7 @@ import {
   buildFxTable,
   // movement
   lookupMovement,
+  postingQty,
   signedQty,
   establishesReceiptDate,
   // sto
@@ -51,6 +52,15 @@ describe('movement register', () => {
     expect(lookupMovement('641')?.cls).toBe('transfer');
     expect(lookupMovement('642')?.cls).toBe('transfer_reversal');
     expect(lookupMovement('122')?.cls).toBe('reversal');
+  });
+
+  it('registers 123 as the mirror of 122: adds the returned quantity back', () => {
+    expect(lookupMovement('123')?.cls).toBe('receipt');
+    expect(lookupMovement('123')?.signFactor).toBe(1);
+    expect(lookupMovement('123')?.countsAsReceipt).toBe(true);
+    // A 122 of 5 and its 123 cancel exactly, whatever sign the export sends.
+    expect(postingQty('122', 5) + postingQty('123', -5)).toBe(0);
+    expect(establishesReceiptDate('123')).toBe(false);
   });
 
   it('returns null for an unregistered type (BLOCKER V-R07, never a guess)', () => {

@@ -33,6 +33,7 @@ async function seedMovementTypes(): Promise<void> {
       ('101','receipt',            1, true,  'Goods receipt against purchase order'),
       ('102','reversal',          -1, true,  'Reversal of goods receipt'),
       ('122','reversal',          -1, true,  'Return delivery (registered; absent from reference data)'),
+      ('123','receipt',            1, true,  'Reversal of return delivery (cancels a 122)'),
       ('641','transfer',           1, false, 'Transfer posting to stock in transit (STO)'),
       ('642','transfer_reversal', -1, false, 'Reversal of transfer to stock in transit')
     ON CONFLICT (movement_type) DO UPDATE

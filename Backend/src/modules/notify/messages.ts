@@ -114,10 +114,10 @@ async function perFeedRowLines(batchId: number | undefined): Promise<string[]> {
   if (!batchId) return [];
   const rows = await query<{
     detected_feed: string | null; original_filename: string;
-    row_count: number | null; bad_rows: number;
+    row_count: number | null; bad_rows: number; rejected_reason: string | null;
   }>(
     `SELECT f.detected_feed, f.original_filename, f.row_count,
-            COALESCE(e.bad_rows, 0)::int AS bad_rows
+            COALESCE(e.bad_rows, 0)::int AS bad_rows, f.rejected_reason
        FROM ingest.batch_file f
        LEFT JOIN (
          SELECT feed, count(DISTINCT source_row)::int AS bad_rows
@@ -130,13 +130,14 @@ async function perFeedRowLines(batchId: number | undefined): Promise<string[]> {
   if (rows.length === 0) return [];
 
   const lines: string[] = [];
-  lines.push('Rows in each file — read, accepted, and could not be read:');
+  lines.push('Rows in each file — read, accepted, and set aside or unreadable:');
   lines.push('');
-  lines.push('  FILE                          FEED    READ      ACCEPTED  UNREADABLE');
+  lines.push('  FILE                          FEED    READ      ACCEPTED  SET ASIDE');
   let totalRead = 0; let totalBad = 0;
   for (const r of rows) {
     const read = r.row_count ?? 0;
-    const bad = r.detected_feed === null ? read : r.bad_rows;
+    // A file set aside whole (042) accepted nothing, like an unrecognised one.
+    const bad = r.detected_feed === null || r.rejected_reason !== null ? read : r.bad_rows;
     const acc = read - bad;
     totalRead += read; totalBad += bad;
     const name = r.original_filename.length > 28
@@ -152,7 +153,8 @@ async function perFeedRowLines(batchId: number | undefined): Promise<string[]> {
   if (totalBad > 0) {
     lines.push('');
     lines.push('  A file with feed NONE matched no template and was skipped whole — its');
-    lines.push('  rows are counted as unreadable because none of them were used.');
+    lines.push('  rows are counted as set aside because none of them were used. The same');
+    lines.push('  goes for a file set aside whole (empty, or a required column missing).');
     lines.push('');
     lines.push('  The offending rows are downloadable as a workbook, with the value that');
     lines.push('  could not be read and the reason, from Admin -> SAP Data Upload. With');
@@ -245,6 +247,47 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
     lines.push('against the previous version, not an insert/update tally.');
   }
 
+  // Partial load (5 Nov 2026): what was set aside, file by file and row by
+  // row, so a published run that left something out says so up front.
+  const asideFiles = input.batchId
+    ? await query<{ original_filename: string; detected_feed: string | null; rejected_reason: string | null }>(
+        `SELECT original_filename, detected_feed, rejected_reason FROM ingest.batch_file
+          WHERE batch_id = $1 AND (rejected_reason IS NOT NULL OR detected_feed IS NULL)
+          ORDER BY original_filename`,
+        [input.batchId],
+      )
+    : [];
+  const asideRows = input.batchId
+    ? await query<{ feed: string; rule_id: string; n: number; reason: string }>(
+        `SELECT feed, rule_id, count(DISTINCT source_row)::int AS n, min(reason) AS reason
+           FROM ingest.row_error
+          WHERE batch_id = $1 AND rule_id IN ('V-R07', 'V-R04', 'V-R04a')
+          GROUP BY feed, rule_id ORDER BY feed, rule_id`,
+        [input.batchId],
+      )
+    : [];
+  if (asideFiles.length > 0 || asideRows.length > 0) {
+    lines.push('');
+    lines.push('SET ASIDE — filed to the failed folder, the rest of the upload was loaded:');
+    lines.push('');
+    for (const f of asideFiles) {
+      lines.push(`  FILE  ${f.original_filename}`);
+      lines.push(`        ${f.rejected_reason ?? 'its columns match no SAP template, so it was not read as any feed.'}`);
+      if (f.detected_feed) {
+        lines.push(`        ${FEED_LABEL[f.detected_feed] ?? f.detected_feed} figures are carried forward from the last upload that carried a usable file.`);
+      }
+    }
+    for (const r of asideRows) {
+      lines.push(`  ROWS  ${num(r.n)} ${FEED_LABEL[r.feed] ?? r.feed} row(s) — ${r.rule_id}`);
+      lines.push(`        e.g. ${r.reason}`);
+    }
+    lines.push('');
+    lines.push('  The set-aside rows, with the value and the reason, are in the workbook');
+    lines.push('  in the failed folder (dated subfolder for this run) and downloadable from');
+    lines.push('  Admin -> SAP Data Upload. Fix them at source and send them again: a');
+    lines.push('  later upload merges them in.');
+  }
+
   if (findings.length > 0) {
     lines.push('');
     lines.push('Data-quality findings on this batch:');
@@ -258,7 +301,11 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
     ? `[PCT] SAP sync: waiting for the next exports (${stamp()})`
     : input.outcome === 'noop_unchanged'
       ? `[PCT] SAP sync: no changes (${stamp()})`
-      : `[PCT] SAP sync OK: version ${v?.id ?? '?'} published (${stamp()})`;
+      : asideFiles.length > 0 || asideRows.length > 0
+        ? `[PCT] SAP sync PARTIAL: version ${v?.id ?? '?'} published, `
+          + `${[asideFiles.length > 0 ? `${asideFiles.length} file(s)` : '', asideRows.length > 0 ? `${asideRows.reduce((a, r) => a + r.n, 0)} row(s)` : '']
+            .filter(Boolean).join(' and ')} set aside (${stamp()})`
+        : `[PCT] SAP sync OK: version ${v?.id ?? '?'} published (${stamp()})`;
 
   return { subject, body: lines.join('\n') };
 }
@@ -283,9 +330,9 @@ export async function ingestFailureBody(input: IngestNotifyInput): Promise<{ sub
   const files = input.batchId
     ? await query<{
         original_filename: string; detected_feed: string | null;
-        match_outcome: string | null; row_count: number | null;
+        match_outcome: string | null; row_count: number | null; rejected_reason: string | null;
       }>(
-        `SELECT original_filename, detected_feed, match_outcome, row_count
+        `SELECT original_filename, detected_feed, match_outcome, row_count, rejected_reason
            FROM ingest.batch_file WHERE batch_id = $1 ORDER BY original_filename`,
         [input.batchId],
       )
@@ -370,17 +417,19 @@ export async function ingestFailureBody(input: IngestNotifyInput): Promise<{ sub
   }
 
   if (files.length > 0) {
-    const ok = files.filter((f) => f.match_outcome === 'exact' || f.match_outcome === 'mapped');
-    const bad = files.filter((f) => !(f.match_outcome === 'exact' || f.match_outcome === 'mapped'));
+    const isOk = (f: (typeof files)[number]) => (f.match_outcome === 'exact' || f.match_outcome === 'mapped') && f.rejected_reason === null;
+    const ok = files.filter(isOk);
+    const bad = files.filter((f) => !isOk(f));
     lines.push('');
     lines.push(`Files read: ${files.length}   accepted: ${ok.length}   rejected: ${bad.length}`);
     lines.push('');
     for (const f of files) {
-      const state = f.match_outcome === 'exact' || f.match_outcome === 'mapped' ? 'OK     ' : 'REJECT ';
+      const state = isOk(f) ? 'OK     ' : 'REJECT ';
       lines.push(
         `  ${state}${f.original_filename}` +
         `\n           feed=${f.detected_feed ?? 'unrecognised'}` +
-        ` match=${f.match_outcome ?? 'none'} rows=${num(f.row_count)}`,
+        ` match=${f.match_outcome ?? 'none'} rows=${num(f.row_count)}` +
+        (f.rejected_reason ? `\n           set aside: ${f.rejected_reason}` : ''),
       );
     }
   }

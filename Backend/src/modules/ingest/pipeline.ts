@@ -6,6 +6,24 @@
  * A batch is only ever published atomically. On any failure the previously
  * published version keeps serving, untouched — the v1 rule "analysis does not run
  * on a partial bundle", enforced by the database rather than by UI flow.
+ *
+ * PARTIAL LOADS (5 Nov 2026, rule ingest.partial_load, on by default when
+ * merging). A bad row no longer fails the run; it is SET ASIDE - kept out of
+ * the load, written to ingest.row_error with its reason, and so filed in the
+ * failed folder's workbook - while the rest of its file loads:
+ *
+ *   row level   V-R07 unregistered GR movement type; V-R04 a PR Release
+ *               continuation row out of order; V-R04a a repeated release step.
+ *   file level  only where no row of the file is usable: V-S05 an empty file,
+ *               V-S02 a required column missing, a PR Release file so out of
+ *               order it looks re-sorted (V-R04), a rate file whose year cannot
+ *               be anchored (V-R06a). That file is filed to failed and its feed
+ *               carried forward from the last upload that carried it - the
+ *               merge already does exactly that for a file that did not arrive.
+ *   run level   still fails: no exchange rates at all (V-R08), every file set
+ *               aside, or no loaded data to carry a set-aside feed forward from.
+ *
+ * The published version is still built atomically from what was accepted.
  */
 
 import type { BatchState, Feed } from '@pct/contracts';
@@ -62,6 +80,8 @@ export interface FeedRowSummary {
   rowsAccepted: number;
   /** null when the file's headers matched no template at all. */
   matched: boolean;
+  /** Why the whole file was set aside (partial loads); absent when it loaded. */
+  setAside?: string;
 }
 
 export type IngestOutcome =
@@ -241,6 +261,8 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const foundFeeds = new Set(prepared.map((p) => p.cls.feed).filter((f): f is Feed => f !== null));
   const merging = await mergeEnabled();
   const base = merging ? await mergeBaseAvailable() : false;
+  // Partial loads need something to carry a set-aside feed forward FROM.
+  const partial = base && (await partialEnabled());
   const missing = REQUIRED_FEEDS.filter((f) => !foundFeeds.has(f));
   const incomplete = base
     ? !REQUIRED_FEEDS.some((f) => foundFeeds.has(f))
@@ -279,6 +301,61 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   };
 
   const findings: Finding[] = [];
+  /** Feeds whose file was set aside whole, with why (partial loads). */
+  const setAsideFeeds = new Map<Feed, string>();
+
+  /**
+   * Set one feed's file aside: its staged rows leave the batch, the file is
+   * marked rejected (archive files it to failed), the blockers raised on it
+   * become warnings, and one V-Q01 says what happened in words. The merge then
+   * carries the feed forward, as for a file that never arrived.
+   */
+  const setAsideFile = async (feed: Feed, why: string): Promise<void> => {
+    if (setAsideFeeds.has(feed)) return;
+    setAsideFeeds.set(feed, why);
+    await exec('DELETE FROM staging.raw_row WHERE batch_id = $1 AND feed = $2', [batchId, feed]);
+    const files = await query<{ original_filename: string }>(
+      `UPDATE ingest.batch_file SET rejected_reason = $3
+        WHERE batch_id = $1 AND detected_feed = $2 RETURNING original_filename`,
+      [batchId, feed, why.slice(0, 1000)],
+    );
+    for (const f of findings) {
+      if (f.feed === feed && f.severity === 'BLOCKER') {
+        f.severity = 'WARNING';
+        f.message = `Set aside: ${f.message}`;
+      }
+    }
+    const label = FEED_NAMES[feed as MergeFeed] ?? (feed === 'fx' ? 'Rate Conversion' : feed);
+    findings.push({
+      ruleId: 'V-Q01',
+      severity: 'WARNING',
+      feed,
+      message: `${label} file ${files.map((x) => `"${x.original_filename}"`).join(', ') || ''} was set aside and filed to `
+        + `the failed folder - ${why} The rest of the upload was loaded; ${label} figures are carried forward `
+        + 'from the last upload that carried a usable file.',
+      affectedRows: null,
+      measured: { reason: why, files: files.map((x) => x.original_filename) },
+      disablesKpis: [],
+      drillPredicate: null,
+    });
+  };
+
+  /** Rows already set aside, written as failed rows the workbook carries. */
+  const recordSetAsideRows = async (
+    client: import('pg').PoolClient | null,
+    rows: { feed: string; sourceRow: number; field: string; header: string; raw: string; ruleId: string; reason: string }[],
+  ): Promise<void> => {
+    if (rows.length === 0) return;
+    const values = rows.map((r) => [batchId, r.feed, r.sourceRow, r.field, r.header, r.raw.slice(0, 500), r.ruleId, r.reason]);
+    if (client) {
+      await insertMany(client, 'ingest.row_error',
+        ['batch_id', 'feed', 'source_row', 'field', 'header', 'raw_value', 'rule_id', 'reason'], values, 1000);
+    } else {
+      await transaction((c) => insertMany(c, 'ingest.row_error',
+        ['batch_id', 'feed', 'source_row', 'field', 'header', 'raw_value', 'rule_id', 'reason'], values, 1000));
+    }
+  };
+
   /**
    * Declared out here, not inside the try, because the catch below can be
    * reached before parsing has run at all — a read failure, a safety-gate
@@ -411,6 +488,54 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     findings.push(...(await checkStaged(batchId)));
     timings.validating = (Date.now() - valStart) / 1000;
 
+    if (partial) {
+      // File level: a file none of whose rows is usable.
+      for (const f of [...findings]) {
+        if (f.severity === 'BLOCKER' && f.feed !== null && FILE_SCOPED_PRE.has(f.ruleId)) {
+          await setAsideFile(f.feed, f.ruleId === 'V-S05'
+            ? 'it holds no data rows (usually an export that ran but returned nothing).'
+            : `a required column is missing (${((f.measured?.['missing'] as string[] | undefined) ?? []).join(', ')}).`);
+        }
+      }
+      // Row level: GR rows with a movement type nobody has registered. Only
+      // those rows leave the load; the rest of the GR file stays.
+      const r07 = findings.find((f) => f.ruleId === 'V-R07' && f.severity === 'BLOCKER');
+      if (r07 && !setAsideFeeds.has('gr')) {
+        const bad = await query<{ source_row: number; mvt: string; po: string | null }>(
+          `DELETE FROM staging.raw_row r
+            WHERE r.batch_id = $1 AND r.feed = 'gr'
+              AND r.payload->>'movementType' IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM core.dim_movement_type m
+                               WHERE m.movement_type = r.payload->>'movementType')
+           RETURNING r.source_row, r.payload->>'movementType' AS mvt, r.payload->>'poNo' AS po`,
+          [batchId],
+        );
+        await recordSetAsideRows(null, bad.map((b) => ({
+          feed: 'gr', sourceRow: b.source_row, field: 'movementType', header: 'Movement type', raw: b.mvt,
+          ruleId: 'V-R07',
+          reason: `Movement type ${b.mvt} is not registered, so whether it adds or removes received quantity is unknown`
+            + `${b.po ? ` (PO ${b.po})` : ''}. Register it, then re-feed this row.`,
+        })));
+        r07.severity = 'WARNING';
+        r07.affectedRows = bad.length;
+        r07.message = `Set aside ${bad.length} GR row(s): ${r07.message} The rest of the GR file was loaded; `
+          + 'the rows are in the failed folder\'s workbook.';
+        const left = await queryOne<{ n: number }>(
+          `SELECT count(*)::int AS n FROM staging.raw_row WHERE batch_id = $1 AND feed = 'gr'`, [batchId],
+        );
+        if ((left?.n ?? 0) === 0) await setAsideFile('gr', 'every row had an unregistered movement type.');
+      }
+      // Nothing left to load at all is still a failure.
+      const accepted = REQUIRED_FEEDS.filter((f) => foundFeeds.has(f) && !setAsideFeeds.has(f));
+      if (accepted.length === 0) {
+        findings.push({
+          ruleId: 'V-Q02', severity: 'BLOCKER', feed: null,
+          message: 'Every SAP file in this upload was set aside, so there is nothing to load.',
+          affectedRows: null, measured: { setAside: [...setAsideFeeds.keys()] }, disablesKpis: [], drillPredicate: null,
+        });
+      }
+    }
+
     if (findings.some((f) => f.severity === 'BLOCKER')) {
       await persistFindings(batchId, findings);
       const reason = blockerReason(findings);
@@ -424,7 +549,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     log('transforming');
     const rules: RuleSnapshot = await loadRuleSnapshot();
 
-    const result = await transaction(async (client) => {
+    const build = () => transaction(async (client) => {
       // Write this upload's records into the store, on top of the version
       // being served (035). Same transaction as the transform: a load that
       // fails anywhere below leaves the store as it was.
@@ -435,7 +560,14 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
         if (par.bootstrapped) log('merging', `recorded base batch ${parentBatchId}`);
       }
       log('merging');
-      const merge = await recordSourceRows(client, batchId, parentBatchId);
+      const merge = await recordSourceRows(client, batchId, parentBatchId, { setAsideBad: partial });
+      // PR Release rows the order guards set aside: filed as failed rows. In
+      // this transaction, so a run that fails later records none of them.
+      await recordSetAsideRows(client, (merge.prelSetAside ?? []).map((x) => ({
+        feed: 'prel', sourceRow: x.sourceRow, field: x.ruleId === 'V-R04' ? 'relSeq' : 'prNo',
+        header: x.ruleId === 'V-R04' ? 'Release sequence' : 'Purchase Requisition',
+        raw: x.prNo ?? '', ruleId: x.ruleId, reason: x.reason,
+      })));
 
       const tr = await runTransform(client, batchId, rules);
       // The PR Release order guards now run where the continuation rows are
@@ -446,19 +578,65 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       tr.metrics.continuationDuplicateKeys = fill?.continuationDuplicateKeys ?? 0;
       tr.metrics.l2BeforeL1 = fill?.l2BeforeL1 ?? 0;
 
-      findings.push(...mergeFindings(merge, parentBatchId));
+      findings.push(...mergeFindings(merge, parentBatchId, setAsideFeeds));
       if (parentBatchId !== null) findings.push(...(await carriedCaveats(client, parentBatchId, merge)));
 
       const postFindings = checkMetrics(tr.metrics, rules);
+      // Rows the order guards already set aside are not a reason to stop: the
+      // rest of the PR Release file is clean and stored.
+      const setAsideCount = (rule: string) => (merge.prelSetAside ?? []).filter((x) => x.ruleId === rule).length;
+      for (const f of postFindings) {
+        if ((f.ruleId === 'V-R04' || f.ruleId === 'V-R04a') && f.severity === 'BLOCKER'
+          && !fill?.looksResorted && setAsideCount(f.ruleId) > 0) {
+          f.severity = 'WARNING';
+          const n = setAsideCount(f.ruleId);
+          f.affectedRows = n;
+          // Its own words: the guard's message says the export looks
+          // re-sorted, which is what it does NOT look like when a few rows
+          // could be set aside.
+          f.message = (f.ruleId === 'V-R04'
+            ? `Set aside ${n} PR Release continuation row(s) that were not directly below a sequence-1 row: `
+              + 'their PR cannot be told from the row above, so they were not attached to one.'
+            : `Set aside ${n} repeated PR Release step(s) - the same PR, item and sequence as an earlier row, `
+              + 'which was kept.')
+            + ' The rest of the PR Release file was loaded; the rows are in the failed folder\'s workbook.';
+        }
+      }
       findings.push(...postFindings);
 
       if (postFindings.some((f) => f.severity === 'BLOCKER')) {
-        throw new BlockerError(blockerReason(postFindings), tr.datasetVersionId);
+        throw new BlockerError(blockerReason(postFindings), tr.datasetVersionId, postFindings);
       }
 
       await buildMart(client, tr.datasetVersionId, tr.asOfDate, rules, disabledKpis(findings));
       return tr;
     });
+
+    // A post-transform blocker that condemns one FILE (a re-sorted PR Release,
+    // an unanchored rate file) is retried once without that file. The failed
+    // attempt rolled back, so the store is as it was; its findings go too.
+    const mark = findings.length;
+    let result: Awaited<ReturnType<typeof build>>;
+    try {
+      result = await build();
+    } catch (err) {
+      const blockers = err instanceof BlockerError
+        ? err.findings.filter((f) => f.severity === 'BLOCKER') : [];
+      const retryable = partial && blockers.length > 0
+        && blockers.every((f) => f.feed !== null && FILE_SCOPED_POST.has(f.ruleId));
+      if (!retryable) throw err;
+      findings.length = mark;
+      await exec('DELETE FROM ingest.row_error WHERE batch_id = $1 AND rule_id IN (\'V-R04\', \'V-R04a\')', [batchId]);
+      for (const f of blockers) {
+        await setAsideFile(f.feed!, f.ruleId === 'V-R06a'
+          ? 'its month column carries no year that can be anchored (V-R06a). Rates stay as already stored.'
+          : `it looks re-sorted - ${f.message}`);
+      }
+      const accepted = REQUIRED_FEEDS.filter((f) => foundFeeds.has(f) && !setAsideFeeds.has(f));
+      if (accepted.length === 0) throw new BlockerError('Every SAP file in this upload was set aside, so there is nothing to load.', 0, []);
+      log('transforming', `again, without ${[...setAsideFeeds.keys()].join(', ')}`);
+      result = await build();
+    }
     timings.transforming = (Date.now() - txStart) / 1000;
 
     // deltas vs the previous published version
@@ -472,6 +650,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       [result.datasetVersionId],
     );
 
+    rowSummary = await acceptedRowSummary(batchId, rowSummary);
     await persistFindings(batchId, findings);
     await setState('READY');
 
@@ -514,10 +693,37 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
 }
 
 class BlockerError extends Error {
-  constructor(message: string, public readonly versionId: number) {
+  constructor(
+    message: string,
+    public readonly versionId: number,
+    public readonly findings: readonly Finding[] = [],
+  ) {
     super(message);
     this.name = 'BlockerError';
   }
+}
+
+/**
+ * The per-file tally after partial loading: a set-aside file accepted nothing,
+ * and rows set aside inside a file count against it (ingest.row_error).
+ */
+async function acceptedRowSummary(batchId: number, before: FeedRowSummary[]): Promise<FeedRowSummary[]> {
+  const files = await query<{ original_filename: string; rejected_reason: string | null }>(
+    `SELECT original_filename, rejected_reason FROM ingest.batch_file WHERE batch_id = $1`, [batchId],
+  );
+  const bad = await query<{ feed: string; n: number }>(
+    `SELECT feed, count(DISTINCT source_row)::int AS n FROM ingest.row_error WHERE batch_id = $1 GROUP BY feed`,
+    [batchId],
+  );
+  const rejected = new Map(files.map((f) => [f.original_filename, f.rejected_reason]));
+  const badBy = new Map(bad.map((b) => [b.feed, b.n]));
+  return before.map((r) => {
+    const why = rejected.get(r.filename) ?? null;
+    if (why) return { ...r, rowsWithError: r.rowsRead, rowsAccepted: 0, setAside: why };
+    if (!r.matched) return r;
+    const withError = badBy.get(r.feed) ?? r.rowsWithError;
+    return { ...r, rowsWithError: withError, rowsAccepted: Math.max(0, r.rowsRead - withError) };
+  });
 }
 
 function blockerReason(findings: readonly Finding[]): string {
@@ -530,6 +736,17 @@ async function mergeEnabled(): Promise<boolean> {
   const v = (await loadRuleSnapshot())['ingest.merge_enabled'];
   return !(v === false || v === 'false');
 }
+
+/** Rule `ingest.partial_load`, default ON. OFF restores all-or-nothing runs. */
+async function partialEnabled(): Promise<boolean> {
+  const v = (await loadRuleSnapshot())['ingest.partial_load'];
+  return !(v === false || v === 'false');
+}
+
+/** Blockers that condemn the whole FILE they were raised on, and nothing else. */
+const FILE_SCOPED_PRE = new Set(['V-S02', 'V-S05']);
+/** Post-transform blockers that condemn one file: retried without it. */
+const FILE_SCOPED_POST = new Set(['V-R04', 'V-R04a', 'V-R06a']);
 
 /** Whether the version being served can be built on (see resolveParent). */
 async function mergeBaseAvailable(): Promise<boolean> {
@@ -555,7 +772,7 @@ const fmt = (n: number): string => n.toLocaleString('en-US');
  * change?". INFO for a feed that came with the upload; WARNING for one that did
  * not, because its figures are now as old as the upload that last carried it.
  */
-function mergeFindings(m: MergeSummary, parentBatchId: number | null): Finding[] {
+function mergeFindings(m: MergeSummary, parentBatchId: number | null, setAside: ReadonlyMap<Feed, string> = new Map()): Finding[] {
   const out: Finding[] = [];
   for (const feed of MERGE_FEEDS) {
     const f = m[feed];
@@ -585,7 +802,9 @@ function mergeFindings(m: MergeSummary, parentBatchId: number | null): Finding[]
         ruleId: 'V-I03',
         severity: 'WARNING',
         feed,
-        message: `No ${FEED_NAMES[feed]} file in this upload: its ${fmt(f.total)} record(s) were carried forward `
+        message: (setAside.has(feed)
+          ? `The ${FEED_NAMES[feed]} file in this upload was set aside (see V-Q01): its ${fmt(f.total)} record(s) were carried forward `
+          : `No ${FEED_NAMES[feed]} file in this upload: its ${fmt(f.total)} record(s) were carried forward `)
           + `unchanged from earlier uploads. Figures that depend on it are as current as the last ${FEED_NAMES[feed]} file.`,
         affectedRows: f.total,
         measured: { ...f },

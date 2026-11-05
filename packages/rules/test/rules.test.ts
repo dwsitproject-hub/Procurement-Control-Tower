@@ -530,6 +530,40 @@ describe('PR Release continuation rows', () => {
     expect(r.orderViolations).toBe(1);
   });
 
+  it('sets aside only the out-of-order row when asked, and still fills the rest', () => {
+    const r = fillReleaseContinuations([
+      row({ rowNumber: 2, prNo: '1000008301', prItem: 1, relSeq: 1, approveDate: '2025-04-10' }),
+      row({ rowNumber: 3, prNo: null, prItem: 0, relSeq: 2, approveDate: '2025-04-14' }),
+      row({ rowNumber: 4, prNo: null, prItem: 0, relSeq: 2, approveDate: '2025-04-15' }), // follows a seq-2 row
+      row({ rowNumber: 5, prNo: '1000008302', prItem: 1, relSeq: 1, approveDate: '2025-04-11' }),
+      row({ rowNumber: 6, prNo: null, prItem: 0, relSeq: 2, approveDate: '2025-04-16' }),
+    ], { setAsideBad: true });
+    expect(r.orderViolations).toBe(1);
+    expect(r.setAside.map((x) => [x.rowNumber, x.ruleId])).toEqual([[4, 'V-R04']]);
+    expect(r.rows.map((x) => x.rowNumber)).toEqual([2, 3, 5, 6]);
+    expect(r.rows[3]!.prNo).toBe('1000008302');
+  });
+
+  it('sets aside a repeated release step when asked, keeping the first copy', () => {
+    const r = fillReleaseContinuations([
+      row({ rowNumber: 2, prNo: 'PR1', prItem: 1, relSeq: 1, approveDate: '2025-04-10' }),
+      row({ rowNumber: 3, prNo: 'PR1', prItem: 1, relSeq: 1, approveDate: '2025-04-12' }),
+    ], { setAsideBad: true });
+    expect(r.duplicateKeys).toBe(1);
+    expect(r.setAside.map((x) => [x.rowNumber, x.ruleId])).toEqual([[3, 'V-R04a']]);
+    expect(r.rows).toHaveLength(1);
+  });
+
+  it('only counts, and keeps every row, without setAsideBad (as the transform uses it)', () => {
+    const r = fillReleaseContinuations([
+      row({ prNo: 'PR1', prItem: 1, relSeq: 1 }),
+      row({ prNo: 'PR1', prItem: 1, relSeq: 1 }),
+    ]);
+    expect(r.duplicateKeys).toBe(1);
+    expect(r.setAside).toHaveLength(0);
+    expect(r.rows).toHaveLength(2);
+  });
+
   it('detects level 2 approved before level 1 (WARNING V-R05)', () => {
     const r = fillReleaseContinuations([
       row({ prNo: 'PR1', prItem: 1, relSeq: 1, approveDate: '2025-04-20' }),

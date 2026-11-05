@@ -45,6 +45,11 @@ export interface FeedMerge {
 export type MergeSummary = Record<MergeFeed, FeedMerge> & {
   /** Present when this upload carried a PR Release file. */
   prelFill?: PrelFillStats;
+  /**
+   * PR Release rows set aside by the V-R04 guards (5 Nov 2026, setAsideBad):
+   * the rest of the file was stored. The caller files them as failed rows.
+   */
+  prelSetAside?: { batchFileId: number; sourceRow: number; ruleId: string; reason: string; prNo: string | null }[];
 };
 
 interface Row {
@@ -113,9 +118,25 @@ export interface PrelFillStats {
   continuationOrderViolations: number;
   continuationDuplicateKeys: number;
   l2BeforeL1: number;
+  /**
+   * So many rows broke the order that the export looks re-sorted: setting a
+   * few rows aside would not help, because the rows that DO follow a
+   * sequence-1 row may follow the wrong one. Nothing was set aside, and V-R04
+   * stays a blocker for the whole PR Release file.
+   */
+  looksResorted?: boolean;
 }
 
-function fillPrel(rows: Row[]): { rows: Row[]; stats: PrelFillStats } {
+/**
+ * Above this, out-of-order continuation rows are read as a re-sorted export
+ * rather than a few bad rows: 20 rows, or 1% of the continuation rows if more.
+ */
+const RESORTED_MIN = 20;
+const RESORTED_SHARE = 0.01;
+
+function fillPrel(rows: Row[], setAsideBad = false): {
+  rows: Row[]; stats: PrelFillStats; setAside: NonNullable<MergeSummary['prelSetAside']>;
+} {
   // rowNumber is the row's INDEX here, not its file row: an upload may carry
   // several PR Release files, whose row numbers repeat.
   const raw: ReleaseRowRaw[] = rows.map((r, idx) => ({
@@ -137,8 +158,13 @@ function fillPrel(rows: Row[]): { rows: Row[]; stats: PrelFillStats } {
     gapLeadDays: i(r.payload['gapLeadDays']),
   }));
   // Continuation rows that cannot be attached to a parent are dropped, as the
-  // transform drops them.
-  const res = fillReleaseContinuations(raw);
+  // transform drops them. With setAsideBad, the rows the V-R04 guards catch are
+  // taken out and returned - unless there are so many that the file itself is
+  // the problem (looksResorted), when it is filled as before and blocked.
+  let res = fillReleaseContinuations(raw, { setAsideBad });
+  const looksResorted = setAsideBad
+    && res.orderViolations > Math.max(RESORTED_MIN, res.continuationCount * RESORTED_SHARE);
+  if (looksResorted) res = fillReleaseContinuations(raw);
   const out = res.rows.map((f) => {
     const src = rows[f.rowNumber]!;
     return {
@@ -159,11 +185,22 @@ function fillPrel(rows: Row[]): { rows: Row[]; stats: PrelFillStats } {
   return {
     rows: out,
     stats: {
-      continuationRowsAttached: res.continuationCount - res.unattached,
+      continuationRowsAttached: res.continuationCount - res.unattached - res.setAside.filter((x) => x.ruleId === 'V-R04').length,
       continuationOrderViolations: res.orderViolations,
       continuationDuplicateKeys: res.duplicateKeys,
       l2BeforeL1: res.l2BeforeL1,
+      ...(looksResorted ? { looksResorted: true } : {}),
     },
+    setAside: res.setAside.map((x) => {
+      const src = rows[x.rowNumber]!;
+      return {
+        batchFileId: src.batch_file_id,
+        sourceRow: src.source_row,
+        ruleId: x.ruleId,
+        reason: x.reason,
+        prNo: s(src.payload['prNo']),
+      };
+    }),
   };
 }
 
@@ -244,6 +281,8 @@ export async function recordSourceRows(
   client: pg.PoolClient,
   batchId: number,
   parentBatchId: number | null,
+  /** Set aside the PR Release rows the V-R04 guards catch (5 Nov 2026). */
+  opts: { setAsideBad?: boolean } = {},
 ): Promise<MergeSummary> {
   const summary = {} as MergeSummary;
 
@@ -259,9 +298,10 @@ export async function recordSourceRows(
     )).rows;
     fm.inFile = rows.length;
     if (feed === 'prel' && rows.length > 0) {
-      const f = fillPrel(rows);
+      const f = fillPrel(rows, opts.setAsideBad === true);
       rows = f.rows;
       summary.prelFill = f.stats;
+      if (f.setAside.length > 0) summary.prelSetAside = f.setAside;
     }
 
     // This upload's documents, first copy of a key wins (as in the transform).

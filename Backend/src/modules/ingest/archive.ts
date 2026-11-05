@@ -92,12 +92,14 @@ export type ArchiveOutcome =
  * validation report identifies it.
  */
 async function recognisedNames(batchId: number): Promise<Set<string>> {
-  const rows = await query<{ original_filename: string; detected_feed: string | null }>(
-    `SELECT original_filename, detected_feed FROM ingest.batch_file WHERE batch_id = $1`,
+  // A file set aside whole by a partial load (042, rejected_reason) is not
+  // accepted either: it goes to failed although the run published.
+  const rows = await query<{ original_filename: string; detected_feed: string | null; rejected_reason: string | null }>(
+    `SELECT original_filename, detected_feed, rejected_reason FROM ingest.batch_file WHERE batch_id = $1`,
     [batchId],
   );
   return new Set(
-    rows.filter((r) => r.detected_feed !== null).map((r) => r.original_filename),
+    rows.filter((r) => r.detected_feed !== null && r.rejected_reason === null).map((r) => r.original_filename),
   );
 }
 

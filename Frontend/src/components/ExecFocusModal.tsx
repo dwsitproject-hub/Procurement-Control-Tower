@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { api, type Kpi } from '../lib/api';
 import { KpiCard } from './KpiCard';
+import { FloatControls } from './FloatControls';
 
 const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartPanel })));
 
@@ -116,6 +117,7 @@ export function ExecFocusModal({
           <h3>🎯 {title}</h3>
           <span className="count">{subtitle}</span>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {lifecycleToggle && (
             <div className="gf-scope" role="group" aria-label="Lifecycle">
               {([['', 'All'], ['open', 'Not yet delivered'], ['closed', 'Delivered']] as const).map(([v, l]) => (

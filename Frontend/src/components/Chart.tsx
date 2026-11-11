@@ -124,6 +124,32 @@ const HORIZONTAL_CHARTS = new Set(['items_by_category']);
 const WATERFALL_BAND_COLORS = ['#4E79A7', '#F28E2B', '#59A14F', '#E15759', '#76B7B2', '#EDC948'];
 const WATERFALL_STEP_COLORS = { new_pr: '#2E7D32', to_po: '#1F3864', cancelled: '#94a3b8' };
 
+/**
+ * A diagonal hatch over a light tint of `color` (11 Nov 2026: "Became PO" is
+ * shaded rather than solid, so it reads as what LEFT the backlog against the
+ * solid green of what arrived). Same hue, so the legend still matches; falls
+ * back to the plain colour where a canvas is unavailable.
+ */
+function hatch(color: string): CanvasPattern | string {
+  if (typeof document === 'undefined') return color;
+  const c = document.createElement('canvas');
+  c.width = 8;
+  c.height = 8;
+  const g = c.getContext('2d');
+  if (!g) return color;
+  g.fillStyle = `${color}33`;
+  g.fillRect(0, 0, 8, 8);
+  g.strokeStyle = color;
+  g.lineWidth = 1.6;
+  g.beginPath();
+  // One full diagonal and the two corner stubs, so the tiles join seamlessly.
+  g.moveTo(0, 8); g.lineTo(8, 0);
+  g.moveTo(-2, 2); g.lineTo(2, -2);
+  g.moveTo(6, 10); g.lineTo(10, 6);
+  g.stroke();
+  return g.createPattern(c, 'repeat') ?? color;
+}
+
 // v1's PR Status Distribution donut colours, keyed by status.
 const STATUS_COLORS: Record<string, string> = {
   Delivered: '#4CAF50',
@@ -328,7 +354,7 @@ export function ChartPanel({
       // Each dataset knows the series it draws, so a click drills to that
       // series' own point - the rows behind exactly that segment.
       const sets: { key: string; label: string; stack: string; color: string;
-        values: (number | [number, number])[] }[] = [
+        values: (number | [number, number])[]; shaded?: boolean }[] = [
         ...bandKeys.map((k, i) => ({
           key: k,
           label: ser(k)?.label ?? k,
@@ -341,7 +367,7 @@ export function ChartPanel({
           values: data.buckets.map((b) => [bf(b.key), bf(b.key) + val('new_pr', b.key)] as [number, number]),
         },
         {
-          key: 'to_po', label: '\u2212 Became PO', stack: 'po', color: WATERFALL_STEP_COLORS.to_po,
+          key: 'to_po', label: '\u2212 Became PO', stack: 'po', color: WATERFALL_STEP_COLORS.to_po, shaded: true,
           values: data.buckets.map((b) => {
             const top = bf(b.key) + val('new_pr', b.key);
             return [top - val('to_po', b.key), top] as [number, number];
@@ -363,7 +389,9 @@ export function ChartPanel({
             label: d.label,
             data: d.values as never,
             stack: d.stack,
-            backgroundColor: d.color,
+            backgroundColor: d.shaded ? hatch(d.color) : d.color,
+            // A shaded bar keeps a solid edge in its own colour.
+            ...(d.shaded ? { borderColor: d.color, borderWidth: 1.5 } : {}),
             borderRadius: 2,
           })),
         },

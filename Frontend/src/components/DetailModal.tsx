@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { DetailTable } from './DetailTable';
+import { FloatControls } from './FloatControls';
 
 /**
  * The Detail Table in a floating panel (requested 7 Oct 2026).
@@ -43,6 +44,7 @@ export function DetailModal({
         <header>
           <h3 id="detail-modal-title">{'\u{1F50D} '}{title}</h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           <button className="dd-x" onClick={onClose} aria-label="Close" title="Close">
             {'✕'}
           </button>

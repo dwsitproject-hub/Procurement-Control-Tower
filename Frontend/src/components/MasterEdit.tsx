@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
+import { FloatControls } from './FloatControls';
 
 /**
  * Master data editing, for Admins (032).
@@ -171,6 +172,7 @@ export function MasterEditDialog({
         <header>
           <h3>{adding ? `Add to ${tableName}` : `Edit ${tableName}`}</h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           <button type="button" className="dd-x" onClick={onClose} aria-label="Close">✕</button>
         </header>
         <div className="body">

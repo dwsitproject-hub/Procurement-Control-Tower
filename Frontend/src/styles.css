@@ -1266,3 +1266,34 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
   margin: .5rem 1.1rem 0; padding: .4rem .7rem; border-radius: 6px; font-size: .78rem;
   background: var(--bg); border: 1px dashed var(--accent); color: var(--text);
 }
+
+/* Floating pages: minimize / maximize (FloatControls, 11 Nov 2026). The state
+   is a data-float attribute on the popup and its backdrop. */
+.fl-ctl { display: inline-flex; gap: .25rem; }
+.fl-btn {
+  min-width: 1.9rem; height: 1.7rem; padding: 0 .4rem; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  font-size: .85rem; line-height: 1; cursor: pointer;
+}
+.fl-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Minimized: the title bar alone, docked bottom-right; the page behind is
+   neither dimmed nor blocked. */
+.modal-backdrop[data-float="min"] {
+  background: transparent; pointer-events: none; padding: 0;
+  align-items: flex-end; justify-content: flex-end;
+}
+.modal[data-float="min"] {
+  pointer-events: auto; width: min(440px, calc(100vw - 2rem)); max-height: none;
+  margin: 0 1rem 1rem 0; box-shadow: 0 6px 24px rgba(0, 0, 0, .3);
+}
+.modal[data-float="min"] > :not(header) { display: none; }
+.modal[data-float="min"] header { flex-wrap: nowrap; border-bottom: none; border-radius: var(--radius); }
+.modal[data-float="min"] header > :not(h3):not(.fl-ctl) { display: none; }
+.modal[data-float="min"] header h3 { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Maximized: every pixel below the top bar. */
+.modal-backdrop[data-float="max"] { padding: calc(var(--topbar-h) + .25rem) .5rem .5rem; }
+.modal[data-float="max"] {
+  width: 100%; max-width: none; height: calc(100vh - var(--topbar-h) - .75rem); max-height: none;
+}

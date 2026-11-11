@@ -2176,21 +2176,21 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1, 2 ORDER BY 1`,
   },
   {
-    chartId: 'open_backlog_by_month', seriesKey: 'over150', seriesLabel: 'Of those, over 150 days', unit: 'count',
-    // The same population narrowed by age, so the second series is always a
-    // subset of the first and the two can be read against each other.
+    chartId: 'open_backlog_by_month', seriesKey: 'raised', seriesLabel: 'PR items raised', unit: 'count',
+    // Was "Of those, over 150 days" until 11 Nov 2026 - nearly implied by the
+    // first series, since age runs from the raise date. Replaced on request by
+    // every PR item raised in the same month, open or not: the first series is
+    // a subset of this one, so each pair reads "raised that month, and how
+    // many of those are still open". Same grain, same month rule, same filter.
     sql: `SELECT to_char(requisition_date, 'YYYY-MM') AS bucket_key,
                  to_char(requisition_date, 'Mon YYYY') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
                    jsonb_build_object('monthKey', to_char(requisition_date, 'YYYY-MM'),
-                                      'statusIn', jsonb_build_array('Unapproved PR','PR Approved-No PO'),
-                                      'ageBand', '>150',
                                       'notDeleted', true)) AS drill
             FROM ${PRI}
            WHERE dataset_version_id = $1 AND NOT is_deleted /*F*/
-             AND status IN ('Unapproved PR','PR Approved-No PO')
-             AND requisition_date IS NOT NULL AND aging_days > 150
+             AND requisition_date IS NOT NULL
            GROUP BY 1, 2 ORDER BY 1`,
   },
   // ── "Item Category by Amount Spend" (Material Group page) ──

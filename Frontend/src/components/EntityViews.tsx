@@ -12,6 +12,7 @@ import { FilterDropdown } from './FilterDropdown';
 ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
 import { DASH, FLAG_META, formatCurrency, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
 import { Lbl } from '../lib/labels';
+import { FloatControls } from './FloatControls';
 
 /**
  * W3 — Vendor 360 and Material Group views (v1's pg-v360 / pg-mg / mx-modal).
@@ -500,6 +501,7 @@ export function VendorModal({
         <header>
           <h3>🏢 {d?.vendorName ?? code} <span className="muted">({code})</span></h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {d?.drill?.allLines && (
             <button className="dt-btn" onClick={() => onDrill(d.drill.allLines, `Vendor ${code} — all PO lines`)}>
               Open all lines
@@ -921,6 +923,7 @@ export function CategoryModal({
             <span className="muted"><Lbl>spend category 360</Lbl></span>
           </h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {d?.drill?.allLines && (
             <button className="dt-btn" onClick={() => onDrill(d.drill.allLines, `${category} — all PO lines${scopeNote}`)}>
               Open all lines
@@ -1075,6 +1078,7 @@ export function MaterialModal({
         <header>
           <h3>📦 {code} <span className="muted">{d?.description ?? ''}</span></h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {d?.drill?.allLines && (
             <button className="dt-btn" onClick={() => onDrill(d.drill.allLines, `Material ${code} — all PO lines`)}>
               Open all lines

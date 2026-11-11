@@ -5,6 +5,7 @@ import { ScrollFrame } from './ScrollFrame';
 import {
   ColumnChooser, SortButton, useColumnLayout, useHeaderDrag, type SortState,
 } from './TableTools';
+import { FloatControls } from './FloatControls';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
 function agingStyle(days: number): React.CSSProperties | undefined {
@@ -161,6 +162,7 @@ export function DrillModal({
         <header>
           <h3 id="drill-title">{'\u{1F50D} '}{label || page?.label}</h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {page && !error && page.totalCount > 0 && (
             <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} />
           )}

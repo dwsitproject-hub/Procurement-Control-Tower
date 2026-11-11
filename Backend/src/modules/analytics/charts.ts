@@ -186,7 +186,7 @@ export const CHART_META: ChartMeta[] = [
   { chartId: 'aging_severity_by_stage',   title: 'Aging severity by open stage — item count in age bands', tab: 'openitems', grain: 'pr_item', unit: 'count' },
   {
     chartId: 'open_backlog_by_month',
-    title: 'Open requisitions by month raised — and how many passed 150 days',
+    title: 'Open requisitions by month raised — against the PR items raised that month',
     tab: 'openitems',
     grain: 'pr_item',
     unit: 'count',
@@ -194,7 +194,7 @@ export const CHART_META: ChartMeta[] = [
       'Requisitions with NO purchase order: not approved, or approved and not ordered. A requisition that reached an order has left this population by definition, in both series.',
       'Grouped by the month the requisition was RAISED, so a tall recent bar is new demand and a tall old bar is demand still unmet',
       'Not a reconstruction of the backlog as it stood in each month',
-      'The second series is nearly implied by the first: age is measured from the raise date, so every month older than the threshold is entirely past it and every recent month is entirely inside it. Read it as a marker for where the line falls, not as a second measurement.',
+      'PR items raised: every requisition item raised in that month, open or not (deleted excluded) - so each pair reads as "raised that month, and how many of those are still open"',
     ],
   },
   { chartId: 'pr_approval_by_priority',  title: 'PR approval by priority',          tab: 'pr',        grain: 'pr_item', unit: 'days' },

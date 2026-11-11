@@ -5,6 +5,7 @@ import {
   FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
 } from '../lib/format';
 import { Lbl } from '../lib/labels';
+import { hubTrack } from '../lib/hub';
 
 /** v1's AW per-column aging warn thresholds (amber above, red above 2x). */
 const AGE_WARN: Record<string, number> = {
@@ -351,6 +352,7 @@ export function DetailTable({
       q.set('cols', cols.join(','));
       const r = await downloadFile(`/api/v1/detail/export.xlsx?${q.toString()}`, 'pct-detail.xlsx');
       const rows = r.rows ?? 0;
+      hubTrack('report_exported', { source: 'detail_table', format: 'xlsx', rows });
       setExportNote(
         r.total !== null && r.total > rows
           ? `Downloaded ${r.filename} — ${formatNumber(rows)} of ${formatNumber(r.total)} rows. `

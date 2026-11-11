@@ -27,6 +27,7 @@ import {
  */
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Lbl, LabelProvider } from './lib/labels';
+import { hubIdentify, hubReset, hubTrack } from './lib/hub';
 
 const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
 const OpenItemsTab = lazy(() => import('./components/OpenItemsTab').then((m) => ({ default: m.OpenItemsTab })));
@@ -341,6 +342,10 @@ export default function App() {
       .finally(() => setAuthChecked(true));
   }, []);
 
+  // Tell the Hub SDK who is signed in - on sign-in, after the SSO callback and
+  // on a restored session alike, since all three arrive here as `me`.
+  useEffect(() => { if (me) hubIdentify(me); }, [me]);
+
   useEffect(() => {
     if (!me) return;
     api.get<DatasetCurrent>('/api/v1/dataset/current').then((d) => {
@@ -585,6 +590,7 @@ export default function App() {
           className="tbtn"
           href="/api/v1/snapshot"
           download
+          onClick={() => hubTrack('snapshot_downloaded')}
           title="Download a static HTML snapshot of the current dashboard (frozen figures, your data scope)"
         >
           ⤓ Snapshot
@@ -1052,6 +1058,7 @@ export default function App() {
 }
 
 async function logout(): Promise<void> {
+  hubReset();
   await api.post('/auth/logout').catch(() => undefined);
   window.location.reload();
 }

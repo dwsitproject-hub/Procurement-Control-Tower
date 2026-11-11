@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../lib/api';
 import { DASH, formatDateTime, formatNumber } from '../lib/format';
 import { Lbl } from '../lib/labels';
+import { hubTrack } from '../lib/hub';
 
 /**
  * SAP Data Upload — the manual fallback for when the share-folder sync is not
@@ -409,6 +410,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
       : 'Reading the folders and ingesting…');
     try {
       const out = await api.post<Record<string, any>>('/api/v1/ingest/sync', force ? { force: true } : {});
+      hubTrack(force ? 'sap_rebuild' : 'sap_sync_now', { outcome: String(out['outcome'] ?? '') });
       setSyncSummary(
         Array.isArray(out.rowSummary) && out.rowSummary.length > 0
           ? { batchId: typeof out.batchId === 'number' ? out.batchId : null, rows: out.rowSummary }
@@ -963,6 +965,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
     try {
       const fd = new FormData();
       for (const f of files) fd.append('files', f, f.name);
+      hubTrack('sap_upload', { files: files.length, publish });
       // FormData must NOT go through the JSON helper: the browser has to set
       // its own multipart boundary.
       const res = await fetch(`/api/v1/ingest/upload?publish=${publish ? 'true' : 'false'}`, {

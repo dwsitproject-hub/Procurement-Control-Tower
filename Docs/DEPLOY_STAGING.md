@@ -607,8 +607,10 @@ docker compose -f /opt/pct/compose.yml up -d --force-recreate api   # migrations
 docker logs pct-api 2>&1 | grep -i migration | tail -3
 
 # FE server (172.28.92.56) — services: web
+# The Hub SDK settings and the release ride in as build args (Docs/HUB_SDK_AND_SENTINEL.md);
+# without /opt/pct/fe-build.env the image simply has no SDK.
 cd /opt/pct/src && git pull --ff-only
-docker build -f Frontend/Dockerfile -t pct-web:staging .
+docker build $(grep -sE '^[A-Z_]+=' /opt/pct/fe-build.env | sed 's/^/--build-arg /') --build-arg GIT_SHA=$(git rev-parse --short HEAD) -f Frontend/Dockerfile -t pct-web:staging .
 docker compose -f /opt/pct/compose.yml up -d --force-recreate web
 ```
 

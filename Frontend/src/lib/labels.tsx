@@ -3,6 +3,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from './api';
+import { hubTrack } from './hub';
 
 /**
  * Section and card titles an Admin can rename (039, 23 Oct 2026).
@@ -76,6 +77,7 @@ export function LabelProvider({
 
   const save = useCallback(async (key: string, label: string, defaultText: string) => {
     take(await api.put<LabelSet>('/api/v1/admin/ui-labels', { key, label, defaultText }));
+    hubTrack('title_renamed');
   }, [take]);
   const reset = useCallback(async (key: string) => {
     take(await api.post<LabelSet>('/api/v1/admin/ui-labels/reset', { key }));

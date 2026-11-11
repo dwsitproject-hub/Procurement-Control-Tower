@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
 import { FloatControls } from './FloatControls';
+import { hubTrack } from '../lib/hub';
 
 /**
  * Master data editing, for Admins (032).
@@ -120,6 +121,7 @@ export function MasterEditDialog({
       }
       if (adding) await api.post('/api/v1/admin/master/rows', { relation, values });
       else await api.patch('/api/v1/admin/master/rows', { relation, values });
+      hubTrack(adding ? 'master_row_added' : 'master_row_edited', { relation });
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));

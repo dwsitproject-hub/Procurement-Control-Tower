@@ -351,6 +351,11 @@ export function buildRouter(): Router {
       pages: await resolvePages(ctx.principal.userId, ctx.principal.roles),
       mustChangePassword: ctx.principal.mustChangePassword,
       ssoEnabled: oidcEnabled(),
+      // The Hub user id (OIDC `sub`) of an SSO user, for the Hub SDK's
+      // identify call (11 Nov 2026). Null for a local-password user.
+      hubSubject: (await queryOne<{ s: string | null }>(
+        'SELECT sso_subject AS s FROM app.app_user WHERE id = $1', [ctx.principal.userId],
+      ))?.s ?? null,
     });
   }));
 

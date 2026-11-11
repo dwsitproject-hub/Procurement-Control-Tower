@@ -6,6 +6,7 @@ import {
   ColumnChooser, SortButton, useColumnLayout, useHeaderDrag, type SortState,
 } from './TableTools';
 import { FloatControls } from './FloatControls';
+import { hubTrack } from '../lib/hub';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
 function agingStyle(days: number): React.CSSProperties | undefined {
@@ -122,6 +123,7 @@ export function DrillModal({
         'pct-drill.xlsx',
       );
       const n = r.rows ?? 0;
+      hubTrack('report_exported', { source: 'drill', format: 'xlsx', rows: n });
       setExportNote(
         r.total !== null && r.total > n
           ? `Downloaded ${r.filename} \u2014 ${formatNumber(n)} of ${formatNumber(r.total)} rows. `

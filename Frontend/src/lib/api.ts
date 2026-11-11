@@ -125,6 +125,8 @@ export interface Me {
   /** Effective per-page access (011); absent keys mean 'none'. */
   pages?: Record<string, 'none' | 'view' | 'edit'>;
   mustChangePassword?: boolean;
+  /** Hub user id (OIDC `sub`) for SSO users, for the Hub SDK; null otherwise. */
+  hubSubject?: string | null;
 }
 
 export interface FeedInfo {

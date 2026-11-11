@@ -1058,12 +1058,8 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
                       <td><code>{e.feed}</code></td>
                       <td>
                         {e.label}{' '}
-                        {'optional' in e && e.optional && (
-                          // Stated on the row so nobody concludes a bundle now
-                          // needs ten files: the six transactional exports are
-                          // still all-or-nothing, these four are not.
-                          <span className="bs sl">optional</span>
-                        )}
+                        {/* No "optional" badge since 11 Nov 2026: every export
+                            is optional now - one file is a valid upload. */}
                       </td>
                       <td className="muted">{e.hint}</td>
                       <td>
@@ -1125,16 +1121,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
             return (
               <>
                 <p className="note">
-                  <span className={files.length < REQUIRED_FEED_IDS.length ? 'bs sa' : 'bs sl'}>
-                    {files.length} file(s) chosen
-                  </span>{' '}
-                  {files.length < REQUIRED_FEED_IDS.length && (
-                    <>
-                      <strong>
-                        Fewer than the {REQUIRED_FEED_IDS.length} required exports.
-                      </strong>{' '}
-                    </>
-                  )}
+                  <span className="bs sl">{files.length} file(s) chosen</span>{' '}
                   {files.map((f) => f.name).join(' · ')}
                 </p>
                 {unmatched.length > 0 && (
@@ -1153,12 +1140,14 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
             );
           })()}
           <p className="note">
-            A complete bundle needs all {REQUIRED_FEED_IDS.length} of{' '}
-            <strong>{REQUIRED_FEED_IDS.join(', ')}</strong> — an incomplete set is rejected rather
-            than published half-loaded. Only the four marked <em>optional</em> may be left out;
-            Rate Conversion (<code>fx</code>) is <strong>not</strong> one of them. Which feed a file
-            is comes from its column headers, never its name, so a correctly-named file can still be
-            classified as something else — and a file named nothing like its feed still lands
+            <strong>One file is enough.</strong> Upload any of the exports above, alone or together:
+            each merges into what is already loaded — new records are added, changed ones updated —
+            and everything you leave out stays exactly as it was. A reference file on its own
+            (SAP Users, Purchasing Groups, Purchasing Orgs, Material Master) refreshes just that list;
+            a Rate Conversion file on its own refreshes the rates. Only the very first load, or a
+            load with merging switched off, needs all {REQUIRED_FEED_IDS.length} of{' '}
+            <strong>{REQUIRED_FEED_IDS.join(', ')}</strong>. Which feed a file is comes from its
+            column headers, never its name, so a file named nothing like its feed still lands
             correctly. Leave <em>Publish immediately</em> unticked to validate and stage only, then
             publish from the dataset history. Ingest can take a minute or two; the page waits for
             the result.

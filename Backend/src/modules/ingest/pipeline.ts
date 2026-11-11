@@ -254,10 +254,14 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   // ── completeness ──
   //
   // Merging (035, the default): an upload adds to what is already loaded, so
-  // it needs at least ONE of the five SAP exports, and the ones it lacks are
-  // carried forward unchanged. Without a base to merge into - the first load
-  // ever, merging switched off, or a base whose rows were pruned - an upload
-  // is a full load as before and must carry all five.
+  // ONE recognised SAP file of any kind is enough (11 Nov 2026: a SAP Users
+  // file on its own used to be refused for carrying none of the five
+  // transaction exports). Whatever it lacks is carried forward unchanged - the
+  // five exports by the merge, the reference lists (P Grp, P Org, Mat group,
+  // ZUSER) and the rates because they are only ever updated when a file
+  // brings them. Without a base to merge into - the first load ever, merging
+  // switched off, or a base whose rows were pruned - an upload is a full load
+  // as before and must carry all five.
   const foundFeeds = new Set(prepared.map((p) => p.cls.feed).filter((f): f is Feed => f !== null));
   const merging = await mergeEnabled();
   const base = merging ? await mergeBaseAvailable() : false;
@@ -265,7 +269,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const partial = base && (await partialEnabled());
   const missing = REQUIRED_FEEDS.filter((f) => !foundFeeds.has(f));
   const incomplete = base
-    ? !REQUIRED_FEEDS.some((f) => foundFeeds.has(f))
+    ? foundFeeds.size === 0
     : missing.length > 0;
   if (incomplete) {
     return {
@@ -526,7 +530,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
         if ((left?.n ?? 0) === 0) await setAsideFile('gr', 'every row had an unregistered movement type.');
       }
       // Nothing left to load at all is still a failure.
-      const accepted = REQUIRED_FEEDS.filter((f) => foundFeeds.has(f) && !setAsideFeeds.has(f));
+      const accepted = [...foundFeeds].filter((f) => !setAsideFeeds.has(f));
       if (accepted.length === 0) {
         findings.push({
           ruleId: 'V-Q02', severity: 'BLOCKER', feed: null,
@@ -578,7 +582,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       tr.metrics.continuationDuplicateKeys = fill?.continuationDuplicateKeys ?? 0;
       tr.metrics.l2BeforeL1 = fill?.l2BeforeL1 ?? 0;
 
-      findings.push(...mergeFindings(merge, parentBatchId, setAsideFeeds));
+      findings.push(...mergeFindings(merge, parentBatchId, setAsideFeeds, opts.source.kind === 'manual'));
       if (parentBatchId !== null) findings.push(...(await carriedCaveats(client, parentBatchId, merge)));
 
       const postFindings = checkMetrics(tr.metrics, rules);
@@ -632,7 +636,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
           ? 'its month column carries no year that can be anchored (V-R06a). Rates stay as already stored.'
           : `it looks re-sorted - ${f.message}`);
       }
-      const accepted = REQUIRED_FEEDS.filter((f) => foundFeeds.has(f) && !setAsideFeeds.has(f));
+      const accepted = [...foundFeeds].filter((f) => !setAsideFeeds.has(f));
       if (accepted.length === 0) throw new BlockerError('Every SAP file in this upload was set aside, so there is nothing to load.', 0, []);
       log('transforming', `again, without ${[...setAsideFeeds.keys()].join(', ')}`);
       result = await build();
@@ -772,7 +776,18 @@ const fmt = (n: number): string => n.toLocaleString('en-US');
  * change?". INFO for a feed that came with the upload; WARNING for one that did
  * not, because its figures are now as old as the upload that last carried it.
  */
-function mergeFindings(m: MergeSummary, parentBatchId: number | null, setAside: ReadonlyMap<Feed, string> = new Map()): Finding[] {
+function mergeFindings(
+  m: MergeSummary,
+  parentBatchId: number | null,
+  setAside: ReadonlyMap<Feed, string> = new Map(),
+  /**
+   * A manual upload (11 Nov 2026). Someone chose which files to send, so a
+   * feed it leaves out is a decision, not a missing export: reported as INFO,
+   * or uploading one SAP Users file would add five warnings to Data Check.
+   * A file it sent that was set aside is still a WARNING.
+   */
+  manual = false,
+): Finding[] {
   const out: Finding[] = [];
   for (const feed of MERGE_FEEDS) {
     const f = m[feed];
@@ -800,7 +815,7 @@ function mergeFindings(m: MergeSummary, parentBatchId: number | null, setAside: 
     } else {
       out.push({
         ruleId: 'V-I03',
-        severity: 'WARNING',
+        severity: manual && !setAside.has(feed) ? 'INFO' : 'WARNING',
         feed,
         message: (setAside.has(feed)
           ? `The ${FEED_NAMES[feed]} file in this upload was set aside (see V-Q01): its ${fmt(f.total)} record(s) were carried forward `

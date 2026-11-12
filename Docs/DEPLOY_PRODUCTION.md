@@ -132,13 +132,20 @@ If a clone fails half-way, remove the leftover `/opt/pct/src` before retrying (g
    them once **as the instance's privileged account** in **DMS**, connected to database `pct`:
 
    ```sql
-   CREATE EXTENSION IF NOT EXISTS pgcrypto;
-   CREATE EXTENSION IF NOT EXISTS pg_trgm;
-   CREATE EXTENSION IF NOT EXISTS citext;
-   SELECT extname, extversion FROM pg_extension ORDER BY 1;
+   GRANT CONNECT, CREATE, TEMPORARY ON DATABASE pct TO pct;
+   CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
+   CREATE EXTENSION IF NOT EXISTS pg_trgm  SCHEMA public;
+   CREATE EXTENSION IF NOT EXISTS citext   SCHEMA public;
+   GRANT USAGE ON SCHEMA public TO pct;
+   SELECT current_database() AS db, has_database_privilege('pct', 'pct', 'CREATE') AS pct_can_create;
+   SELECT e.extname, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace ORDER BY 1;
    ```
 
-   The last query must list all three.
+   Expect `db = pct`, `pct_can_create = true`, and all three extensions in **`public`**. Learned on
+   12 Nov 2026: a database created in the console can be owned by the privileged account, so the first
+   migration fails with *permission denied for database pct* (the `GRANT`); and without `SCHEMA public` an
+   extension can land in a schema named after the privileged account, giving *type "citext" does not
+   exist* (fix: `ALTER EXTENSION citext SET SCHEMA public;`, same for the other two).
 
 PCT then creates its own schemas and tables at its first start (migrations run at boot, advisory-locked).
 It connects as `pct`, the database owner — **not** the privileged account, unlike staging today.

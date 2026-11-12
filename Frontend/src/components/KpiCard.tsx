@@ -1,5 +1,6 @@
 import type { Kpi } from '../lib/api';
 import { DASH, formatKpi, formatMoney, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * KPI card — the honesty rule in the UI.
@@ -37,7 +38,7 @@ export function KpiCard({
     return (
       <div className="kpi kpi--muted" title={kpi.statusReason ?? ''}>
         <div className="v">{DASH}</div>
-        <div className="l">{kpi.title}</div>
+        <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
         <div className="s">{kpi.statusReason ?? 'Not available'}</div>
       </div>
     );
@@ -86,7 +87,7 @@ export function KpiCard({
   const body = (
     <>
       <div className="v">{headline}</div>
-      <div className="l">{kpi.title}</div>
+      <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
       <div className="s">{basisNote ? `${basisNote} · ` : ''}{sub}{chips}</div>
     </>
   );

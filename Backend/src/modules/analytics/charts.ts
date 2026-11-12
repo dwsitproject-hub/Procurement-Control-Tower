@@ -14,6 +14,83 @@ export interface ChartMeta {
 }
 
 export const CHART_META: ChartMeta[] = [
+  // ── Executive Summary (020) ──
+  // Committed value, NOT "spend". net_order_value_idr is what was ORDERED; the
+  // reference design headed this figure "spend", which would disagree with
+  // finance. Naming it plainly here is the cheapest way to stop that argument.
+  {
+    chartId: 'exec_value_by_category',
+    title: 'Committed value by spend category',
+    tab: 'execsummary',
+    grain: 'po_line',
+    // Base unit is USD with an *_idr twin, so the header's currency toggle
+    // switches the panel instead of it always reading rupiah.
+    unit: 'usd',
+    notes: [
+      'STO and deleted lines excluded',
+      'Category resolves: mapping file, then SAP material master, then unmapped',
+      '"(no material code)" is shown rather than folded into a category',
+    ],
+  },
+  {
+    chartId: 'exec_ho_site',
+    title: 'Managed by HO or Site',
+    tab: 'execsummary',
+    unit: 'usd',
+    grain: 'po_line',
+    notes: [
+      'HO or Site comes from the SAP user who raised the order (created_by)',
+      'A creator not in the business file shows as (unmapped) rather than being dropped',
+      'Bucket is "YYYY-MM|BAND"; the panel pivots it',
+    ],
+  },
+  {
+    chartId: 'exec_pr_outstanding',
+    title: 'Outstanding PR by aging',
+    tab: 'execsummary',
+    unit: 'count',
+    grain: 'pr_item',
+    notes: [
+      'Reconstructed per DAY: raised on or before that day, no PO yet on that day',
+      'Aging is measured on each day, not once at the as-of date',
+      'Window is the current and previous month of the dataset as-of date',
+    ],
+  },
+  {
+    chartId: 'exec_committed_by_month',
+    title: 'Committed value and PO lines by month',
+    tab: 'execsummary',
+    unit: 'usd',
+    grain: 'po_line',
+    notes: [
+      'Feeds the headline tiles YTD and current-month figures',
+      'Current month means the dataset as-of month, never the wall clock',
+      'Same population as total_po_amount: STO and deleted lines excluded',
+    ],
+  },
+  {
+    chartId: 'exec_monthly_category',
+    title: 'Monthly spend category',
+    tab: 'execsummary',
+    grain: 'po_line',
+    unit: 'usd',
+    notes: [
+      'Delivered lines only — what was taken delivery of, not what is committed',
+      'One bucket per month AND category, keyed "YYYY-MM|CATEGORY"; the panel pivots',
+      'STO and deleted lines excluded, as everywhere on this page',
+    ],
+  },
+  {
+    chartId: 'exec_txn_size',
+    title: 'Transaction size: value against volume',
+    tab: 'execsummary',
+    grain: 'po_line',
+    unit: 'percent',
+    notes: [
+      'Two series on one band axis: share of committed value, share of PO lines',
+      'Bands ordered by size, never by measure',
+    ],
+  },
   {
     chartId: 'status_mix',
     title: 'Documents by status',
@@ -23,10 +100,23 @@ export const CHART_META: ChartMeta[] = [
   },
   {
     chartId: 'pr_by_month',
-    title: 'Requisitions raised by month',
+    title: 'Requisition flow by month — in against out',
     tab: 'pr',
     grain: 'pr_item',
     unit: 'count',
+    // Drawn as a waterfall (Chart.tsx WATERFALL_CHARTS) since 7 Oct 2026.
+    notes: [
+      'Each month: what was still open when it began (stacked by how long it had '
+      + 'been waiting), plus what was raised, minus what became a PO. Where the '
+      + 'last step ends is what the next month brings forward.',
+      'Brought forward is a STOCK, not a flow: a requisition waiting three months '
+      + 'is counted in all three, so those bars must not be added up.',
+      'Deleted requisitions are left out of every figure. A requisition whose purchase '
+      + 'order was deleted (status PO-Deleted) leaves the stock as Cancelled, in the month '
+      + 'it was raised - SAP gives no deletion date. Under a Year filter only requisitions '
+      + 'raised that year are counted, so the first month brings forward nothing from the '
+      + 'year before.',
+    ],
   },
   {
     chartId: 'po_value_by_month',
@@ -93,32 +183,62 @@ export const CHART_META: ChartMeta[] = [
   { chartId: 'items_by_priority',        title: 'Items by priority category',       tab: 'executive', grain: 'pr_item', unit: 'count' },
   { chartId: 'aging_by_priority',        title: 'Avg aging by priority (days)',     tab: 'executive', grain: 'pr_item', unit: 'days' },
   { chartId: 'open_by_priority',         title: 'Open items by priority',           tab: 'openitems', grain: 'pr_item', unit: 'count' },
-  { chartId: 'unapproved_by_category',   title: 'Unapproved by material category',  tab: 'openitems', grain: 'pr_item', unit: 'count' },
+  { chartId: 'unapproved_by_category',   title: 'Unapproved by spend category',     tab: 'openitems', grain: 'pr_item', unit: 'count', notes: ['Spend category — the same dimension the Executive Summary uses', "The requisition's own material — an unapproved PR has no order to inherit from"] },
   { chartId: 'unreleased_aging_buckets', title: 'Unreleased PR aging buckets',      tab: 'openitems', grain: 'pr_item', unit: 'count' },
   { chartId: 'aging_severity_by_stage',   title: 'Aging severity by open stage — item count in age bands', tab: 'openitems', grain: 'pr_item', unit: 'count' },
+  {
+    chartId: 'open_backlog_by_month',
+    title: 'Open requisitions by month raised — against the PR items raised that month',
+    tab: 'openitems',
+    grain: 'pr_item',
+    unit: 'count',
+    notes: [
+      'Requisitions with NO purchase order: not approved, or approved and not ordered. A requisition that reached an order has left this population by definition, in both series.',
+      'Grouped by the month the requisition was RAISED, so a tall recent bar is new demand and a tall old bar is demand still unmet',
+      'Not a reconstruction of the backlog as it stood in each month',
+      'PR items raised: every requisition item raised in that month, open or not (deleted excluded) - so each pair reads as "raised that month, and how many of those are still open"',
+    ],
+  },
   { chartId: 'pr_approval_by_priority',  title: 'PR approval by priority',          tab: 'pr',        grain: 'pr_item', unit: 'days' },
   { chartId: 'pr_by_plant',              title: 'PR items by plant',                tab: 'pr',        grain: 'pr_item', unit: 'count' },
   { chartId: 'pr_approval_distribution', title: 'PR approval distribution',         tab: 'pr',        grain: 'pr_item', unit: 'count' },
   { chartId: 'monthly_pr_no_po',         title: 'Monthly PR with no PO',            tab: 'pr',        grain: 'pr_item', unit: 'count' },
-  { chartId: 'items_by_category',        title: 'Items by Material Category',       tab: 'pr',        grain: 'pr_item', unit: 'count' },
+  { chartId: 'items_by_category',        title: 'Item Category by Amount Spend',    tab: 'pr',        grain: 'po_line', unit: 'usd', notes: ['Committed net order value, highest spend first', 'Spend category from the business mapping file — the same dimension the Executive Summary uses', 'STO and deleted lines excluded'] },
   { chartId: 'sourcing_by_priority',     title: 'Sourcing lead time by priority',   tab: 'po',        grain: 'po_line', unit: 'days', notes: ['STO lines excluded'] },
   { chartId: 'po_approval_by_priority',  title: 'PO approval by priority',          tab: 'po',        grain: 'po_line', unit: 'days', notes: ['STO lines excluded'] },
   { chartId: 'po_approval_distribution', title: 'PO approval distribution',         tab: 'po',        grain: 'po_line', unit: 'count' },
-  { chartId: 'sourcing_by_category',     title: 'Sourcing LT by material category', tab: 'po',        grain: 'po_line', unit: 'days' },
+  { chartId: 'sourcing_by_category',     title: 'Sourcing LT by spend category',    tab: 'po',        grain: 'po_line', unit: 'days', notes: ['Spend category — the same dimension the Executive Summary uses'] },
   { chartId: 'po_by_plant',              title: 'PO value by plant',                tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded'] },
-  { chartId: 'po_value_by_category',     title: 'PO value by material category',    tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded'] },
+  { chartId: 'po_value_by_category',     title: 'PO value by spend category',       tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded', 'Spend category — the same dimension the Executive Summary uses'] },
   { chartId: 'po_value_by_purch_org',    title: 'PO value by purchasing org',       tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded'] },
   { chartId: 'commitment_aging',         title: 'Open commitment aging',            tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['Aging from the dataset as-of date'] },
   { chartId: 'top_materials_spend',      title: 'Top materials by spend',           tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded'] },
   { chartId: 'po_amount_by_area',        title: 'PO Amount by Area',                tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded', 'Plants rolled up to areas'] },
-  { chartId: 'po_amount_by_matcat',      title: 'PO Amount by Material Category',   tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded'] },
+  { chartId: 'po_amount_by_matcat',      title: 'PO Amount by Spend Category',      tab: 'po',        grain: 'po_line', unit: 'usd', notes: ['STO lines excluded', 'Spend category — the same dimension the Executive Summary uses'] },
   { chartId: 'pr_status_by_pgrp',        title: "PR Status by Purchasing Group — Outstanding (PR's group) vs Converted (processed by, per PO List)", tab: 'po', grain: 'po_line', unit: 'count' },
   { chartId: 'po_value_by_pgrp',         title: 'PO Value by Purchasing Group — share of IDR spend', tab: 'po', grain: 'po_line', unit: 'idr', notes: ['IDR document-currency lines only'] },
-  { chartId: 'delivery_by_category',     title: 'Delivery LT by material category', tab: 'delivery',  grain: 'po_line', unit: 'days' },
+  { chartId: 'delivery_by_category',     title: 'Delivery LT by spend category',    tab: 'delivery',  grain: 'po_line', unit: 'days', notes: ['Spend category — the same dimension the Executive Summary uses'] },
   { chartId: 'delivery_by_priority',     title: 'Delivery LT by priority',          tab: 'delivery',  grain: 'po_line', unit: 'days' },
   { chartId: 'delivery_distribution',    title: 'Delivery LT distribution',         tab: 'delivery',  grain: 'po_line', unit: 'count' },
   { chartId: 'e2e_by_month',             title: 'End-to-end by month',              tab: 'delivery',  grain: 'po_line', unit: 'days' },
-  { chartId: 'e2e_by_category',          title: 'Avg E2E by Material Category (days)',  tab: 'delivery',  grain: 'pr_item', unit: 'days' },
+  { chartId: 'e2e_by_category',          title: 'Avg E2E by Spend Category (days)', tab: 'delivery',  grain: 'pr_item', unit: 'days', notes: ['Spend category from the business mapping file — the same dimension the Executive Summary uses'] },
+
+  // ── v1's Outstanding-PR family (7 Aug 2026) ──
+  // "Outstanding" is v1's word for an active requisition that has not yet
+  // produced a PO, so these three describe the backlog that procurement still
+  // owes an order for.
+  { chartId: 'pr_outstanding_by_company', title: 'Outstanding PR Per Company',  tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['PR items with no PO · deleted excluded'] },
+  { chartId: 'pr_outstanding_by_porg',    title: 'Outstanding PR Per P. Org',   tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['PR items with no PO · deleted excluded'] },
+  { chartId: 'pr_outstanding_by_pgrp',    title: 'Outstanding PR By PIC',       tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['PR items with no PO · deleted excluded', 'PIC = the buyer desk (SAP purchasing group)', 'Stacked by age since the requisition date'] },
+  { chartId: 'pr_items_by_area',          title: 'PR Items by Area — share of demand', tab: 'pr', grain: 'pr_item', unit: 'count', notes: ['Every PR item', 'Plants rolled up to areas'] },
+  { chartId: 'pr_layer1_aging_by_priority', title: 'Avg Layer-1 Aging by Priority (days)', tab: 'pr', grain: 'pr_item', unit: 'days', notes: ['Requisition date to the FIRST release level'] },
+
+  // ── v1's PO value-bracket and buyer-desk family (7 Aug 2026) ──
+  { chartId: 'po_bracket_value',      title: 'Bracket PO — Value of PO',   tab: 'po', grain: 'po_line', unit: 'idr', notes: ['Bracketed on the PO DOCUMENT total', 'IDR document-currency lines only', 'JT = juta / million IDR', 'Bars are billions of IDR; the drill opens the lines'] },
+  { chartId: 'po_bracket_count',      title: 'Bracket PO — # of PO',       tab: 'po', grain: 'po_line', unit: 'count', notes: ['Bracketed on the PO DOCUMENT total', 'IDR document-currency lines only', 'Counts documents — the drill opens their lines'] },
+  { chartId: 'po_issued_by',          title: 'PO Issued By',               tab: 'po', grain: 'po_line', unit: 'count', notes: ['HO vs site UNIT, from the purchasing-group master', 'Counts documents — the drill opens their lines'] },
+  { chartId: 'po_items_by_pgrp',      title: '# of PO Item Per PIC',       tab: 'po', grain: 'po_line', unit: 'count', notes: ['PIC = the buyer desk (SAP purchasing group)', 'STO and deleted lines excluded'] },
+  { chartId: 'po_count_by_category',  title: '# of PO Per Spend Category', tab: 'po', grain: 'po_line', unit: 'count', notes: ['Line items and distinct documents side by side', 'STO and deleted lines excluded', 'Spend category — the same dimension the Executive Summary uses'] },
 ];
 
 export const CHART_BY_ID = new Map(CHART_META.map((c) => [c.chartId, c]));

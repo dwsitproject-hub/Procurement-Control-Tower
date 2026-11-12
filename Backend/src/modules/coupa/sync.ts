@@ -16,6 +16,8 @@
 
 import { pool, query, queryOne } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
+import { notify } from '../notify/mailer.js';
+import { coupaErrorBody } from '../notify/messages.js';
 import { coupaConfigured, fetchPage, coupaGet } from './client.js';
 
 export const COUPA_OBJECTS = [
@@ -23,7 +25,13 @@ export const COUPA_OBJECTS = [
   'purchase_orders',
   'receiving_transactions',
   'invoices',
-  'exchange_rates',
+  // 'exchange_rates' left on 23 Oct 2026: exchange rates now come from Data Hub
+  // (modules/dhm/fx.ts, 040). ops.coupa_exchange_rate keeps what was synced,
+  // and Coupa's rows in ops.fx_rate_source stay until a DHM rate covers them.
+  // Supplier master (payload doc §1.8) — master data rather than transactions,
+  // so it is small and changes rarely, but it carries the PO email address that
+  // Vendor 360 shows.
+  'suppliers',
 ] as const;
 export type CoupaObject = (typeof COUPA_OBJECTS)[number];
 
@@ -96,6 +104,12 @@ async function storeRaw(object: string, rows: Row[]): Promise<void> {
   );
 }
 
+/** A Coupa requisition id, or null for anything that is not a positive integer. */
+const reqId = (v: unknown): number | null => {
+  const x = Number(v);
+  return v !== null && v !== undefined && v !== '' && Number.isInteger(x) && x > 0 ? x : null;
+};
+
 // ── per-object projections ───────────────────────────────────────────────────
 
 async function projectQuoteRequests(rows: Row[]): Promise<number> {
@@ -103,9 +117,12 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
     'ops.coupa_sourcing_event',
     ['id','event_type','state','description','created_at','submit_time','start_time','end_time',
      'currency','commodity','plant','purch_org','purch_group','sap_pr_no','planned_savings',
-     'supplier_count','line_count','updated_at'],
+     'supplier_count','line_count','updated_at','requisition_id','event_category'],
     rows.map((r) => {
       const cf = obj(r['custom-fields']);
+      // The requisition the event was created from: the join to Coupa POs and
+      // through them to SAP (036). sourcing-ref is free text and is not one.
+      const fromReq = s(r['creatable-from-type']) === 'RequisitionHeader' ? reqId(r['creatable-from-id']) : null;
       return [
         Number(r['id']), s(r['event-type']), s(r['state']), s(r['description']),
         s(r['created-at']), s(r['submit-time']), s(r['start-time']), s(r['end-time']),
@@ -113,19 +130,20 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
         plantCode(cf['plant']), lookupRef(cf['purchasing-organization']), lookupRef(cf['purchasing-group']),
         s(cf['sourcing-ref']), n(r['planned-savings']),
         arr(r['quote-suppliers']).length, arr(r['lines']).length, s(r['updated-at']),
+        fromReq, s(cf['event-category']),
       ];
     }),
     'id',
   );
 
   // Supplier responses live behind a nested endpoint, fetched only for the
-  // events that actually changed in this run.
-  for (const r of rows) {
-    const state = s(r['state']);
-    if (state === 'template') continue; // sandbox templates have no responses
+  // events that actually changed in this run — and in PARALLEL, because one
+  // round trip per event otherwise dominates a cold run's wall clock.
+  const eventsWithResponses = rows.filter((r) => s(r['state']) !== 'template');
+  const nestedCounts = await mapLimit(eventsWithResponses, 6, async (r) => {
     try {
       const responses = arr(await coupaGet(`/api/quote_requests/${Number(r['id'])}/quote_responses`));
-      count += await upsert(
+      return await upsert(
         'ops.coupa_supplier_response',
         ['id','quote_request_id','supplier_name','submitted_at','state','awarded','total_amount','currency','line_count','updated_at'],
         responses.map((resp) => {
@@ -145,8 +163,10 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
     } catch {
       // A single event's responses failing must not sink the whole sync;
       // the raw event row is already stored and the next run retries.
+      return 0;
     }
-  }
+  });
+  count += nestedCounts.reduce((a, x) => a + x, 0);
   return count;
 }
 
@@ -157,6 +177,7 @@ async function projectPurchaseOrders(rows: Row[]): Promise<number> {
     const supplier = obj(r['supplier']);
     const paymentTerm = s(obj(r['payment-term'])['code']);
     const hcf = obj(r['custom-fields']);
+    const requisitionId = reqId(obj(r['requisition-header'])['id']);
     for (const l of arr(r['order-lines'])) {
       const cf = obj(l['custom-fields']);
       const sapPo = parseSapRef(cf['sap-po-no-line-no']);
@@ -172,6 +193,7 @@ async function projectPurchaseOrders(rows: Row[]): Promise<number> {
         s(supplier['number']), s(supplier['display-name']) ?? s(supplier['name']),
         paymentTerm, b(hcf['emergency-request']), s(l['match-type']),
         s(l['created-at']), s(l['updated-at']) ?? s(r['updated-at']),
+        requisitionId,
       ]);
     }
   }
@@ -180,7 +202,8 @@ async function projectPurchaseOrders(rows: Row[]): Promise<number> {
     ['order_line_id','coupa_po_id','po_number','status','line_status','sap_po_no','sap_po_item',
      'sap_pr_no','sap_pr_item','need_by_date','price','quantity','total','invoiced_total','currency',
      'uom','item_number','description','plant','purch_org','purch_group','supplier_number',
-     'supplier_name','payment_term','emergency','match_type','created_at','updated_at'],
+     'supplier_name','payment_term','emergency','match_type','created_at','updated_at',
+     'requisition_id'],
     lineRows,
     'order_line_id',
   );
@@ -256,49 +279,69 @@ async function projectInvoices(rows: Row[]): Promise<number> {
   return count;
 }
 
+/**
+ * Supplier master — payload doc §1.8.
+ *
+ * `number` is the bridge to SAP: it holds the same value as the vendor code on
+ * a PO line, which is what lets Vendor 360 resolve a vendor to its Coupa
+ * record. `po-email` is where an order is actually dispatched and is NOT the
+ * same field as the primary contact's address, so both are kept.
+ */
+async function projectSuppliers(rows: Row[]): Promise<number> {
+  return upsert(
+    'ops.coupa_supplier',
+    ['id', 'number', 'name', 'display_name', 'status', 'po_email', 'po_method',
+     'primary_contact_email', 'payment_method', 'on_hold', 'website', 'created_at', 'updated_at'],
+    rows.map((r) => [
+      Number(r['id']),
+      s(r['number']),
+      s(r['name']),
+      s(r['display-name']),
+      s(r['status']),
+      s(r['po-email']),
+      s(r['po-method']),
+      s(obj(r['primary-contact'])['email']),
+      s(r['payment-method']),
+      b(r['on-hold']),
+      s(r['website']),
+      s(r['created-at']),
+      s(r['updated-at']),
+    ]),
+    'id',
+  );
+}
+
 const PROJECT: Record<CoupaObject, (rows: Row[]) => Promise<number>> = {
   quote_requests: projectQuoteRequests,
   purchase_orders: projectPurchaseOrders,
   receiving_transactions: projectReceipts,
   invoices: projectInvoices,
-  exchange_rates: projectExchangeRates,
+  suppliers: projectSuppliers,
 };
 
-async function projectExchangeRates(rows: Row[]): Promise<number> {
-  const n2 = await upsert(
-    'ops.coupa_exchange_rate',
-    ['id', 'rate', 'rate_date', 'from_currency', 'to_currency', 'created_at', 'updated_at'],
-    rows
-      .filter((r) => s(obj(r['from-currency'])['code']) !== null && s(obj(r['to-currency'])['code']) !== null)
-      .map((r) => [
-        Number(r['id']), n(r['rate']), d(r['rate-date']),
-        s(obj(r['from-currency'])['code']), s(obj(r['to-currency'])['code']),
-        s(r['created-at']), s(r['updated-at']),
-      ]),
-    'id',
-  );
-  // Refresh the shared FX pair store (010): month-latest Coupa rate per pair,
-  // taking a slot only when more recently updated than what sits there.
-  await query(
-    `INSERT INTO ops.fx_rate_source
-       (from_currency, to_currency, period_year, period_month, rate, source, source_updated_at)
-     SELECT DISTINCT ON (upper(btrim(from_currency)), upper(btrim(to_currency)),
-                         date_part('year', rate_date)::int, date_part('month', rate_date)::int)
-            upper(btrim(from_currency)), upper(btrim(to_currency)),
-            date_part('year', rate_date)::int, date_part('month', rate_date)::smallint,
-            rate, 'coupa', updated_at
-       FROM ops.coupa_exchange_rate
-      WHERE rate_date IS NOT NULL AND rate > 0
-      ORDER BY upper(btrim(from_currency)), upper(btrim(to_currency)),
-               date_part('year', rate_date)::int, date_part('month', rate_date)::int,
-               rate_date DESC, updated_at DESC NULLS LAST
-     ON CONFLICT (from_currency, to_currency, period_year, period_month)
-     DO UPDATE SET rate = EXCLUDED.rate, source = 'coupa',
-                   source_updated_at = EXCLUDED.source_updated_at, updated_at = now()
-      WHERE fx_rate_source.source_updated_at IS NULL
-         OR EXCLUDED.source_updated_at > fx_rate_source.source_updated_at`,
-  );
-  return n2;
+/**
+ * Bounded-concurrency map. The nested quote-responses fetch is one HTTPS round
+ * trip PER EVENT: run sequentially that is minutes of pure latency on a cold
+ * run from Jakarta to the Coupa host. Six at a time is far faster and stays
+ * well inside Coupa's rate limits.
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]!);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 // ── the sync run ─────────────────────────────────────────────────────────────
@@ -309,6 +352,8 @@ export interface ObjectResult {
   pages: number;
   rowsUpserted: number;
   watermark: string | null;
+  /** Non-zero when the run stopped mid-window and the next one resumes there. */
+  resumeOffset?: number;
   error?: string;
 }
 
@@ -319,30 +364,81 @@ export interface SyncResult {
   objects: ObjectResult[];
 }
 
+/**
+ * Email the failures of a sync run, if any. Errors here are swallowed: a mail
+ * problem must not turn a partially successful sync into a crash.
+ */
+export async function notifyCoupaErrors(
+  trigger: string,
+  result: SyncResult,
+): Promise<void> {
+  try {
+    const failed = result.objects.filter((o) => o.status === 'error');
+    if (failed.length === 0) return;
+    const m = coupaErrorBody(trigger, result.objects);
+    await notify('coupa.error', m.subject, m.body);
+  } catch {
+    // Deliberately silent — notify() already records its own failures.
+  }
+}
+
 /** ISO minus N minutes, preserving a parseable timestamp for the filter. */
 function minusMinutes(iso: string, minutes: number): string {
   return new Date(new Date(iso).getTime() - minutes * 60_000).toISOString();
 }
 
 async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: number): Promise<ObjectResult> {
-  const wm = await queryOne<{ last_updated_at: string | null }>(
-    `SELECT last_updated_at::text FROM ops.coupa_watermark WHERE object = $1`,
+  const wm = await queryOne<{ last_updated_at: string | null; last_offset: number | null }>(
+    `SELECT last_updated_at::text, last_offset FROM ops.coupa_watermark WHERE object = $1`,
     [object],
   );
   const since = wm?.last_updated_at ? minusMinutes(wm.last_updated_at, lookbackMin) : null;
 
-  let offset = 0;
+  // Publish 'running' immediately: a cold run takes minutes, and the admin
+  // panel must show progress instead of "No sync has run yet".
+  await query(
+    `INSERT INTO ops.coupa_watermark (object, last_run_at, last_status)
+     VALUES ($1, now(), 'running')
+     ON CONFLICT (object) DO UPDATE SET last_run_at = now(), last_status = 'running',
+       last_error = NULL`,
+    [object],
+  );
+
+  /**
+   * Resume inside the current window rather than always restarting at 0.
+   *
+   * The page cap stops a cold run from blocking the poller, and the design was
+   * that the next tick continues from an advanced watermark. That assumption
+   * breaks when more rows share the window than one run can read: the newest
+   * row seen IS the stored watermark, so it cannot advance, and every
+   * subsequent run re-reads the identical 2,000 rows. The supplier master hit
+   * this exactly — a bulk update stamped thousands of suppliers within minutes,
+   * so 14,000 fetched rows produced 3,895 distinct ones and everything newer
+   * stayed unreachable.
+   */
+  const startOffset = Math.max(0, wm?.last_offset ?? 0);
+  let offset = startOffset;
   let pages = 0;
   let upserted = 0;
-  let maxUpdated: string | null = wm?.last_updated_at ?? null;
+  const startedAtWatermark = wm?.last_updated_at ?? null;
+  /**
+   * Compared as INSTANTS, not as strings. Postgres hands the watermark back as
+   * "2025-12-12 17:41:57+07" and Coupa sends "2025-12-12T17:41:57+07:00" — the
+   * same moment in two formats, never equal as text, and ordered by the byte
+   * value of ' ' against 'T' rather than by time. Both this maximum and the
+   * "did the watermark move" test below need real time comparison.
+   */
+  const startedMs = startedAtWatermark ? Date.parse(startedAtWatermark) : Number.NEGATIVE_INFINITY;
+  let maxUpdatedMs = startedMs;
+  let maxUpdated: string | null = startedAtWatermark;
+  /** Cleared when the source runs out of rows — the window is fully drained. */
+  let exhausted = false;
 
-  // Page cap keeps a cold first run from blocking the poller forever; the
-  // next tick resumes from the advanced watermark.
   const MAX_PAGES_PER_RUN = 40;
 
   while (pages < MAX_PAGES_PER_RUN) {
     const rows = await fetchPage(object, since, offset, pageLimit);
-    if (rows.length === 0) break;
+    if (rows.length === 0) { exhausted = true; break; }
     pages += 1;
     offset += rows.length;
 
@@ -351,23 +447,47 @@ async function syncObject(object: CoupaObject, lookbackMin: number, pageLimit: n
 
     for (const r of rows) {
       const u = s(r['updated-at']);
-      if (u && (maxUpdated === null || u > maxUpdated)) maxUpdated = u;
+      const ms = u ? Date.parse(u) : Number.NaN;
+      if (u && Number.isFinite(ms) && ms > maxUpdatedMs) {
+        maxUpdatedMs = ms;
+        maxUpdated = u;
+      }
     }
-    if (rows.length < pageLimit) break;
+    if (rows.length < pageLimit) { exhausted = true; break; }
   }
 
+  /**
+   * Where the next run starts. Zero in every case except the one that needs
+   * fixing: stopped at the cap AND the watermark did not move, so restarting
+   * would re-read the same rows. An advanced watermark changes `since` and
+   * therefore the result set, so the offset must not carry over.
+   */
+  const advanced = maxUpdatedMs > startedMs;
+  const nextOffset = exhausted || advanced ? 0 : offset;
+
   await query(
-    `INSERT INTO ops.coupa_watermark (object, last_updated_at, last_run_at, last_status, last_error, last_trigger, rows_upserted, runs)
-     VALUES ($1, $2, now(), 'ok', NULL, $3, $4, 1)
+    `INSERT INTO ops.coupa_watermark (object, last_updated_at, last_run_at, last_status, last_error, last_trigger, rows_upserted, runs, last_offset)
+     VALUES ($1, $2, now(), 'ok', NULL, $3, $4, 1, $5)
      ON CONFLICT (object) DO UPDATE SET
        last_updated_at = GREATEST(COALESCE(EXCLUDED.last_updated_at, ops.coupa_watermark.last_updated_at), ops.coupa_watermark.last_updated_at),
        last_run_at = now(), last_status = 'ok', last_error = NULL, last_trigger = EXCLUDED.last_trigger,
        rows_upserted = ops.coupa_watermark.rows_upserted + $4,
-       runs = ops.coupa_watermark.runs + 1`,
-    [object, maxUpdated, 'run', upserted],
+       runs = ops.coupa_watermark.runs + 1,
+       last_offset = EXCLUDED.last_offset`,
+    [object, maxUpdated, 'run', upserted, nextOffset],
   );
 
-  return { object, status: 'ok', pages, rowsUpserted: upserted, watermark: maxUpdated };
+  return {
+    object, status: 'ok', pages, rowsUpserted: upserted, watermark: maxUpdated,
+    resumeOffset: nextOffset,
+  };
+}
+
+/** True while a run holds the lock in THIS process — lets the API answer a
+ *  duplicate 'Sync now' immediately instead of starting a doomed run. */
+let inFlight = false;
+export function coupaSyncInFlight(): boolean {
+  return inFlight;
 }
 
 export async function runCoupaSync(trigger: 'scheduled' | 'manual'): Promise<SyncResult> {
@@ -380,6 +500,7 @@ export async function runCoupaSync(trigger: 'scheduled' | 'manual'): Promise<Syn
       `SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY],
     );
     if (!lock.rows[0]?.ok) return { outcome: 'locked', trigger, startedAt, objects: [] };
+    inFlight = true;
 
     const rules = await loadRuleSnapshot();
     const lookback = Math.max(0, Number(rules['coupa.lookback_minutes'] ?? 15));
@@ -406,6 +527,7 @@ export async function runCoupaSync(trigger: 'scheduled' | 'manual'): Promise<Syn
     const allError = results.every((r) => r.status === 'error');
     return { outcome: allError ? 'error' : anyError ? 'partial' : 'ok', trigger, startedAt, objects: results };
   } finally {
+    inFlight = false;
     await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]).catch(() => undefined);
     client.release();
   }
@@ -435,6 +557,9 @@ export function startCoupaPoller(log: (msg: string) => void): void {
         lastRunAt = Date.now();
         const r = await runCoupaSync('scheduled');
         log(`coupa sync (${r.outcome}): ${r.objects.map((o) => `${o.object}=${o.rowsUpserted}`).join(' ')}`);
+        // Only errors are worth an email here (user decision 6 Aug 2026): a
+        // clean incremental sync happens every few minutes and would be noise.
+        await notifyCoupaErrors('scheduled', r);
       } catch (e) {
         log(`coupa poller error: ${e instanceof Error ? e.message : String(e)}`);
       }

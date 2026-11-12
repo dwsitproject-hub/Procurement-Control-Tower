@@ -4,6 +4,7 @@ import {
 } from 'chart.js';
 import { api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
@@ -128,10 +129,10 @@ export function CoupaSourcingTab() {
   useEffect(() => {
     api.get<Record<string, any>>('/api/v1/coupa/sourcing').then(setD).catch((e: Error) => setErr(e.message));
   }, []);
-  if (err) return <div className="panel"><h2>Sourcing</h2><p className="err">{err}</p></div>;
+  if (err) return <div className="panel"><h2><Lbl>Sourcing</Lbl></h2><p className="err">{err}</p></div>;
   if (!d) return <div className="center-msg"><div className="spinner" />Loading Coupa sourcing…</div>;
   if (!d.configured) {
-    return <div className="panel"><h2>Sourcing</h2><p className="note">Coupa is not configured on this environment — an administrator must set the backend COUPA_* variables (Admin tab).</p></div>;
+    return <div className="panel"><h2><Lbl>Sourcing</Lbl></h2><p className="note">Coupa is not configured on this environment — an administrator must set the backend COUPA_* variables (Admin tab).</p></div>;
   }
   const k = d.kpis ?? {};
   const b = d.bids ?? {};
@@ -164,7 +165,7 @@ export function CoupaSourcingTab() {
           ]}
         />
         <div className="panel">
-          <h3 className="pr-tbl-h">Awarded spend by commodity — IDR documents</h3>
+          <h3 className="pr-tbl-h"><Lbl>Awarded spend by commodity — IDR documents</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead><tr><th>Commodity</th><th className="num">Awarded bids</th><th className="num">Amount (M IDR)</th></tr></thead>
@@ -185,7 +186,7 @@ export function CoupaSourcingTab() {
 
       <div className="chart-grid" style={{ marginTop: '1rem' }}>
         <div className="panel">
-          <h3 className="pr-tbl-h">Awarded spend by supplier — top 12, IDR documents</h3>
+          <h3 className="pr-tbl-h"><Lbl>Awarded spend by supplier — top 12, IDR documents</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead><tr><th>Supplier</th><th className="num">Awarded bids</th><th className="num">Amount (M IDR)</th></tr></thead>
@@ -203,7 +204,7 @@ export function CoupaSourcingTab() {
           </div>
         </div>
         <div className="panel">
-          <h3 className="pr-tbl-h">Event pipeline</h3>
+          <h3 className="pr-tbl-h"><Lbl>Event pipeline</Lbl></h3>
           <p className="note">
             {formatNumber(Number(k.events ?? 0))} events · {formatNumber(Number(k.open_events ?? 0))} still open ·{' '}
             {formatNumber(Number(k.completed ?? 0))} complete. Bids: {formatNumber(Number(b.responses ?? 0))} submitted
@@ -213,7 +214,7 @@ export function CoupaSourcingTab() {
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
-        <h3 className="pr-tbl-h">Sourcing data table <span className="muted">— newest 200 supplier bids</span></h3>
+        <h3 className="pr-tbl-h"><Lbl>Sourcing data table</Lbl> <span className="muted">— newest 200 supplier bids</span></h3>
         <div className="table-wrap dt-scroll">
           <table className="data dd-tbl">
             <thead>
@@ -260,10 +261,10 @@ export function CoupaInvoicesTab() {
   useEffect(() => {
     api.get<Record<string, any>>('/api/v1/coupa/invoices').then(setD).catch((e: Error) => setErr(e.message));
   }, []);
-  if (err) return <div className="panel"><h2>Invoicing &amp; Payment</h2><p className="err">{err}</p></div>;
+  if (err) return <div className="panel"><h2><Lbl>Invoicing &amp; Payment</Lbl></h2><p className="err">{err}</p></div>;
   if (!d) return <div className="center-msg"><div className="spinner" />Loading Coupa invoices…</div>;
   if (!d.configured) {
-    return <div className="panel"><h2>Invoicing &amp; Payment</h2><p className="note">Coupa is not configured on this environment — an administrator must set the backend COUPA_* variables (Admin tab).</p></div>;
+    return <div className="panel"><h2><Lbl>Invoicing &amp; Payment</Lbl></h2><p className="note">Coupa is not configured on this environment — an administrator must set the backend COUPA_* variables (Admin tab).</p></div>;
   }
   const k = d.kpis ?? {};
   const p2 = d.pay ?? {};
@@ -300,7 +301,7 @@ export function CoupaInvoicesTab() {
 
       <div className="chart-grid" style={{ marginTop: '1rem' }}>
         <div className="panel">
-          <h3 className="pr-tbl-h">Top suppliers by invoiced value — IDR documents</h3>
+          <h3 className="pr-tbl-h"><Lbl>Top suppliers by invoiced value — IDR documents</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead><tr><th>Supplier</th><th className="num">Invoices</th><th className="num">Paid</th><th className="num">Gross (M IDR)</th></tr></thead>
@@ -318,7 +319,7 @@ export function CoupaInvoicesTab() {
           </div>
         </div>
         <div className="panel">
-          <h3 className="pr-tbl-h">Invoice status mix</h3>
+          <h3 className="pr-tbl-h"><Lbl>Invoice status mix</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead><tr><th>Status</th><th className="num">Invoices</th></tr></thead>
@@ -337,7 +338,7 @@ export function CoupaInvoicesTab() {
 
       <div className="chart-grid" style={{ marginTop: '1rem' }}>
         <div className="panel">
-          <h3 className="pr-tbl-h">Recent invoices <span className="muted">— newest 50</span></h3>
+          <h3 className="pr-tbl-h"><Lbl>Recent invoices</Lbl> <span className="muted">— newest 50</span></h3>
           <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
             <table className="data dd-tbl">
               <thead>
@@ -364,7 +365,7 @@ export function CoupaInvoicesTab() {
           </div>
         </div>
         <div className="panel">
-          <h3 className="pr-tbl-h">Recent payments <span className="muted">— newest 50</span></h3>
+          <h3 className="pr-tbl-h"><Lbl>Recent payments</Lbl> <span className="muted">— newest 50</span></h3>
           <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
             <table className="data dd-tbl">
               <thead>

@@ -33,6 +33,7 @@ async function seedMovementTypes(): Promise<void> {
       ('101','receipt',            1, true,  'Goods receipt against purchase order'),
       ('102','reversal',          -1, true,  'Reversal of goods receipt'),
       ('122','reversal',          -1, true,  'Return delivery (registered; absent from reference data)'),
+      ('123','receipt',            1, true,  'Reversal of return delivery (cancels a 122)'),
       ('641','transfer',           1, false, 'Transfer posting to stock in transit (STO)'),
       ('642','transfer_reversal', -1, false, 'Reversal of transfer to stock in transit')
     ON CONFLICT (movement_type) DO UPDATE
@@ -50,6 +51,7 @@ async function seedNotificationEvents(): Promise<void> {
       ('ingest.template_drift',       'Template drift detected','error',   true,  'A required column was unresolvable or unexpected columns appeared'),
       ('ingest.incomplete_bundle',    'Incomplete file bundle', 'warning', true,  'A poll found a partial file set'),
       ('ingest.stalled',              'Ingestion stalled',      'error',   true,  'Bundle incomplete for N consecutive cycles'),
+      ('ingest.awaiting_exports',     'Waiting for exports',    'info',    true,  'Pickup folder emptied by after-run filing; next exports not landed'),
       ('ingest.source_unavailable',   'Source unavailable',     'error',   true,  'Share folder unreachable'),
       ('data.stale',                  'Data is stale',          'warning', false, 'as-of date older than the stale threshold'),
       ('data.rolled_back',            'Dataset rolled back',    'warning', true,  'An administrator rolled back a version')

@@ -157,6 +157,16 @@ Admin tab gets a **Coupa panel**: enable toggle, interval field, per-object stat
 
 ## Exchange rates as a second FX source (added 5 Aug 2026, payload doc v3.0)
 
+> **Superseded 23 Oct 2026.** Exchange rates now come from Data Hub Management
+> (DHM), not Coupa: `exchange_rates` left `COUPA_OBJECTS`, and
+> `Backend/src/modules/dhm/fx.ts` syncs DHM's `exchange_rate` master into the
+> same `ops.fx_rate_source` store as source `dhm` (migration 040). A DHM rate
+> always replaces a Coupa one for the same pair and month; Coupa rows stay only
+> where DHM has none. Against the SAP rate file, the latest update still wins.
+> Configure with `DHM_BASE_URL`, `DHM_PUBLIC_KEY`, `DHM_PRIVATE_KEY` (secrets
+> file); status and Sync now are on Admin → FX rates. The section below is kept
+> as the history of how Coupa rates worked.
+
 `GET /api/exchange_rates` syncs into `ops.coupa_exchange_rate` (migration 009)
 under the same watermark mechanism as the other objects.
 
@@ -176,3 +186,35 @@ user-accepted: Coupa test rates fill periods the SAP file does not cover, so
 pre-2026 conversions (e.g. PR Pipeline ≈ $76 B) are wrong on staging and will
 correct themselves against production Coupa rates.
 
+---
+
+## Supplier master as a sixth object (added 7 Aug 2026, payload doc v4.0 §1.8)
+
+`GET /api/suppliers` syncs into `ops.coupa_supplier` (migration 015) alongside
+the five transactional objects, on the same watermark and page-cap machinery.
+
+**Why it was added:** Vendor 360 shows who a vendor is and what they cost, but
+not *where an order is sent*. `po-email` is that address, and it lives only in
+Coupa.
+
+**The join.** The supplier's `number` carries the same value as the SAP vendor
+code (`LN11000001`, `IN11000154`), which is what lets a vendor resolve to a
+Coupa record. Nothing enforces this — it is a convention of the master data —
+so the lookup is a LEFT match that is allowed to find nothing, and the popup
+says so explicitly rather than rendering a blank field.
+
+**`po_email` is not the contact email.** They are separate fields in the payload
+and differ in practice, so both are stored and the popup shows the contact only
+when it differs from the PO address.
+
+**Scope.** `/api/suppliers` answers **403** without `core.supplier.read`, which
+the app did not previously request even though the client is granted it (both
+scope lists in the payload doc include it). It is now in the `COUPA_SCOPES`
+default. A deployment that pins `COUPA_SCOPES` in its env file must add it, or
+supplier sync alone will fail while everything else keeps working.
+
+**Volume.** The supplier master is much larger than the transaction feeds —
+several thousand rows against a staging tenant — so a first run does not finish
+in one pass. The existing 40-page cap (2,000 rows) applies and the run resumes
+from its watermark on the next tick, which is the same behaviour as a cold
+purchase-order sync.

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../lib/api';
+import { api, downloadFile } from '../lib/api';
+import { ScrollFrame } from './ScrollFrame';
 import {
   FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
 } from '../lib/format';
+import { Lbl } from '../lib/labels';
+import { hubTrack } from '../lib/hub';
 
 /** v1's AW per-column aging warn thresholds (amber above, red above 2x). */
 const AGE_WARN: Record<string, number> = {
@@ -29,6 +32,8 @@ interface Column {
   currency?: string;
   default: boolean;
   sortable: boolean;
+  /** Read live from the Coupa store, not the published SAP version. */
+  coupa?: boolean;
 }
 
 interface Facet {
@@ -48,29 +53,81 @@ interface DetailResponse {
 }
 
 type MultiKey =
-  | 'status' | 'matCat' | 'matGroup' | 'plant' | 'company'
-  | 'purchOrg' | 'purchGroup' | 'priority';
+  | 'status' | 'matCat' | 'spendCategory' | 'matGroup' | 'plant' | 'company'
+  | 'purchOrg' | 'purchGroup' | 'priority' | 'prDocType' | 'poDocType';
+
+/**
+ * Every multi-value filter this table seeds from `initial`, in ONE place.
+ *
+ * It used to be a literal list inside the state initialiser, and spendCategory
+ * was never added to it: a page that pre-filtered by category handed one in,
+ * the table dropped it, and the row count under the table disagreed with the
+ * number that had been clicked - the one thing the seeding exists to prevent.
+ */
+const MULTI_KEYS: MultiKey[] = [
+  'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company',
+  'purchOrg', 'purchGroup', 'priority', 'prDocType', 'poDocType',
+];
 
 const FILTER_LABELS: Record<MultiKey, string> = {
   status: 'Status',
-  matCat: 'Category',
+  matCat: 'Category (legacy)',
+  spendCategory: 'Spend category',
   matGroup: 'Mat Group',
   plant: 'Plant',
   company: 'Company',
   purchOrg: 'Purch Org',
   purchGroup: 'Purch Grp',
   priority: 'Priority',
+  prDocType: 'PR Type',
+  poDocType: 'PO Type',
+};
+
+/**
+ * Columns made default AFTER people had started saving layouts. A saved layout
+ * lists the columns its owner chose, so a column added later would never
+ * appear for them; these are offered once, appended, to a layout saved before
+ * the table recorded which columns it knew (see `known` below).
+ */
+const ADDED_DEFAULTS = ['poDeliveryDate'];
+
+/** The filter bar's dimensions the table follows (the global filter, 7 Oct 2026). */
+const GLOBAL_KEYS = ['company', 'plant', 'purchOrg', 'year', 'monthKey'] as const;
+const GLOBAL_LABELS: Record<(typeof GLOBAL_KEYS)[number], string> = {
+  company: 'Company', plant: 'Plant', purchOrg: 'Purch Org', year: 'Year', monthKey: 'Month',
 };
 
 const NUMERIC = new Set(['int', 'number', 'money', 'pct']);
 
+/** The Open Items card names, for the Stages chip. */
+const STAGE_LABEL: Record<string, string> = {
+  'Unapproved PR': 'PR not approved',
+  'PR Approved-No PO': 'PR approved, no PO',
+  'PO-Not Approved': 'PO pending approval',
+  'HOLD PO': 'PO on hold',
+  'PO-No GR': 'PO not delivered',
+  'Partially Delivered': 'PO partly delivered',
+  deliveredNotInvoiced: 'PO delivered, not invoiced',
+  invoicedNotPaid: 'PO invoiced, not paid',
+};
+
 export function DetailTable({
   initial,
   initialLabel,
+  globalQuery,
 }: {
   /** Pre-applied filters from a drill handoff ("Open in Detail tab", G1.2). */
   initial?: Record<string, string>;
   initialLabel?: string;
+  /**
+   * The filter bar's query string (company, plant, purchOrg, year, monthKey).
+   * The table follows it as every other page does - before 7 Oct 2026 it
+   * ignored the bar entirely, so with the Year filter on by default it would
+   * have listed every year under a bar that said 2026. A Company, Plant or
+   * Purch Org picked in the table's OWN filters takes precedence over the
+   * bar's, since that is the more specific choice.
+   */
+  globalQuery?: string;
 } = {}) {
   const init = initial ?? {};
   const listOf = (k: string): string[] | undefined =>
@@ -87,18 +144,43 @@ export function DetailTable({
   const [debounced, setDebounced] = useState(init['q'] ?? '');
   const [filters, setFilters] = useState<Partial<Record<MultiKey, string[]>>>(() => {
     const f: Partial<Record<MultiKey, string[]>> = {};
-    for (const k of ['status', 'matCat', 'plant', 'company', 'purchOrg', 'purchGroup', 'priority'] as MultiKey[]) {
+    for (const k of MULTI_KEYS) {
       const v = listOf(k);
       if (v && v.length > 0) f[k] = v;
     }
     return f;
   });
+  /**
+   * Age band, arriving from an Open Items stage card.
+   *
+   * A single value rather than a list: the card that sent it drew one band, and
+   * the boundaries are the server's (detail.ts AGE_BANDS) so the table returns
+   * the number that was clicked.
+   */
+  const [ageBand, setAgeBand] = useState(init['ageBand'] ?? '');
+  /**
+   * The post-delivery state, from an Open Items money card.
+   *
+   * Single-valued like ageBand and for the same reason: the card that sent it
+   * counted one state, and the two states are exclusive steps of one sequence.
+   * Absent entirely until 23 Sep 2026, so those cards opened a table showing
+   * every row in the dataset.
+   */
+  const [moneyState, setMoneyState] = useState(init['moneyState'] ?? '');
+  /**
+   * Open Items stages, from the backlog table's Stages filter (19 Oct 2026):
+   * open statuses and/or after-delivery states, OR'd by the server. Carried
+   * as it arrives - a chip shows it and clears it.
+   */
+  const [oiStage, setOiStage] = useState(init['oiStage'] ?? '');
   const [excludeSto, setExcludeSto] = useState(init['excludeSto'] === 'true');
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [onlyOpen, setOnlyOpen] = useState(init['onlyOpen'] === 'true');
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
   const [visible, setVisible] = useState<string[] | null>(null);
   const [chooserOpen, setChooserOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
   const savedRef = useRef(false);
   const dragKey = useRef<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
@@ -108,12 +190,21 @@ export function DetailTable({
     return () => clearTimeout(t);
   }, [search]);
 
+  /** Every column key the table knew when the layout was last saved. */
+  const knownRef = useRef<string[] | null>(null);
+
   // Load the persisted layout once, before the first fetch renders columns.
   useEffect(() => {
     api
-      .get<{ value: { columns?: string[] } | null }>('/api/v1/me/preferences/detail_table_layout')
+      .get<{ value: { columns?: string[]; known?: string[] } | null }>('/api/v1/me/preferences/detail_table_layout')
       .then((p) => {
-        if (p?.value?.columns?.length) setVisible(p.value.columns);
+        const cols = p?.value?.columns;
+        if (!cols?.length) return;
+        knownRef.current = p?.value?.known ?? null;
+        // A layout saved before `known` existed gets the later defaults once.
+        setVisible(p?.value?.known
+          ? cols
+          : [...cols, ...ADDED_DEFAULTS.filter((k) => !cols.includes(k))]);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -121,12 +212,37 @@ export function DetailTable({
       });
   }, []);
 
-  const queryString = useMemo(() => {
+  /**
+   * The filter half of the query, kept separate from the paging half because
+   * the export sends it verbatim.
+   *
+   * The export endpoint REJECTS `limit`, `cursor` and `facets` rather than
+   * ignoring them, so one combined string could not be reused; and building a
+   * second string for the export by hand is how an export quietly stops
+   * honouring a filter someone added to the table.
+   */
+  /** The filter bar's values, as {key: 'a,b'}. */
+  const globalParams = useMemo(() => {
+    const g = new URLSearchParams(globalQuery ?? '');
+    const out: Partial<Record<(typeof GLOBAL_KEYS)[number], string>> = {};
+    for (const k of GLOBAL_KEYS) {
+      const v = g.get(k);
+      if (v) out[k] = v;
+    }
+    return out;
+  }, [globalQuery]);
+
+  const filterQuery = useMemo(() => {
     const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(globalParams)) q.set(k, v);
+    // The table's own picks replace the bar's for the same dimension.
     for (const [k, v] of Object.entries(filters)) {
       if (v && v.length > 0) q.set(k, v.join(','));
     }
     if (debounced.trim() !== '') q.set('q', debounced.trim());
+    if (ageBand) q.set('ageBand', ageBand);
+    if (moneyState) q.set('moneyState', moneyState);
+    if (oiStage) q.set('oiStage', oiStage);
     if (excludeSto) q.set('excludeSto', 'true');
     if (includeDeleted) q.set('includeDeleted', 'true');
     if (onlyOpen) q.set('onlyOpen', 'true');
@@ -134,15 +250,18 @@ export function DetailTable({
       q.set('sort', sort.key);
       q.set('dir', sort.dir);
     }
-    q.set('limit', String(pageSize));
-    q.set('facets', 'true');
     return q.toString();
-  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, oiStage, excludeSto, includeDeleted, onlyOpen, sort]);
+
+  const queryString = useMemo(
+    () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
+    [filterQuery, pageSize],
+  );
 
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
     setPage(0);
-  }, [filters, debounced, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, oiStage, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,6 +274,7 @@ export function DetailTable({
         setData(d);
         setRows(d.rows);
         if (visible === null) setVisible(d.columns.filter((c) => c.default).map((c) => c.key));
+        if (knownRef.current === null) knownRef.current = d.columns.map((c) => c.key);
       })
       .catch((e: Error) => {
         if (!cancelled) setError(e.message);
@@ -171,10 +291,14 @@ export function DetailTable({
 
   const persistLayout = useCallback((cols: string[]) => {
     if (!savedRef.current) return;
+    // `known` records which columns existed at save time, so a column added
+    // later can be told apart from one this person removed.
     void api
-      .put('/api/v1/me/preferences/detail_table_layout', { value: { columns: cols } })
+      .put('/api/v1/me/preferences/detail_table_layout', {
+        value: { columns: cols, known: data?.columns.map((c) => c.key) ?? knownRef.current ?? cols },
+      })
       .catch(() => undefined);
-  }, []);
+  }, [data]);
 
   const toggleColumn = (key: string) => {
     setVisible((cur) => {
@@ -203,6 +327,45 @@ export function DetailTable({
     });
   };
 
+  /**
+   * Export what is on screen.
+   *
+   * `visible` IS the on-screen column order -- the same array the header row
+   * and the drag-to-reorder handler read -- so passing it as `cols` is what
+   * makes the file match the table rather than merely resemble it.
+   *
+   * Every row that matches the filter is exported, not the page being viewed.
+   * Someone looking at rows 1-50 of 32,704 who clicks Export wants the 32,704;
+   * exporting the visible page would be technically defensible and useless.
+   */
+  const exportExcel = async () => {
+    if (exporting) return;
+    const cols = visible ?? [];
+    if (cols.length === 0) {
+      setExportNote('Choose at least one column before exporting.');
+      return;
+    }
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const q = new URLSearchParams(filterQuery);
+      q.set('cols', cols.join(','));
+      const r = await downloadFile(`/api/v1/detail/export.xlsx?${q.toString()}`, 'pct-detail.xlsx');
+      const rows = r.rows ?? 0;
+      hubTrack('report_exported', { source: 'detail_table', format: 'xlsx', rows });
+      setExportNote(
+        r.total !== null && r.total > rows
+          ? `Downloaded ${r.filename} — ${formatNumber(rows)} of ${formatNumber(r.total)} rows. `
+            + 'The export stops at 50,000; narrow the filters to get the rest.'
+          : `Downloaded ${r.filename} — ${formatNumber(rows)} rows, ${cols.length} columns.`,
+      );
+    } catch (e) {
+      setExportNote(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const toggleFilter = (key: MultiKey, value: string) => {
     setFilters((cur) => {
       const list = cur[key] ?? [];
@@ -214,6 +377,8 @@ export function DetailTable({
   const clearFilters = () => {
     setFilters({});
     setSearch('');
+    setAgeBand('');
+    setOiStage('');
     setExcludeSto(false);
     setIncludeDeleted(false);
     setOnlyOpen(false);
@@ -222,6 +387,9 @@ export function DetailTable({
   const activeFilterCount =
     Object.values(filters).reduce((n, v) => n + (v?.length ?? 0), 0) +
     (debounced.trim() ? 1 : 0) +
+    (ageBand ? 1 : 0) +
+    (moneyState ? 1 : 0) +
+    (oiStage ? 1 : 0) +
     (excludeSto ? 1 : 0) +
     (includeDeleted ? 1 : 0) +
     (onlyOpen ? 1 : 0);
@@ -235,7 +403,7 @@ export function DetailTable({
   if (error) {
     return (
       <div className="panel">
-        <h2>Detail table</h2>
+        <h2><Lbl>Detail table</Lbl></h2>
         <p className="err">{error}</p>
       </div>
     );
@@ -283,19 +451,80 @@ export function DetailTable({
           <button className="dt-btn" onClick={() => setChooserOpen(!chooserOpen)} aria-expanded={chooserOpen}>
             Columns ({shown.length}/{data?.columns.length ?? 0})
           </button>
+          <button
+            className="dt-btn"
+            onClick={() => void exportExcel()}
+            disabled={exporting || shown.length === 0}
+            title={
+              data
+                ? `Export all ${formatNumber(data.totalCount)} matching rows with the `
+                  + `${shown.length} column${shown.length === 1 ? '' : 's'} shown`
+                : 'Export these rows to Excel'
+            }
+          >
+            {exporting ? 'Preparing\u2026' : '\u2B07 Export to Excel'}
+          </button>
         </div>
+
+        {Object.keys(globalParams).length > 0 && (
+          <p className="note dt-agechip">
+            Following the filter bar:{' '}
+            {GLOBAL_KEYS.filter((k) => globalParams[k] && !(filters[k as MultiKey]?.length))
+              .map((k) => `${GLOBAL_LABELS[k]} ${globalParams[k]!.split(',').join(', ')}`)
+              .join(' · ') || 'overridden by the table\u2019s own filters'}
+          </p>
+        )}
+
+        {ageBand && (
+          <p className="note dt-agechip">
+            Age filter: <strong>{ageBand === 'past-sla' ? 'over 15 days' : `${ageBand} days`}</strong>{' '}
+            <button className="dt-btn" onClick={() => setAgeBand('')}>clear</button>
+          </p>
+        )}
+
+        {oiStage && (
+          <p className="note dt-agechip">
+            Stages: <strong>{oiStage.split(',').map((v) => STAGE_LABEL[v] ?? v).join(', ')}</strong>{' '}
+            <button className="dt-btn" onClick={() => setOiStage('')}>clear</button>
+          </p>
+        )}
+
+        {moneyState && (
+          <p className="note dt-agechip">
+            State: <strong>
+              {moneyState === 'deliveredNotInvoiced'
+                ? 'delivered, not invoiced'
+                : 'invoiced in Coupa, not paid'}
+            </strong>{' '}
+            <button className="dt-btn" onClick={() => setMoneyState('')}>clear</button>
+          </p>
+        )}
+
+        {exportNote && (
+          <p className={exportNote.startsWith('Export failed') ? 'err' : 'note'} style={{ marginTop: '.5rem' }}>
+            {exportNote}
+          </p>
+        )}
 
         {chooserOpen && data && (
           <div className="dt-chooser">
-            {data.columns.map((c) => (
-              <label key={c.key} className="dt-chip">
-                <input
-                  type="checkbox"
-                  checked={visible?.includes(c.key) ?? false}
-                  onChange={() => toggleColumn(c.key)}
-                />
-                {c.label}
-              </label>
+            {/* SAP columns first, then Coupa's as their own group: they come
+                from a different system, live rather than from the published
+                version, and the reader should be able to see which is which. */}
+            {[false, true].map((coupa) => (
+              <div key={String(coupa)} className={coupa ? 'dt-chooser-group dt-chooser-coupa' : 'dt-chooser-group'}>
+                {coupa && <span className="dt-chooser-title">From Coupa (live)</span>}
+                {data.columns.filter((c) => Boolean(c.coupa) === coupa).map((c) => (
+                  <label key={c.key} className={coupa ? 'dt-chip dt-chip-coupa' : 'dt-chip'}>
+                    <input
+                      type="checkbox"
+                      checked={visible?.includes(c.key) ?? false}
+                      onChange={() => toggleColumn(c.key)}
+                    />
+                    {c.label}
+                  </label>
+                ))}
+              </div>
             ))}
           </div>
         )}
@@ -351,7 +580,7 @@ export function DetailTable({
         )}
 
         {data && data.totalCount > 0 && (
-          <div className="table-wrap dt-scroll">
+          <ScrollFrame className="table-wrap dt-scroll">
             <table className="data dd-tbl">
               <thead>
                 <tr>
@@ -488,7 +717,7 @@ export function DetailTable({
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollFrame>
         )}
 
         {data && data.totalCount > 0 && (

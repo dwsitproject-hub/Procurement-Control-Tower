@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { formatMoney, formatNumber } from '../lib/format';
+import { formatCurrency, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * v1's PR Analysis tables (pr-bneck / pr-reqr): approval bottlenecks per
@@ -17,7 +18,11 @@ interface ReqRow {
   emg: number; urg: number; drill: string;
 }
 
-export function PrTables({ onDrill }: { onDrill: (token: string, label: string) => void }) {
+export function PrTables({ onDrill, currency = 'USD' }: {
+  onDrill: (token: string, label: string) => void;
+  /** Topbar display currency. */
+  currency?: 'USD' | 'IDR';
+}) {
   const [bneck, setBneck] = useState<BneckRow[] | null>(null);
   const [reqr, setReqr] = useState<ReqRow[] | null>(null);
 
@@ -35,7 +40,7 @@ export function PrTables({ onDrill }: { onDrill: (token: string, label: string) 
   return (
     <div className="chart-grid" style={{ marginTop: '1rem' }}>
       <div className="panel">
-        <h3 className="pr-tbl-h">Approval Bottlenecks — avg gap per approver (PR Release)</h3>
+        <h3 className="pr-tbl-h"><Lbl>Approval Bottlenecks — avg gap per approver (PR Release)</Lbl></h3>
         <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
           <table className="data dd-tbl">
             <thead>
@@ -81,14 +86,14 @@ export function PrTables({ onDrill }: { onDrill: (token: string, label: string) 
       </div>
 
       <div className="panel">
-        <h3 className="pr-tbl-h">Demand by Requisitioner — top 10 by value</h3>
+        <h3 className="pr-tbl-h"><Lbl>Demand by Requisitioner — top 10 by value</Lbl></h3>
         <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
           <table className="data dd-tbl">
             <thead>
               <tr>
                 <th>Requisitioner</th>
                 <th className="num">PR Items</th>
-                <th className="num">Value</th>
+                <th className="num">Value ({currency})</th>
                 <th className="num" title="Share of PR items with urgency 1 (01-Emergency)">Emg %</th>
                 <th className="num" title="Share of PR items with urgency 2 (02-Urgent)">Urg %</th>
               </tr>
@@ -114,7 +119,7 @@ export function PrTables({ onDrill }: { onDrill: (token: string, label: string) 
                     <td>{q.requisitioner}</td>
                     <td className="num">{formatNumber(q.items)}</td>
                     <td className="num">
-                      {q.valueUsd !== null ? formatMoney(q.valueUsd, 'USD') : formatMoney(q.valueIdr, 'IDR')}
+                      {formatCurrency(q.valueUsd, q.valueIdr, currency)}
                     </td>
                     <td className="num" style={emgPct > 30 ? { color: 'var(--crit)', fontWeight: 700 } : undefined}>
                       {emgPct.toFixed(0)}%

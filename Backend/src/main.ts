@@ -11,11 +11,15 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { randomUUID } from 'node:crypto';
 import { loadEnv, isOidcConfigured } from './config/env.js';
+import { storageHealth, storageSummary } from './config/storage.js';
 import { closePool, healthCheck } from './db/client.js';
 import { buildRouter, problemHandler } from './api/routes.js';
+import { migrate } from './db/migrate.js';
 import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
 import { startCoupaPoller } from './modules/coupa/sync.js';
+import { startDhmFxPoller } from './modules/dhm/fx.js';
+import { startSharePoller } from './modules/ingest/share_poller.js';
 import { coupaConfigured } from './modules/coupa/client.js';
 
 const env = loadEnv();
@@ -25,6 +29,15 @@ async function main(): Promise<void> {
   if (!db.ok) {
     process.stderr.write(`FATAL: database unreachable — ${db.error}\n`);
     process.exit(1);
+  }
+
+  // Self-migrate at boot (idempotent, advisory-locked): the schema is ready
+  // before the session store, scheduler, or first request needs it — a fresh
+  // deployment cannot hit "relation ... does not exist" from boot ordering.
+  const mig = await migrate();
+  if (mig.applied.length > 0) {
+    process.stdout.write(`migrations applied at boot: ${mig.applied.join(', ')}
+`);
   }
 
   await initSessionStore();
@@ -70,12 +83,39 @@ async function main(): Promise<void> {
   // Coupa poller: a 60s ticker that runs a sync when rule_config says it is
   // enabled and due. Without COUPA_* env vars this is a no-op.
   startCoupaPoller((msg) => process.stdout.write(`${msg}\n`));
+  // Data Hub exchange rates (040): every DHM_FX_SYNC_MINUTES, first run within
+  // a minute of boot. Without DHM_* env vars this is a no-op.
+  startDhmFxPoller((msg) => process.stdout.write(`${msg}\n`));
+  // The scheduled share ingest (settings in rule_config; off until enabled).
+  startSharePoller((msg) => process.stdout.write(`${msg}\n`));
+
+  // Storage check at boot. Not fatal — the previous published version keeps
+  // serving and a failed pickup emails its reason — but a wrong mount must be
+  // visible in the log the moment the container starts, not discovered when a
+  // scheduled pickup reports "no files found".
+  const storage = await storageHealth();
+  if (storage.mountWarning) {
+    process.stdout.write(`WARNING storage: ${storage.mountWarning}
+`);
+  } else if (!storage.readable) {
+    process.stdout.write(
+      `WARNING storage: ${storage.basePath} is not readable — ${storage.error ?? 'permission denied'}
+`,
+    );
+  }
+  if (storage.optionsConflict) {
+    process.stdout.write(
+      'WARNING storage: STORAGE_LOCAL_PATH is set alongside the composed Synology path and ' +
+        `overrides it — using ${storage.basePath}
+`,
+    );
+  }
 
   const server = app.listen(env.PORT, () => {
     process.stdout.write(
       `Procurement Control Tower API listening on :${env.PORT}\n` +
         `  env=${env.NODE_ENV}  sessions=${sessionStoreKind()}  ` +
-        `sso=${isOidcConfigured(env) ? 'configured' : 'off'}  share=${env.SHARE_PATH}  ` +
+        `sso=${isOidcConfigured(env) ? 'configured' : 'off'}  storage=${storageSummary()}  ` +
         `coupa=${coupaConfigured() ? 'configured' : 'off'}\n`,
     );
   });

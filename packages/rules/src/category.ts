@@ -85,13 +85,36 @@ export function materialCategory(
   return 'Other';
 }
 
-/** v1's priority labels, indexed by Requirement Urgency. */
+/** The four labels, in display order. NOT an urgency lookup — see PRIORITY_BY_URGENCY. */
 export const PRIORITY_LABELS: readonly string[] = [
   '01-Emergency',
   '02-Urgent',
   '03-Standard',
   '04-Planned',
 ];
+
+/**
+ * Requirement Urgency to label, as v1 defines it:
+ *   {0:'04-Planned', 1:'01-Emergency', 2:'02-Urgent', 3:'03-Standard'}
+ * with anything else falling back to '03-Standard'.
+ *
+ * This is NOT the array index. Indexing PRIORITY_LABELS by urgency — which this
+ * module did until 7 Aug 2026 — shifts every label one step and, worst of all,
+ * renders urgency 0 as "01-Emergency" when v1 treats it as the LOWEST priority.
+ * On the reference data that mislabelled 250 items as emergencies and pushed the
+ * 171 real ones down to "02-Urgent", so every priority chart, chip and filter
+ * disagreed with v1 by one position.
+ *
+ * The zero is the trap: the export uses 0 for "no urgency stated", and the
+ * column note ("urgent = {1,2}; 0 is undefined") describes the EXPEDITED test,
+ * not the label. isUrgent below is the expedited test and was always correct.
+ */
+const PRIORITY_BY_URGENCY: Readonly<Record<number, string>> = {
+  0: '04-Planned',
+  1: '01-Emergency',
+  2: '02-Urgent',
+  3: '03-Standard',
+};
 
 /**
  * Requirement Urgency to label.
@@ -104,8 +127,9 @@ export const PRIORITY_LABELS: readonly string[] = [
  */
 export function priorityLabel(urgency: number | null): string | null {
   if (urgency === null || !Number.isInteger(urgency)) return null;
-  // v1 indexes the array directly by urgency, so 1 -> '02-Urgent'.
-  return PRIORITY_LABELS[urgency] ?? null;
+  // Unmapped urgencies (4 and up: 96 items on the reference data) become
+  // '03-Standard', matching v1's default rather than vanishing into null.
+  return PRIORITY_BY_URGENCY[urgency] ?? '03-Standard';
 }
 
 /** Urgency 1 and 2 are the expedited lane; 0 is undefined and excluded. */

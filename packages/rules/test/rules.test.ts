@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
+  // fx
+  FxTable,
+  buildFxTable,
   // movement
   lookupMovement,
+  postingQty,
   signedQty,
   establishesReceiptDate,
   // sto
@@ -48,6 +52,15 @@ describe('movement register', () => {
     expect(lookupMovement('641')?.cls).toBe('transfer');
     expect(lookupMovement('642')?.cls).toBe('transfer_reversal');
     expect(lookupMovement('122')?.cls).toBe('reversal');
+  });
+
+  it('registers 123 as the mirror of 122: adds the returned quantity back', () => {
+    expect(lookupMovement('123')?.cls).toBe('receipt');
+    expect(lookupMovement('123')?.signFactor).toBe(1);
+    expect(lookupMovement('123')?.countsAsReceipt).toBe(true);
+    // A 122 of 5 and its 123 cancel exactly, whatever sign the export sends.
+    expect(postingQty('122', 5) + postingQty('123', -5)).toBe(0);
+    expect(establishesReceiptDate('123')).toBe(false);
   });
 
   it('returns null for an unregistered type (BLOCKER V-R07, never a guess)', () => {
@@ -517,6 +530,40 @@ describe('PR Release continuation rows', () => {
     expect(r.orderViolations).toBe(1);
   });
 
+  it('sets aside only the out-of-order row when asked, and still fills the rest', () => {
+    const r = fillReleaseContinuations([
+      row({ rowNumber: 2, prNo: '1000008301', prItem: 1, relSeq: 1, approveDate: '2025-04-10' }),
+      row({ rowNumber: 3, prNo: null, prItem: 0, relSeq: 2, approveDate: '2025-04-14' }),
+      row({ rowNumber: 4, prNo: null, prItem: 0, relSeq: 2, approveDate: '2025-04-15' }), // follows a seq-2 row
+      row({ rowNumber: 5, prNo: '1000008302', prItem: 1, relSeq: 1, approveDate: '2025-04-11' }),
+      row({ rowNumber: 6, prNo: null, prItem: 0, relSeq: 2, approveDate: '2025-04-16' }),
+    ], { setAsideBad: true });
+    expect(r.orderViolations).toBe(1);
+    expect(r.setAside.map((x) => [x.rowNumber, x.ruleId])).toEqual([[4, 'V-R04']]);
+    expect(r.rows.map((x) => x.rowNumber)).toEqual([2, 3, 5, 6]);
+    expect(r.rows[3]!.prNo).toBe('1000008302');
+  });
+
+  it('sets aside a repeated release step when asked, keeping the first copy', () => {
+    const r = fillReleaseContinuations([
+      row({ rowNumber: 2, prNo: 'PR1', prItem: 1, relSeq: 1, approveDate: '2025-04-10' }),
+      row({ rowNumber: 3, prNo: 'PR1', prItem: 1, relSeq: 1, approveDate: '2025-04-12' }),
+    ], { setAsideBad: true });
+    expect(r.duplicateKeys).toBe(1);
+    expect(r.setAside.map((x) => [x.rowNumber, x.ruleId])).toEqual([[3, 'V-R04a']]);
+    expect(r.rows).toHaveLength(1);
+  });
+
+  it('only counts, and keeps every row, without setAsideBad (as the transform uses it)', () => {
+    const r = fillReleaseContinuations([
+      row({ prNo: 'PR1', prItem: 1, relSeq: 1 }),
+      row({ prNo: 'PR1', prItem: 1, relSeq: 1 }),
+    ]);
+    expect(r.duplicateKeys).toBe(1);
+    expect(r.setAside).toHaveLength(0);
+    expect(r.rows).toHaveLength(2);
+  });
+
   it('detects level 2 approved before level 1 (WARNING V-R05)', () => {
     const r = fillReleaseContinuations([
       row({ prNo: 'PR1', prItem: 1, relSeq: 1, approveDate: '2025-04-20' }),
@@ -636,13 +683,21 @@ describe('material category and priority labels (ported from v1)', () => {
     expect(materialCategory('777', { '777': 'Chemical' })).toBe('Chemical');
   });
 
-  it('labels priority the way v1 does, and refuses to label urgency 0', () => {
-    expect(priorityLabel(1)).toBe('02-Urgent');
-    expect(priorityLabel(2)).toBe('03-Standard');
-    expect(priorityLabel(3)).toBe('04-Planned');
-    expect(priorityLabel(0)).toBe('01-Emergency');
-    // 104 reference items carry urgency 4, which v1's 4-entry array cannot label.
-    expect(priorityLabel(4)).toBeNull();
+  it('labels priority from v1s explicit urgency map, not by array index', () => {
+    // v1: {0:'04-Planned', 1:'01-Emergency', 2:'02-Urgent', 3:'03-Standard'}
+    // with everything else defaulting to '03-Standard'.
+    //
+    // This test previously asserted the array-index reading of that map, which
+    // is what the implementation did — so it locked in a one-step shift and,
+    // worst of all, urgency 0 (the LOWEST priority: 250 reference items) as
+    // "01-Emergency". Checked against v1 (19) on the reference export.
+    expect(priorityLabel(1)).toBe('01-Emergency');
+    expect(priorityLabel(2)).toBe('02-Urgent');
+    expect(priorityLabel(3)).toBe('03-Standard');
+    expect(priorityLabel(0)).toBe('04-Planned');
+    // Urgency 4 and up (96 reference items) fall back rather than vanish.
+    expect(priorityLabel(4)).toBe('03-Standard');
+    expect(priorityLabel(9)).toBe('03-Standard');
     expect(priorityLabel(null)).toBeNull();
   });
 
@@ -653,5 +708,23 @@ describe('material category and priority labels (ported from v1)', () => {
     expect(isUrgent(3)).toBe(false);
     expect(isStandard(3)).toBe(true);
     expect(isStandard(4)).toBe(true);
+  });
+});
+
+describe('FX: zero is zero in every currency', () => {
+  const table = new FxTable(buildFxTable([
+    { from: 'USD', to: 'IDR', rate: 16800, year: 2026, month: 1 },
+  ]));
+
+  it('a zero amount converts to zero even with no currency code', () => {
+    // PO 1012104004 on staging: blank currency, value 0. It had no USD value,
+    // and the strict total then refused the rupiah headline for the page.
+    expect(table.toUsd(0, null, '2026-01-19').usd).toBe(0);
+    expect(table.toUsd(0, 'XYZ', '2026-01-19').usd).toBe(0);
+  });
+
+  it('a non-zero amount in an unrated currency is still null, never guessed', () => {
+    expect(table.toUsd(5, null, '2026-01-19').usd).toBeNull();
+    expect(table.toUsd(5, 'XYZ', '2026-01-19').usd).toBeNull();
   });
 });

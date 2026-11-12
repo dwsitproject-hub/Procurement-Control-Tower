@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, type DatasetCurrent, type Finding, type Kpi, type Me } from './lib/api';
 import { formatNumber } from './lib/format';
 import { FreshnessBanner } from './components/FreshnessBanner';
@@ -9,27 +9,53 @@ import { DetailTable } from './components/DetailTable';
 import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
-import { MaterialsTab, VendorsTab } from './components/EntityViews';
+import { SavedViews } from './components/SavedViews';
 import { PrTables } from './components/PrTables';
 import { PoTables } from './components/PoTables';
-import { AdminTab } from './components/AdminTab';
-import { CustomTab } from './components/CustomTab';
-import { CoupaInvoicesTab, CoupaSourcingTab } from './components/CoupaPages';
-import { CustomKpiCard, CustomChartPanel } from './components/CustomTab';
+import {
+  DEFAULT_TAB, TAB_PATH, type Tab, hrefFor, linkHandler, navigate, useRoute,
+} from './lib/router';
+
+/**
+ * Pages behind their own chunks. Everything used to ship in one bundle, so
+ * opening Overview also downloaded Admin, the Coupa pages, the entity views and
+ * the custom builder. Each of these is now fetched the first time its page is
+ * opened — and most users never open Admin at all.
+ *
+ * Overview's own building blocks (cards, charts, tables) stay eager: they are
+ * the first paint, and deferring them would only add a round trip.
+ */
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { Lbl, LabelProvider } from './lib/labels';
+import { hubIdentify, hubReset, hubTrack } from './lib/hub';
+
+const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
+const OpenItemsTab = lazy(() => import('./components/OpenItemsTab').then((m) => ({ default: m.OpenItemsTab })));
+const AdminTab = lazy(() => import('./components/AdminTab').then((m) => ({ default: m.AdminTab })));
+const MasterTab = lazy(() => import('./components/MasterTab').then((m) => ({ default: m.MasterTab })));
+const CustomTab = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomTab })));
+// Pinned custom cards render on ordinary pages, but only for users who have
+// built one — so they are loaded on demand too. Importing them eagerly kept
+// the whole builder module in the main bundle for everybody.
+const CustomKpiCard = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomKpiCard })));
+const CustomChartPanel = lazy(() => import('./components/CustomTab').then((m) => ({ default: m.CustomChartPanel })));
+const MaterialsTab = lazy(() => import('./components/EntityViews').then((m) => ({ default: m.MaterialsTab })));
+const VendorsTab = lazy(() => import('./components/EntityViews').then((m) => ({ default: m.VendorsTab })));
+const CoupaSourcingTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaSourcingTab })));
+const CoupaInvoicesTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaInvoicesTab })));
 import { OverviewCard } from './components/OverviewCards';
 import {
-  LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
+  LayoutControls, LayoutEditBar, applyLayout, useTabLayout, type TabLayout,
 } from './components/LayoutEdit';
-
-type Tab =
-  | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
-  | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'custom' | 'admin' | 'datacheck';
 
 // v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
 const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: string }[] }[] = [
   {
     section: 'Main',
     items: [
+      // First in the menu: it is the page an executive opens and the only one
+      // that states a conclusion rather than presenting a measurement.
+      { id: 'execsummary', label: 'Executive Summary', icon: '🎯' },
       { id: 'executive', label: 'Overview', icon: '📊' },
       { id: 'openitems', label: 'Open Items', icon: '🔥' },
     ],
@@ -53,6 +79,7 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
     section: 'Data',
     items: [
       { id: 'detail', label: 'Detail Table', icon: '🧾' },
+      { id: 'master', label: 'Master', icon: '📚' },
       { id: 'custom', label: 'Custom', icon: '🧮' },
       { id: 'admin', label: 'Admin', icon: '⚙️' },
       { id: 'datacheck', label: 'Data Quality', icon: '✔️' },
@@ -60,14 +87,36 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
   },
 ];
 
+/** Tabs that own their own second path segment (/admin/exclusions, /master/vendors). */
+const SUBPATH_TABS = new Set<Tab>(['admin', 'master']);
+
 const TAB_KPIS: Record<Tab, string[]> = {
+  /**
+   * Executive Summary. The first four are the headline tiles; the rest are the
+   * two claims the page makes — concentration and fragmentation — computed
+   * rather than written into the prose, so they cannot go stale.
+   *
+   * total_po_amount, po_line_items and unique_suppliers are REUSED, not
+   * redefined: they already carry the purchase population (STO and deleted
+   * excluded) and are already covered by the parity sweep. A second definition
+   * of "committed value" is exactly how two pages come to disagree.
+   */
+  execsummary: [
+    'total_po_amount', 'po_line_items', 'unique_suppliers', 'active_purch_groups',
+    // The four cycle times, MOVED here from the Overview (1 Sep 2026) rather
+    // than duplicated: they are gone from TAB_KPIS.executive and from
+    // EXEC_SECTIONS below, so one page owns them and the two cannot drift.
+    'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
+    'top5_category_share_pct', 'lines_under_25jt_pct', 'value_under_25jt_pct',
+    'desks_for_80pct_value', 'vendors_for_80pct_value',
+    'ho_share_value_pct', 'ho_share_lines_pct',
+  ],
   // Ordered to mirror v1's page layouts.
   executive: [
     'open_po_commitment', 'grir_value', 'pr_pipeline_value', 'cycle_e2e',
     'emergency_pct_value', 'otd_vs_requested', 'demand_realism', 'expedite_effectiveness',
     'wbs_compliance',
     'total_pr_items', 'delivered_gr', 'open_items',
-    'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
   ],
   openitems: [
     'pr_not_approved', 'pr_no_po', 'po_hold', 'lines_pending_po_approval',
@@ -79,7 +128,10 @@ const TAB_KPIS: Record<Tab, string[]> = {
   pr: [
     'cycle_pr_approval', 'median_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
     'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
-    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand', 'pr_cancellation_rate', 'pr_deleted',
+    // pr_cancellation_rate and pr_deleted left this page on 7 Oct 2026: deleted
+    // documents are excluded at load (exclusions.deleted_docs), so both could
+    // only ever read 0 - a figure that says nothing was deleted.
+    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand',
     'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
     'valuation_coverage_pct', 'unique_requisitioners', 'avg_pr_line_value_idr',
   ],
@@ -103,7 +155,7 @@ const TAB_KPIS: Record<Tab, string[]> = {
   governance: [
     'wbs_compliance', 'open_pr_no_wbs', 'retro_po_rate', 'sto_share',
     'direct_po_share', 'sole_source_materials', 'tail_spend_pct',
-    'pr_cancellation_rate', 'emergency_pct_value',
+    'emergency_pct_value',
     'single_source_spend_idr', 'top_vendor_share_pct', 'top5_vendor_share_pct',
     'avg_suppliers_per_material',
   ],
@@ -112,23 +164,31 @@ const TAB_KPIS: Record<Tab, string[]> = {
   coupa_src: [],
   coupa_inv: [],
   detail: [],
+  master: [],
   custom: [],
   admin: [],
   datacheck: [],
 };
 
 const TAB_CHARTS: Record<Tab, string[]> = {
+  execsummary: ['exec_value_by_category', 'exec_txn_size'],
   executive: ['status_mix', 'po_value_by_month', 'items_by_priority', 'aging_by_priority'],
   openitems: ['aging_severity_by_stage', 'aging_bands', 'open_by_priority', 'unapproved_by_category', 'unreleased_aging_buckets'],
   pr: [
     'pr_by_month', 'items_by_category', 'pr_approval_by_priority',
     'pr_approval_distribution', 'monthly_pr_no_po', 'pr_by_plant', 'wbs_by_plant',
+    // v1's Outstanding-PR family + demand shape and first-layer aging (7 Aug 2026).
+    'pr_items_by_area', 'pr_outstanding_by_company', 'pr_outstanding_by_porg',
+    'pr_outstanding_by_pgrp', 'pr_layer1_aging_by_priority',
   ],
   po: [
     'po_amount_by_area', 'po_amount_by_matcat', 'po_value_by_month', 'po_value_by_category',
     'po_by_plant', 'po_value_by_purch_org', 'po_value_by_pgrp', 'pr_status_by_pgrp',
     'sourcing_by_priority', 'po_approval_by_priority', 'po_approval_distribution',
     'sourcing_by_category', 'commitment_aging',
+    // v1's value-bracket and buyer-desk family (7 Aug 2026).
+    'po_bracket_value', 'po_bracket_count', 'po_issued_by', 'po_items_by_pgrp',
+    'po_count_by_category',
   ],
   delivery: [
     'delivery_ordered_vs_received', 'delivery_by_category', 'delivery_by_priority',
@@ -141,6 +201,7 @@ const TAB_CHARTS: Record<Tab, string[]> = {
   coupa_src: [],
   coupa_inv: [],
   detail: [],
+  master: [],
   custom: [],
   admin: [],
   datacheck: [],
@@ -161,7 +222,6 @@ const EXEC_SECTIONS: { title: string; ids: string[] }[] = [
     title: '📋 Overview',
     ids: [
       'total_pr_items', 'delivered_gr', 'open_items',
-      'cycle_pr_approval', 'cycle_sourcing', 'cycle_po_approval', 'cycle_delivery',
     ],
   },
 ];
@@ -194,6 +254,24 @@ const CHART_FILTER_DIM: Record<string, 'monthKey' | 'plant' | 'purchOrg'> = {
 // Which validation findings surface inline on which tab (G1.5). The Data Check
 // tab always shows everything; these are the "you should know while reading
 // this page" callouts.
+
+/**
+ * Boundary for a lazily-loaded page. The fallback is the same spinner the
+ * panels use, inside a panel-sized box so the sidebar and header do not jump
+ * while the chunk downloads (typically one cached round trip, once per page
+ * per deployment).
+ */
+function PageChunk({ children, tab }: { children: React.ReactNode; tab?: Tab }) {
+  return (
+    // The boundary is INSIDE main, so a page that throws does not take the header
+    // and sidebar with it and the user can still navigate away.
+    <ErrorBoundary resetKey={tab}>
+      <Suspense fallback={<div className="panel" style={{ minHeight: 220 }}><div className="spinner" /></div>}>
+        {children}
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
 const TAB_FINDINGS: Partial<Record<Tab, string[]>> = {
   pr: ['V-M01', 'V-R03', 'V-R04'],
   po: ['V-B01', 'V-B02', 'V-B03'],
@@ -211,21 +289,44 @@ function applyTheme(mode: ThemeMode) {
 export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [tab, setTab] = useState<Tab>('executive');
+  const route = useRoute();
+  const tab = route.tab;
   const [gf, setGf] = useState<GlobalFilterState>(EMPTY_FILTER);
   const [dataset, setDataset] = useState<DatasetCurrent | null>(null);
   const [kpis, setKpis] = useState<Kpi[]>([]);
+  /**
+   * The Open Items total, from the Open Items page's own endpoint.
+   *
+   * The badge used to add three KPIs together - pr_not_approved + pr_no_po +
+   * open_items - on the fact tables, while the page it links to counts its
+   * stages on the detail view. Two computations of one figure, and they
+   * disagreed by 20 on the reference dataset with the page one click away.
+   * Reading the page's number is the only way the badge and the page it names
+   * cannot differ.
+   */
+  const [openTotal, setOpenTotal] = useState<number | null>(null);
   const [drill, setDrill] = useState<{ token: string; label: string } | null>(null);
   const [detailInit, setDetailInit] = useState<{ params: Record<string, string>; label: string } | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [editing, setEditing] = useState(false);
   const { layout, update: updateLayout } = useTabLayout(tab);
+  /**
+   * Replace the working layout outright — what applying a saved view does.
+   * Expressed through the same update() so it persists by the same path a hand
+   * edit does; a view that applied only in memory would vanish on reload.
+   */
+  const replaceLayout = useCallback(
+    (next: TabLayout) => updateLayout(() => next),
+    [updateLayout],
+  );
   const [savedCustom, setSavedCustom] = useState<{ kpis: any[]; charts: any[] }>({ kpis: [], charts: [] });
   const [chartCatalog, setChartCatalog] = useState<{ chartId: string; title?: string }[]>([]);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try { return (localStorage.getItem('pct_theme') as ThemeMode) ?? 'auto'; } catch { return 'auto'; }
   });
   useEffect(() => { applyTheme(theme); }, [theme]);
+  /** An Admin's title-edit mode (23 Oct 2026): every title shows a ✎. */
+  const [titleEdit, setTitleEdit] = useState(false);
   const [currency, setCurrency] = useState<'USD' | 'IDR'>(() => {
     try { return (localStorage.getItem('pct_currency') as 'USD' | 'IDR') ?? 'USD'; } catch { return 'USD'; }
   });
@@ -241,20 +342,53 @@ export default function App() {
       .finally(() => setAuthChecked(true));
   }, []);
 
-  useEffect(() => {
-    if (!me) return;
-    api.get<DatasetCurrent>('/api/v1/dataset/current').then(setDataset).catch(() => undefined);
-  }, [me]);
+  // Tell the Hub SDK who is signed in - on sign-in, after the SSO callback and
+  // on a restored session alike, since all three arrive here as `me`.
+  useEffect(() => { if (me) hubIdentify(me); }, [me]);
 
   useEffect(() => {
     if (!me) return;
+    api.get<DatasetCurrent>('/api/v1/dataset/current').then((d) => {
+      /*
+       * Every page opens on the current year (requested 7 Oct 2026). "Current"
+       * is the DATA's year - its as-of date - not the browser's calendar: on
+       * 2 January a dataset that runs to 31 December would otherwise open on
+       * an empty year. Set in the same update as the dataset, so the first
+       * request every page makes already carries it rather than loading all
+       * years and then again. A Year the reader already chose is kept, and
+       * "Clear all" in the bar still shows every year.
+       */
+      const y = (d.asOfDate ?? '').slice(0, 4);
+      if (/^[0-9]{4}$/.test(y)) setGf((cur) => (cur.year.length > 0 ? cur : { ...cur, year: [y] }));
+      setDataset(d);
+    }).catch(() => undefined);
+  }, [me]);
+
+  // Saved custom cards are only needed where they can appear: the Custom page,
+  // the layout editor, or a page that has pinned one. The chart catalogue is
+  // only read by the layout editor and the builder. Neither belongs in the
+  // first paint of Overview.
+  const needsCustom = tab === 'custom' || editing
+    || layout.customKpis.length > 0 || layout.customCharts.length > 0;
+  const needsCatalog = tab === 'custom' || editing;
+  const loadedCustom = useRef(false);
+  const loadedCatalog = useRef(false);
+
+  useEffect(() => {
+    if (!me || !needsCustom || loadedCustom.current) return;
+    loadedCustom.current = true;
     api.get<{ specs: { kpis: any[]; charts: any[] } }>('/api/v1/custom/saved')
       .then((d) => setSavedCustom(d.specs ?? { kpis: [], charts: [] }))
-      .catch(() => undefined);
+      .catch(() => { loadedCustom.current = false; });
+  }, [me, needsCustom]);
+
+  useEffect(() => {
+    if (!me || !needsCatalog || loadedCatalog.current) return;
+    loadedCatalog.current = true;
     api.get<{ charts: { chartId: string; title?: string }[] }>('/api/v1/chart')
       .then((d) => setChartCatalog(d.charts))
-      .catch(() => undefined);
-  }, [me]);
+      .catch(() => { loadedCatalog.current = false; });
+  }, [me, needsCatalog]);
 
   // Inline anomaly banners (G1.5): the findings for the published version.
   useEffect(() => {
@@ -265,29 +399,135 @@ export default function App() {
       .catch(() => setFindings([]));
   }, [me, dataset]);
 
-  // Refetch KPIs whenever the global filter changes. The query string is empty
-  // when nothing is selected, which keeps the fast precomputed path in play.
   const gfQuery = globalFilterQuery(gf);
+
+  /**
+   * KPIs are fetched PER PAGE, and again on every page change.
+   *
+   * Previously one request pulled all 71 KPIs once and every page read from
+   * that snapshot, so opening the dashboard paid for pages nobody visited, and
+   * — the reason this changed — the figures were whatever they had been at
+   * first paint. Moving between pages after a recompute or a filter change
+   * showed stale numbers until a manual reload.
+   *
+   * Values already fetched stay on screen while the new request is in flight,
+   * so navigation never flashes empty cards; each response is merged over the
+   * cache. The cache is keyed by dataset version AND filter, so it is dropped
+   * whenever either changes — a stale value from a previous filter must never
+   * survive into a page opened after it.
+   */
+  const cacheKey = `${dataset?.datasetVersionId ?? 'none'}|${gfQuery}`;
+  const cacheKeyRef = useRef(cacheKey);
+  const [kpiLoading, setKpiLoading] = useState(false);
+
+  // Always requested, whatever the page: the header item count and the Open
+  // Items badge are chrome, and would otherwise be blank until their own page
+  // was opened.
+  const CHROME_KPIS = ['total_pr_items', 'pr_not_approved', 'pr_no_po', 'open_items'];
+
+  /**
+   * The id list as a STRING, deliberately — the effect below keys on its
+   * content, not on an array's identity.
+   *
+   * useTabLayout re-fetches the saved layout on every page change, so `layout`
+   * arrives as a fresh object shortly after the page opens. Keying on identity
+   * therefore fired the request twice per navigation. With a content key the
+   * second pass is a no-op whenever the resolved ids are unchanged, which is
+   * every page that has not been customised; a customised layout still issues
+   * a correcting second request rather than rendering the wrong cards.
+   */
+  const neededKey = useMemo(() => {
+    const slots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
+    // Layout can swap a slot for a different KPI — ask for what is shown.
+    return [...new Set([...slots.map((sl) => layout.replaced[sl] ?? sl), ...CHROME_KPIS])].join(',');
+  }, [tab, layout]);
+
   useEffect(() => {
     if (!me) return;
+    // Wait for the published version: it is half the cache key, so fetching
+    // before it lands means one request against key "none" and an immediate
+    // second one against the real key. There is also nothing to show without a
+    // dataset — the page renders "No data yet".
+    if (!dataset || dataset.datasetVersionId === null) return;
+    if (cacheKeyRef.current !== cacheKey) {
+      cacheKeyRef.current = cacheKey;
+      setKpis([]);
+    }
+    if (neededKey === '') return;
+
     let cancelled = false;
+    setKpiLoading(true);
+    const qs = new URLSearchParams(gfQuery);
+    qs.set('ids', neededKey);
     api
-      .get<{ kpis: Kpi[] }>(`/api/v1/kpi${gfQuery ? `?${gfQuery}` : ''}`)
+      .get<{ kpis: Kpi[] }>(`/api/v1/kpi?${qs.toString()}`)
       .then((d) => {
-        if (!cancelled) setKpis(d.kpis);
+        if (cancelled) return;
+        setKpis((prev) => {
+          const byId = new Map(prev.map((k) => [k.kpiId, k]));
+          for (const k of d.kpis) byId.set(k.kpiId, k);
+          return [...byId.values()];
+        });
       })
-      .catch(() => {
-        if (!cancelled) setKpis([]);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setKpiLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [me, gfQuery]);
+  }, [me, dataset, cacheKey, gfQuery, neededKey]);
+
+  useEffect(() => {
+    if (!me || !dataset || dataset.datasetVersionId === null) return undefined;
+    let cancelled = false;
+    api
+      .get<{ totalOpen: number }>(`/api/v1/openitems/summary${gfQuery ? `?${gfQuery}` : ''}`)
+      .then((d) => { if (!cancelled) setOpenTotal(d.totalOpen); })
+      .catch(() => { if (!cancelled) setOpenTotal(null); });
+    return () => { cancelled = true; };
+  }, [me, dataset, gfQuery]);
+
+  // A page opened from a URL the user has no access to must not render blank.
+  const allowedTabs = useMemo(
+    () => NAV_GROUPS.flatMap((g) => g.items)
+      .filter((t) => !me?.pages || (me.pages[t.id] ?? 'none') !== 'none')
+      .map((t) => t.id),
+    [me],
+  );
+  useEffect(() => {
+    if (!me || allowedTabs.length === 0) return;
+    if (!allowedTabs.includes(tab)) {
+      navigate(allowedTabs.includes(DEFAULT_TAB) ? DEFAULT_TAB : allowedTabs[0]!, null, true);
+    }
+  }, [me, tab, allowedTabs]);
+
+  // An unknown or malformed path (/not-a-real-page, /overview/stray) renders
+  // the default page — so rewrite the address bar to match what is on screen,
+  // or a reload and a bookmark would disagree with it.
+  //
+  // SUBPATH_TABS are excluded because they own their second segment and
+  // canonicalise it themselves. This was a bare `tab === 'admin'` and adding
+  // Master silently broke it: every /master/<id> was rewritten back to /master
+  // the moment it was set, so the sub-nav appeared to do nothing at all. A
+  // named set is the fix, so the next page with sub-pages cannot forget.
+  useEffect(() => {
+    if (!me || SUBPATH_TABS.has(tab)) return;
+    if (window.location.pathname !== hrefFor(tab)) navigate(tab, null, true);
+  }, [me, tab, route.sub]);
+
+  // Opening a page part-scrolled is disorienting — the browser only restores a
+  // position for real navigations, and these are pushState.
+  useEffect(() => { window.scrollTo(0, 0); }, [tab, route.sub]);
 
   if (!authChecked) {
     return <div className="center-msg"><div className="spinner" />Loading…</div>;
   }
   if (!me) return <Login onSignedIn={setMe} />;
+
+  // An admin-issued default password must be rotated first: the API refuses
+  // every other endpoint until it is, so there is nothing useful to render.
+  if (me.mustChangePassword) return <ChangePassword me={me} onDone={setMe} />;
 
   // A newly provisioned SSO user is authenticated but has no data scope.
   if (me.scope.length === 0) {
@@ -320,7 +560,10 @@ export default function App() {
   })();
   const dataCheckCount = findings.filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT' || f.severity === 'BLOCKER').length;
 
+  const isAdmin = me.roles.includes('admin');
+
   return (
+    <LabelProvider page={tab} editing={isAdmin && titleEdit}>
     <div className="app">
       {/* v1's .bar: navy sticky header */}
       <div className="topbar">
@@ -328,7 +571,7 @@ export default function App() {
         <h1>Procurement Control Tower</h1>
         {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
         {dataCheckCount > 0 && (
-          <button className="hdr-chip" onClick={() => setTab('datacheck')} title="Open Data Quality">
+          <button className="hdr-chip" onClick={() => navigate('datacheck')} title="Open Data Quality">
             ⚠ Data Check ({dataCheckCount})
           </button>
         )}
@@ -347,6 +590,7 @@ export default function App() {
           className="tbtn"
           href="/api/v1/snapshot"
           download
+          onClick={() => hubTrack('snapshot_downloaded')}
           title="Download a static HTML snapshot of the current dashboard (frozen figures, your data scope)"
         >
           ⤓ Snapshot
@@ -358,10 +602,28 @@ export default function App() {
         >
           {theme === 'auto' ? '◑ Auto' : theme === 'light' ? '☀ Light' : '☾ Dark'}
         </button>
+        {isAdmin && (
+          <button
+            className="tbtn"
+            aria-pressed={titleEdit}
+            title="Rename section and card titles - a rename applies to every user"
+            style={titleEdit ? { background: 'var(--accent)', borderColor: 'var(--accent)' } : undefined}
+            onClick={() => setTitleEdit(!titleEdit)}
+          >
+            ✎ Titles{titleEdit ? ': on' : ''}
+          </button>
+        )}
         <button className="tbtn" onClick={() => void logout()}>
           Sign out
         </button>
       </div>
+      {isAdmin && titleEdit && (
+        <div className="lbl-bar" role="status">
+          <strong>Title editing is on.</strong> Click ✎ beside any section or card title to rename it —
+          the new name applies to every user straight away. A solid ✎ marks a title already renamed;
+          open it to reset it. Click <em>✎ Titles: on</em> again to finish.
+        </div>
+      )}
 
       {dataset && dataset.datasetVersionId !== null ? (
         <FreshnessBanner data={dataset} />
@@ -376,37 +638,49 @@ export default function App() {
       <div className="shell">
         {/* v1's .sb sidebar: grouped nav, orange active border, open-items badge */}
         <nav className="sb" role="tablist" aria-orientation="vertical">
-          {NAV_GROUPS.map((g) => (
+          {NAV_GROUPS.map((g) => {
+            // Pages the user has no access to are not rendered at all (011).
+            // An absent map (older API) means "show everything", so a version
+            // skew can never lock a user out of their own dashboard.
+            const items = g.items.filter(
+              (t) => !me.pages || (me.pages[t.id] ?? 'none') !== 'none',
+            );
+            if (items.length === 0) return null;
+            return (
             <div key={g.section}>
               <div className="nsec">{g.section}</div>
-              {g.items.map((t) => {
-                const openBadge =
-                  t.id === 'openitems'
-                    ? ['pr_not_approved', 'pr_no_po', 'open_items'].reduce((acc, id) => {
-                        const k = kpis.find((x) => x.kpiId === id);
-                        return k?.value !== null && k?.value !== undefined ? acc + Number(k.value) : acc;
-                      }, 0)
-                    : 0;
+              {items.map((t) => {
+                const openBadge = t.id === 'openitems' ? (openTotal ?? 0) : 0;
                 return (
-                  <button
+                  // An anchor, not a button: the address bar now reflects the
+                  // page, so ctrl/cmd/middle-click should open it in a new tab
+                  // and "copy link" should produce something that works.
+                  <a
                     key={t.id}
+                    href={hrefFor(t.id)}
                     className="ni"
                     role="tab"
                     aria-selected={tab === t.id}
-                    onClick={() => setTab(t.id)}
+                    aria-current={tab === t.id ? 'page' : undefined}
+                    onClick={linkHandler(t.id)}
                   >
                     <span className="ic" aria-hidden="true">{t.icon}</span>
                     {t.label}
                     {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
-                  </button>
+                  </a>
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
       <div className="content">
-      {dataset?.datasetVersionId != null && <GlobalFilterBar value={gf} onChange={setGf} />}
+      {dataset?.datasetVersionId != null && <GlobalFilterBar
+          value={gf}
+          onChange={setGf}
+          datasetVersionId={dataset.datasetVersionId}
+        />}
       <main>
         {dataset?.datasetVersionId == null ? (
           <div className="panel">
@@ -415,28 +689,108 @@ export default function App() {
               Publish a dataset first: <code>npm run ingest -w @pct/backend</code>
             </p>
           </div>
+        ) : tab === 'execsummary' ? (
+          <>
+            {/*
+              The same view picker and edit bar the other pages get. Its adders
+              are hidden: this page's sections are a fixed set, so the "+ Add…"
+              pickers would be empty dropdowns inviting a click that does
+              nothing. Hide, move, restore and reset all still apply.
+            */}
+            <SavedViews
+              tab={tab}
+              layout={layout}
+              applyToWorking={replaceLayout}
+              editing={editing}
+            />
+            <LayoutEditBar
+              editing={editing}
+              setEditing={setEditing}
+              layout={layout}
+              update={updateLayout}
+              kpiOptions={[]}
+              chartOptions={[]}
+              customOptions={{ kpis: [], charts: [] }}
+              showAdders={false}
+            />
+            <PageChunk tab={tab}>
+            <ExecSummaryTab
+              kpis={kpis}
+              onDrill={onDrill}
+              currency={currency}
+              // poDateRange, NOT prDateRange: requisitions here reach back to
+              // 2023 while the orders are 2026, and this page reports orders.
+              asOfDate={dataset?.poDateRange?.to ?? dataset?.asOfDate ?? null}
+              firstDate={dataset?.poDateRange?.from ?? null}
+              filterQuery={gfQuery}
+              overviewKpis={TAB_KPIS.executive}
+              overviewCharts={TAB_CHARTS.executive}
+              layout={layout}
+              update={updateLayout}
+              editing={editing}
+            />
+            </PageChunk>
+          </>
+        ) : tab === 'openitems' ? (
+          /*
+            Open Items has its own page (redesign, 16 Sep 2026): a stage
+            pipeline with a stated conclusion rather than a wall of equal tiles.
+            It reads the same TAB_KPIS.openitems values the tiles used, so the
+            KPI fetch above is unchanged and no figure was dropped.
+          */
+          <PageChunk tab={tab}>
+            <OpenItemsTab
+              kpis={kpis}
+              findings={findings}
+              onDrill={onDrill}
+              currency={currency}
+              asOfDate={dataset?.asOfDate ?? null}
+              filterQuery={gfQuery}
+            />
+          </PageChunk>
         ) : tab === 'vendors' ? (
-          <VendorsTab onDrill={onDrill} />
+          <PageChunk tab={tab}><VendorsTab onDrill={onDrill} filterQuery={gfQuery} currency={currency} /></PageChunk>
         ) : tab === 'materials' ? (
-          <MaterialsTab onDrill={onDrill} />
+          <PageChunk tab={tab}><MaterialsTab onDrill={onDrill} filterQuery={gfQuery} currency={currency} /></PageChunk>
         ) : tab === 'coupa_src' ? (
-          <CoupaSourcingTab />
+          <PageChunk tab={tab}><CoupaSourcingTab /></PageChunk>
         ) : tab === 'coupa_inv' ? (
-          <CoupaInvoicesTab />
+          <PageChunk tab={tab}><CoupaInvoicesTab /></PageChunk>
         ) : tab === 'custom' ? (
-          <CustomTab onDrill={onDrill} />
+          <PageChunk tab={tab}><CustomTab onDrill={onDrill} currency={currency} /></PageChunk>
         ) : tab === 'admin' ? (
-          <AdminTab isAdmin={me.roles.includes('admin')} />
+          <PageChunk tab={tab}>
+            <AdminTab
+              isAdmin={me.roles.includes('admin')}
+              canIngest={me.capabilities.includes('ingest')}
+              section={route.sub}
+              onSection={(id) => navigate('admin', id)}
+            />
+          </PageChunk>
+        ) : tab === 'master' ? (
+          <PageChunk tab={tab}>
+            <MasterTab
+              section={route.sub}
+              onSection={(id) => navigate('master', id)}
+            />
+          </PageChunk>
         ) : tab === 'detail' ? (
           <DetailTable
             key={detailInit ? JSON.stringify(detailInit.params) : 'plain'}
             initial={detailInit?.params}
             initialLabel={detailInit?.label}
+            globalQuery={gfQuery}
           />
         ) : tab === 'datacheck' ? (
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (
           <>
+            <SavedViews
+              tab={tab}
+              layout={layout}
+              applyToWorking={replaceLayout}
+              editing={editing}
+            />
             <LayoutEditBar
               editing={editing}
               setEditing={setEditing}
@@ -482,7 +836,7 @@ export default function App() {
                   return (
                     <div key={sec.title}>
                       <h2 className="sec-h">
-                        {sec.title}
+                        <Lbl k={`sec:${sec.title}`}>{sec.title}</Lbl>
                         {isOverviewSec && dataset?.prDateRange && (
                           <span className="sec-sub">
                             PR Date: {dataset.prDateRange.from} → {dataset.prDateRange.to}
@@ -530,13 +884,17 @@ export default function App() {
                         </div>
                       ))}
                       {shownCustomKpis.map((spec) => (
-                        <CustomKpiCard key={`cu-${spec.title}`} spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                        <Suspense key={`cu-${spec.title}`} fallback={null}>
+                          <Suspense fallback={null}>
+                      <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} currency={currency} />
+                    </Suspense>
+                        </Suspense>
                       ))}
                     </div>
                   );
                 })()}
                 {/* v1's 🔥 Open Items — Action Required strip */}
-                <h2 className="sec-h">🔥 Open Items — Action Required <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
+                <h2 className="sec-h">🔥 <Lbl>Open Items — Action Required</Lbl> <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
                 <div className="act-grid">
                   {([
                     ['pr_not_approved', 'Unapproved PRs', 'var(--crit)', 'avg_wait', 'Avg wait'],
@@ -554,11 +912,11 @@ export default function App() {
                         onClick={() => k.drillToken && onDrill(k.drillToken, k.title)}
                       >
                         <span className="act-v">{formatNumber(Number(k.value))}</span>
-                        <span className="act-l">{label}</span>
+                        <span className="act-l"><Lbl>{label}</Lbl></span>
                         {wait !== null && wait !== undefined && (
                           <span className="act-wait">{waitLabel}: {formatNumber(Number(wait))} days</span>
                         )}
-                        <span className="act-go" onClick={(e) => { e.stopPropagation(); setTab('openitems'); }}>
+                        <span className="act-go" onClick={(e) => { e.stopPropagation(); navigate('openitems'); }}>
                           View Details →
                         </span>
                       </button>
@@ -613,7 +971,7 @@ export default function App() {
                         onClick={() => updateLayout((cur) => ({ ...cur, customKpis: cur.customKpis.filter((t) => t !== spec.title) }))}
                       >✕</button>
                     )}
-                    <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                    <CustomKpiCard spec={spec} onDrill={onDrill} onRemove={() => undefined} currency={currency} />
                   </div>
                 ))}
               </div>
@@ -635,9 +993,17 @@ export default function App() {
                     CHART_FILTER_DIM[c]
                       ? (bucketKey) => {
                           const dim = CHART_FILTER_DIM[c]!;
-                          setGf((cur) =>
-                            cur[dim].includes(bucketKey) ? cur : { ...cur, [dim]: [...cur[dim], bucketKey] },
-                          );
+                          setGf((cur) => {
+                            if (cur[dim].includes(bucketKey)) return cur;
+                            const next = { ...cur, [dim]: [...cur[dim], bucketKey] };
+                            // A clicked month outside the chosen years would
+                            // intersect to nothing; widen the years to hold it.
+                            const y = bucketKey.slice(0, 4);
+                            if (dim === 'monthKey' && cur.year.length > 0 && !cur.year.includes(y)) {
+                              next.year = [...cur.year, y];
+                            }
+                            return next;
+                          });
                         }
                       : undefined
                   }
@@ -653,29 +1019,21 @@ export default function App() {
                       onClick={() => updateLayout((cur) => ({ ...cur, customCharts: cur.customCharts.filter((t) => t !== spec.title) }))}
                     >✕</button>
                   )}
-                  <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} />
+                  <Suspense fallback={null}>
+                    <CustomChartPanel spec={spec} onDrill={onDrill} onRemove={() => undefined} currency={currency} />
+                  </Suspense>
                 </div>
               ))}
             </div>
 
             {/* v1's PR-page tables: approval bottlenecks + requisitioner demand. */}
-            {tab === 'pr' && <PrTables onDrill={onDrill} />}
+            {tab === 'pr' && <PrTables onDrill={onDrill} currency={currency} />}
 
             {/* v1's PO-page top-spend tables with Vendor/Material 360 popups. */}
-            {tab === 'po' && <PoTables onDrill={onDrill} />}
+            {tab === 'po' && <PoTables onDrill={onDrill} currency={currency} />}
 
-            {/* v1's "Open Items Detail" table: the open rows themselves, with
-                the detail facets (category / priority / mat cat / plant) and a
-                live row count — server-side, same engine as the Detail tab. */}
-            {tab === 'openitems' && (
-              <div style={{ marginTop: '1rem' }}>
-                <DetailTable
-                  key="openitems-detail"
-                  initial={{ onlyOpen: 'true' }}
-                  initialLabel="Open items only"
-                />
-              </div>
-            )}
+            {/* The Open Items detail table moved into OpenItemsTab, which owns
+                the whole page now and filters it per view. */}
           </>
         )}
       </main>
@@ -690,17 +1048,78 @@ export default function App() {
           onOpenDetail={(params, label) => {
             setDetailInit({ params, label });
             setDrill(null);
-            setTab('detail');
+            navigate('detail');
           }}
         />
       )}
     </div>
+    </LabelProvider>
   );
 }
 
 async function logout(): Promise<void> {
+  hubReset();
   await api.post('/auth/logout').catch(() => undefined);
   window.location.reload();
+}
+
+// ─────────────────────────────────────────────── forced password change (011)
+
+/**
+ * Shown when an admin-issued default password has not been rotated. The API
+ * refuses every other endpoint until it is, so this is not merely cosmetic.
+ */
+function ChangePassword({ me, onDone }: { me: Me; onDone: (me: Me) => void }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr(null);
+    if (next !== confirm) { setErr('The new passwords do not match.'); return; }
+    if (next.length < 12) { setErr('The new password must be at least 12 characters.'); return; }
+    setBusy(true);
+    try {
+      await api.post('/auth/local/change-password', { currentPassword: current, newPassword: next });
+      onDone(await api.get<Me>('/api/v1/me'));
+    } catch (e2) {
+      setErr(e2 instanceof ApiError ? e2.problem.title : 'Could not change the password.');
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="login-wrap">
+      <form className="login" onSubmit={submit}>
+        <h1>Change your password</h1>
+        <p className="sub">
+          Signed in as {me.email}. This is a temporary password issued by an administrator —
+          choose your own before continuing.
+        </p>
+        <label>Current (temporary) password
+          <input type="password" value={current} autoComplete="current-password"
+            onChange={(e) => setCurrent(e.target.value)} required />
+        </label>
+        <label>New password
+          <input type="password" value={next} autoComplete="new-password"
+            onChange={(e) => setNext(e.target.value)} required minLength={12} />
+        </label>
+        <label>Confirm new password
+          <input type="password" value={confirm} autoComplete="new-password"
+            onChange={(e) => setConfirm(e.target.value)} required minLength={12} />
+        </label>
+        {err && <p className="err">{err}</p>}
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Saving…' : 'Set new password'}
+        </button>
+        <p className="sub" style={{ marginTop: '.6rem' }}>
+          At least 12 characters, and different from the temporary one.
+        </p>
+      </form>
+    </div>
+  );
 }
 
 // ────────────────────────────────────────────────────────────────── login
@@ -734,7 +1153,12 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
       setError(
         err instanceof ApiError && err.status === 423
           ? 'Account temporarily locked after repeated failures.'
-          : 'Invalid email or password.',
+          // 403 means the credential was accepted and the ACCOUNT was refused —
+          // disabled or expired. Showing "invalid password" there sends people
+          // to reset a password that already works.
+          : err instanceof ApiError && err.status === 403
+            ? (err.problem.detail || 'This account cannot sign in — ask an administrator.')
+            : 'Invalid email or password.',
       );
     } finally {
       setBusy(false);

@@ -20,9 +20,44 @@ export interface Exclusions {
   docTypes: string[];
   purchGroups: string[];
   purchOrgs: string[];
+  /**
+   * Drop PO lines whose derived status is HOLD PO (user request 31 Aug 2026).
+   *
+   * A flag rather than a list: HOLD PO is one value of a derived status, not a
+   * code an administrator can enumerate. Tested on the DERIVED status, not on
+   * the export's `incomplete` column — deletion takes precedence in rowStatus,
+   * so the two sets differ.
+   */
+  holdPos: boolean;
+  /**
+   * Vendor CODE prefixes treated as intercompany, e.g. ['LN21'].
+   *
+   * Prefixes, not name matching: "INTERCO" as a substring of the vendor name
+   * also hits INTERCON TERMINAL INDONESIA, a genuine third-party supplier, and
+   * dropping a real vendor's orders silently is worse than excluding nothing.
+   * Empty by default, so this excludes nothing until it is filled in.
+   */
+  intercoVendorPrefixes: string[];
+  /**
+   * Purchasing groups excluded from the COUPA store only (019).
+   *
+   * Separate from purchGroups on purpose. The three lists above are applied at
+   * transform time and need a recompute; this one is applied by views over
+   * ops.coupa_*, which is a shared continuously-polled dataset that is not
+   * rebuilt per version — so it takes effect the moment it is saved.
+   *
+   * It is also a different population: the desks that appear in Coupa are
+   * largely not the ones in the SAP facts, so folding them into purchGroups
+   * would mean an admin choosing from a list that cannot express what they need.
+   */
+  coupaPurchGroups: string[];
 }
 
-export const EXCLUSION_KEYS = ['exclusions.doc_types', 'exclusions.purch_groups', 'exclusions.purch_orgs'] as const;
+export const EXCLUSION_KEYS = [
+  'exclusions.doc_types', 'exclusions.purch_groups', 'exclusions.purch_orgs',
+  'exclusions.coupa_purch_groups',
+  'exclusions.hold_pos', 'exclusions.interco_vendor_prefixes',
+] as const;
 
 export async function loadExclusions(): Promise<Exclusions> {
   const rows = await query<{ rule_key: string; rule_value: unknown }>(
@@ -36,10 +71,14 @@ export async function loadExclusions(): Promise<Exclusions> {
     const v = rows.find((r) => r.rule_key === k)?.rule_value;
     return Array.isArray(v) ? v.map(String) : [];
   };
+  const rawHold = rows.find((r) => r.rule_key === 'exclusions.hold_pos')?.rule_value;
   return {
     docTypes: get('exclusions.doc_types'),
     purchGroups: get('exclusions.purch_groups'),
     purchOrgs: get('exclusions.purch_orgs'),
+    coupaPurchGroups: get('exclusions.coupa_purch_groups'),
+    holdPos: rawHold === true || rawHold === 'true',
+    intercoVendorPrefixes: get('exclusions.interco_vendor_prefixes'),
   };
 }
 
@@ -49,6 +88,12 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
     ['exclusions.doc_types', e.docTypes],
     ['exclusions.purch_groups', e.purchGroups],
     ['exclusions.purch_orgs', e.purchOrgs],
+    ['exclusions.coupa_purch_groups', e.coupaPurchGroups],
+    // Uppercased on the way in: the transform compares uppercased codes, and a
+    // prefix typed in lower case would otherwise silently match nothing.
+    ['exclusions.interco_vendor_prefixes',
+      e.intercoVendorPrefixes.map((x) => x.trim().toUpperCase()).filter((x) => x !== '')],
+    ['exclusions.hold_pos', e.holdPos],
   ] as const) {
     await exec(
       `INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note, created_by)
@@ -60,23 +105,223 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
   }
 }
 
-/** Options for the exclusion editor, drawn from the data itself. */
+export interface ExclusionOption {
+  value: string;
+  /** PO lines + PR items — the total rows the value covers. */
+  count: number;
+  /** Split of `count`, because the two feeds are separate populations. */
+  poLines: number;
+  prItems: number;
+  /** Currently excluded, so it is absent from the facts by construction. */
+  excluded: boolean;
+  /** False when the count came from staging rather than the facts. */
+  inData: boolean;
+}
+
+/**
+ * Options for the exclusion editor.
+ *
+ * These CANNOT be drawn from the facts alone, which is what the first version
+ * did and why an exclusion could not be undone: excluded rows are never loaded
+ * into the facts, so after the recompute the value had zero fact rows,
+ * disappeared from this list, and the checkbox needed to clear it no longer
+ * existed. The setting erased its own control.
+ *
+ * So the list is the UNION of what is in the facts and what is currently
+ * excluded. Excluded values are counted from `staging.raw_row`, which keeps
+ * every source row of the batch behind this version — that count is the honest
+ * answer to the question an admin is actually asking, namely "how much comes
+ * back if I re-include this?".
+ *
+ * The `LIMIT 60` on the fact side is unchanged, and the union protects that
+ * too: an excluded value is always listed, even when it would rank below the
+ * cut.
+ */
+/**
+ * A purchasing group as it appears in the COUPA store.
+ *
+ * Deliberately not ExclusionOption: that type counts PO lines and PR items,
+ * which are SAP fact populations. The Coupa question is a different one, and the
+ * counts an admin needs to answer it are order lines and quote requests.
+ */
+export interface CoupaExclusionOption {
+  value: string;
+  /** From the SAP purchasing-group master (018), so a code reads as a person. */
+  description: string | null;
+  poLines: number;
+  sourcingEvents: number;
+  receipts: number;
+  count: number;
+  excluded: boolean;
+}
+
+/**
+ * Purchasing groups present in the Coupa store, with what excluding each would
+ * remove.
+ *
+ * Counts come from the RAW tables, not the filtered views: the point of this
+ * list is to show what an exclusion would cost, so an already-excluded group
+ * must still report its true size rather than zero. That also keeps a saved
+ * exclusion reversible — the reason the SAP list unions in currently-excluded
+ * values too.
+ *
+ * Receipts are counted through their order line because a receipt carries no
+ * purchasing group of its own.
+ */
+export async function coupaExclusionOptions(): Promise<CoupaExclusionOption[]> {
+  const current = await loadExclusions();
+  const rows = await query<{
+    value: string; description: string | null;
+    po_lines: number; sourcing_events: number; receipts: number;
+  }>(
+    `WITH pol AS (
+       SELECT purch_group AS value, count(*)::int AS n
+         FROM ops.coupa_po_line
+        WHERE purch_group IS NOT NULL AND purch_group <> ''
+        GROUP BY 1
+     ), se AS (
+       SELECT purch_group AS value, count(*)::int AS n
+         FROM ops.coupa_sourcing_event
+        WHERE purch_group IS NOT NULL AND purch_group <> ''
+        GROUP BY 1
+     ), rcpt AS (
+       SELECT p.purch_group AS value, count(*)::int AS n
+         FROM ops.coupa_receipt r
+         JOIN ops.coupa_po_line p ON p.order_line_id = r.order_line_id
+        WHERE p.purch_group IS NOT NULL AND p.purch_group <> ''
+        GROUP BY 1
+     ), v AS (
+       SELECT value FROM pol
+       UNION SELECT value FROM se
+       UNION SELECT value FROM rcpt
+       UNION SELECT unnest($1::text[])
+     )
+     SELECT v.value,
+            g.description,
+            COALESCE(pol.n, 0) AS po_lines,
+            COALESCE(se.n, 0)  AS sourcing_events,
+            COALESCE(rcpt.n, 0) AS receipts
+       FROM v
+       LEFT JOIN pol  ON pol.value  = v.value
+       LEFT JOIN se   ON se.value   = v.value
+       LEFT JOIN rcpt ON rcpt.value = v.value
+       LEFT JOIN core.dim_purch_group g ON g.code = v.value
+      WHERE v.value IS NOT NULL AND v.value <> ''
+      ORDER BY (COALESCE(pol.n, 0) + COALESCE(se.n, 0)) DESC, v.value`,
+    [current.coupaPurchGroups],
+  );
+
+  return rows.map((r) => ({
+    value: r.value,
+    description: r.description,
+    poLines: r.po_lines,
+    sourcingEvents: r.sourcing_events,
+    receipts: r.receipts,
+    count: r.po_lines + r.sourcing_events,
+    excluded: current.coupaPurchGroups.includes(r.value),
+  }));
+}
+
 export async function exclusionOptions(versionId: number): Promise<{
-  docTypes: { value: string; count: number }[];
-  purchGroups: { value: string; count: number }[];
-  purchOrgs: { value: string; count: number }[];
+  docTypes: ExclusionOption[];
+  purchGroups: ExclusionOption[];
+  purchOrgs: ExclusionOption[];
 }> {
-  const q3 = async (col: string) =>
-    query<{ value: string; count: number }>(
-      `SELECT ${col} AS value, count(*)::int AS count FROM core.fact_po_line
-        WHERE dataset_version_id = $1 AND ${col} IS NOT NULL AND ${col} <> ''
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 60`,
+  const current = await loadExclusions();
+
+  // The batch this version was built from — its staging rows are pre-exclusion.
+  const ver = await queryOne<{ batch_id: string }>(
+    `SELECT batch_id FROM core.dataset_version WHERE id = $1`, [versionId],
+  );
+  const batchId = ver?.batch_id ?? null;
+
+  const build = async (
+    col: string, payloadKey: string, excluded: string[], prCol: string | null,
+  ): Promise<ExclusionOption[]> => {
+    /**
+     * Values come from the PR feed as well as the PO feed.
+     *
+     * Listing only PO lines meant a document type, purchasing group or org that
+     * appears exclusively on requisitions — anything not yet turned into an
+     * order — could not be excluded at all: it was simply absent from the
+     * editor. The requisition side is exactly where an exclusion matters most,
+     * since that is where the pipeline starts.
+     *
+     * The two counts stay separate rather than being added into one opaque
+     * number: they are different populations, and "12 PO lines · 4,300 PR
+     * items" tells an admin something that "4,312 rows" does not.
+     */
+    const inFacts = await query<{ value: string; po_lines: number; pr_items: number }>(
+      `WITH po AS (
+         SELECT ${col} AS value, count(*)::int AS n FROM core.fact_po_line
+          WHERE dataset_version_id = $1 AND ${col} IS NOT NULL AND ${col} <> ''
+          GROUP BY 1
+       ), pr AS (
+         ${prCol === null
+           ? `SELECT NULL::text AS value, 0::int AS n WHERE false`
+           : `SELECT ${prCol} AS value, count(*)::int AS n FROM core.fact_pr_item
+               WHERE dataset_version_id = $1 AND ${prCol} IS NOT NULL AND ${prCol} <> ''
+               GROUP BY 1`}
+       )
+       SELECT COALESCE(po.value, pr.value) AS value,
+              COALESCE(po.n, 0) AS po_lines,
+              COALESCE(pr.n, 0) AS pr_items
+         FROM po FULL OUTER JOIN pr ON pr.value = po.value
+        ORDER BY (COALESCE(po.n, 0) + COALESCE(pr.n, 0)) DESC
+        LIMIT 60`,
       [versionId],
     );
+
+    const out: ExclusionOption[] = inFacts.map((r) => ({
+      value: r.value,
+      count: r.po_lines + r.pr_items,
+      poLines: r.po_lines,
+      prItems: r.pr_items,
+      excluded: excluded.includes(r.value),
+      inData: true,
+    }));
+
+    // Anything excluded that the facts no longer contain. Saved-but-not-yet-
+    // recomputed exclusions are still in the facts and are already covered.
+    const missing = excluded.filter((v) => !out.some((o) => o.value === v));
+    if (missing.length === 0) return out;
+
+    // Count from staging. Best effort: staging rows are pruned with their
+    // batch, so an old exclusion may have nothing left to count — it is still
+    // listed, because being able to undo it matters more than the number.
+    const po = new Map<string, number>();
+    const pr = new Map<string, number>();
+    if (batchId !== null) {
+      // Both feeds, so the "would return" figure covers the same populations
+      // the live counts do.
+      const rows = await query<{ feed: string; value: string; count: number }>(
+        `SELECT feed, payload->>'${payloadKey}' AS value, count(*)::int AS count
+           FROM staging.raw_row
+          WHERE batch_id = $1 AND feed = ANY($2::text[])
+            AND payload->>'${payloadKey}' = ANY($3)
+          GROUP BY 1, 2`,
+        [batchId, prCol === null ? ['po'] : ['po', 'pr'], missing],
+      );
+      for (const r of rows) (r.feed === 'pr' ? pr : po).set(r.value, r.count);
+    }
+
+    for (const v of missing) {
+      const poN = po.get(v) ?? 0;
+      const prN = pr.get(v) ?? 0;
+      out.push({
+        value: v, count: poN + prN, poLines: poN, prItems: prN,
+        excluded: true, inData: false,
+      });
+    }
+    return out;
+  };
+
   return {
-    docTypes: await q3('doc_type'),
-    purchGroups: await q3('purch_group'),
-    purchOrgs: await q3('purch_org'),
+    // The PR feed carries its own Document Type, Purchasing Group and
+    // Purch. organization columns, so all three dimensions read both feeds.
+    docTypes: await build('doc_type', 'docType', current.docTypes, 'doc_type'),
+    purchGroups: await build('purch_group', 'purchGroup', current.purchGroups, 'purch_group'),
+    purchOrgs: await build('purch_org', 'purchOrg', current.purchOrgs, 'purch_org'),
   };
 }
 

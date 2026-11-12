@@ -22,6 +22,32 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   'freshness.ageing_days': 3,
   'freshness.stale_days': 7,
   'kpi.min_sample': 30,
+  // Email notifications. Recipients and toggles are admin-editable; the SMTP
+  // server and its password stay in the environment.
+  'notify.recipients': [],
+  'notify.on_ingest_success': true,
+  'notify.on_ingest_failure': true,
+  'notify.on_coupa_error': true,
+  // Scheduled share-folder ingest. Admin-configurable at runtime; the env
+  // values are only the initial defaults (SHARE_PATH is still env-only,
+  // because the container has to be able to see the mount).
+  'ingest.autopoll_enabled': false,
+  'ingest.poll_interval_minutes': 30,
+  'ingest.file_patterns': [],
+  // SAP uploads merge into what is loaded (035): new records are added,
+  // changed ones updated, nothing missing from a file is removed. false
+  // restores the old full-replace load, where every upload must carry all five
+  // exports and is the whole dataset on its own.
+  'ingest.merge_enabled': true,
+  // Partial loads (5 Nov 2026): a bad ROW is set aside and filed to failed,
+  // and the rest of its file still loads; a file is set aside whole only when
+  // none of it is usable (empty, no template, a required column missing).
+  // Needs merging, which carries a set-aside feed forward. false restores
+  // all-or-nothing: any blocker fails the whole run.
+  'ingest.partial_load': true,
+  // Deleted PRs and PO lines (and the orders of a deleted PR) are left out of
+  // every fact at load time (7 Oct 2026). false keeps them, flagged, as before.
+  'exclusions.deleted_docs': true,
   // Coupa poller (TECH_04 §3.4). Credentials are env-only, never here.
   'coupa.sync_enabled': false,
   'coupa.sync_interval_minutes': 10,

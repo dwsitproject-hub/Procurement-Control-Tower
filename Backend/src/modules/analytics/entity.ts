@@ -8,8 +8,38 @@
  * silently truncated.
  */
 
+import { buildFilterClause, type GlobalFilter } from './globalfilter.js';
 import { query, queryOne } from '../../db/client.js';
+import { spendCategoryWithPlantSql } from '@pct/rules';
 import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
+
+/**
+ * Spend category, on each of the two grains this module aggregates.
+ *
+ * The Material Group page used `material_category` — derived in code from
+ * material-group NUMBER RANGES ("Chemical", "Spare Parts-General", "Other").
+ * The Executive Summary uses spend category, from the business mapping file
+ * (material code, then code prefix, then material group) with CAPEX split
+ * OPS/PROJ by the plant's third digit. Two different answers to "what kind of
+ * spend is this", side by side in one application.
+ *
+ * Aligned on 15 Sep 2026: this page now reads in spend categories too.
+ *
+ * The PO grain uses the column 020 materialised; the PR grain derives it from
+ * the same generator, because fact_pr_item has no such column. Both therefore
+ * come from one rule, and a mapping change moves them together.
+ *
+ * Note the change of meaning for rows that had no category: the old columns
+ * were NULL and those rows were dropped from the summary entirely. The
+ * generator never returns NULL — an unmapped material is '(unmapped)' and a
+ * service line is '(no material code)' — so they are now counted and named.
+ * That is deliberate: they are real spend, and a summary that silently omits
+ * them does not add up to the page above it.
+ */
+const PRI_SPEND_CAT = spendCategoryWithPlantSql(
+  'pri.material_code', 'pri.material_group', 'pri.plant',
+);
+const POL_SPEND_CAT = `COALESCE(pol.spend_category, '(unmapped)')`;
 
 const OPEN_STATUSES = `('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`;
 
@@ -24,16 +54,59 @@ function scoped(versionId: number, scope: readonly ScopeEntry[], alias: string):
 export interface VendorRow {
   vendorCode: string;
   vendorName: string;
+  /**
+   * Where this vendor's orders are sent — Coupa's supplier master, matched on
+   * the supplier number (payload doc §1.8). Null when the vendor has no Coupa
+   * record, or has one with no address filled in; the table distinguishes the
+   * two so a blank cell never has to be guessed at.
+   */
+  poEmail: string | null;
+  inCoupa: boolean;
   poCount: number;
   lineCount: number;
   spendUsd: number | null;
+  /**
+   * The same spend in rupiah. Carried BESIDE the USD figure rather than instead
+   * of it, because the display toggle picks one and the two are not
+   * interchangeable: net_order_value_idr is populated for every line, so this
+   * is complete even where spendUsd is null for want of an FX rate.
+   */
+  spendIdr: number | null;
   spendConverted: boolean;
   materials: number;
   areas: number;
   otdPct: number | null;
   avgDaysLate: number | null;
   openExposureUsd: number | null;
+  openExposureIdr: number | null;
 }
+
+/**
+ * Sortable columns of the Top vendors table (7 Oct 2026), by the key the page
+ * sends. Each is the aggregate itself rather than its output alias, so it can
+ * sit inside an expression; the vendor code follows as a tiebreak so paging a
+ * sorted list never repeats or skips a vendor.
+ */
+const VENDOR_SORT: Record<string, string> = {
+  vendorCode: 'pol.vendor_code',
+  vendorName: 'max(pol.vendor_name)',
+  poEmail: 'max(sup.po_email)',
+  inCoupa: 'bool_or(sup.number IS NOT NULL)',
+  poCount: 'count(DISTINCT pol.po_no)',
+  lineCount: 'count(*)',
+  spendUsd: 'sum(pol.net_order_value_usd)',
+  spendIdr: 'sum(pol.net_order_value_idr)',
+  materials: 'count(DISTINCT pol.material_code)',
+  areas: 'count(DISTINCT pol.plant)',
+  otdPct: `(count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL
+                             AND pol.receipt_date <= pol.delivery_date + 7))::numeric
+           / NULLIF(count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL), 0)`,
+  avgDaysLate: 'avg(pol.receipt_date - pol.delivery_date) FILTER (WHERE pol.receipt_date > pol.delivery_date)',
+  openExposureUsd: 'sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0)',
+  openExposureIdr: 'sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0)',
+};
+
+export type SortSpec = { key: string; dir: 'asc' | 'desc' } | null;
 
 export async function vendorList(
   versionId: number,
@@ -41,6 +114,9 @@ export async function vendorList(
   search: string,
   limit: number,
   offset = 0,
+  /** The global filter bar (7 Oct 2026), on the order line. */
+  filter: GlobalFilter = {},
+  sort: SortSpec = null,
 ): Promise<{ totalVendors: number; rows: VendorRow[] }> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -49,6 +125,13 @@ export async function vendorList(
     params.push(`%${search.trim()}%`);
     searchSql = ` AND (pol.vendor_name ILIKE $${params.length} OR pol.vendor_code ILIKE $${params.length})`;
   }
+  const gf = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gf.params);
+  searchSql += gf.sql;
+  const sortExpr = sort ? VENDOR_SORT[sort.key] : undefined;
+  const orderBy = sortExpr
+    ? `${sortExpr} ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, pol.vendor_code`
+    : 'spend_usd DESC NULLS LAST, pol.vendor_code';
 
   const total = await queryOne<{ n: number }>(
     `SELECT count(DISTINCT vendor_code)::int AS n FROM core.fact_po_line pol
@@ -59,14 +142,18 @@ export async function vendorList(
   params.push(limit);
   const rows = await query<{
     vendor_code: string; vendor_name: string; po_count: number; line_count: number;
-    spend_usd: number | null; unconverted: number; materials: number; areas: number;
-    otd_num: number; otd_den: number; avg_late: number | null; open_usd: number | null;
+    spend_usd: number | null; spend_idr: number | null; unconverted: number;
+    materials: number; areas: number;
+    otd_num: number; otd_den: number; avg_late: number | null;
+    open_usd: number | null; open_idr: number | null;
+    po_email: string | null; in_coupa: boolean;
   }>(
     `SELECT pol.vendor_code,
             max(pol.vendor_name) AS vendor_name,
             count(DISTINCT pol.po_no)::int AS po_count,
             count(*)::int AS line_count,
             sum(pol.net_order_value_usd) AS spend_usd,
+            sum(pol.net_order_value_idr) AS spend_idr,
             count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unconverted,
             count(DISTINCT pol.material_code)::int AS materials,
             count(DISTINCT pol.plant)::int AS areas,
@@ -75,11 +162,22 @@ export async function vendorList(
             count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.delivery_date IS NOT NULL)::int AS otd_den,
             avg(pol.receipt_date - pol.delivery_date)
               FILTER (WHERE pol.receipt_date > pol.delivery_date) AS avg_late,
-            sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd
+            sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_idr,
+            -- Supplier master is current state, not a versioned fact, so it is
+            -- read live and joined per vendor. A LATERAL keeps it one row even
+            -- if the master ever holds duplicates of a number.
+            max(sup.po_email) AS po_email,
+            bool_or(sup.number IS NOT NULL) AS in_coupa
        FROM core.fact_po_line pol
+       LEFT JOIN LATERAL (
+         SELECT number, po_email FROM ops.coupa_supplier c
+          WHERE c.number = pol.vendor_code
+          ORDER BY c.updated_at DESC NULLS LAST LIMIT 1
+       ) sup ON true
       WHERE ${where}${searchSql} AND pol.vendor_code IS NOT NULL AND NOT pol.is_sto
       GROUP BY pol.vendor_code
-      ORDER BY spend_usd DESC NULLS LAST
+      ORDER BY ${orderBy}
       LIMIT $${params.length} OFFSET $${(params.push(offset), params.length)}`,
     params,
   );
@@ -89,17 +187,23 @@ export async function vendorList(
     rows: rows.map((r) => ({
       vendorCode: r.vendor_code,
       vendorName: r.vendor_name,
+      poEmail: r.po_email,
+      inCoupa: r.in_coupa,
       poCount: r.po_count,
       lineCount: r.line_count,
       // Strict rule: if any line failed to convert, the USD total is incomplete
       // and must not present as a full figure.
       spendUsd: r.unconverted > 0 ? null : r.spend_usd,
+      // No equivalent strictness in rupiah: every line has an IDR value, so
+      // there is no incomplete-total case to guard against.
+      spendIdr: r.spend_idr,
       spendConverted: r.unconverted === 0,
       materials: r.materials,
       areas: r.areas,
       otdPct: r.otd_den > 0 ? Math.round((r.otd_num / r.otd_den) * 1000) / 10 : null,
       avgDaysLate: r.avg_late === null ? null : Math.round(Number(r.avg_late) * 10) / 10,
       openExposureUsd: r.open_usd,
+      openExposureIdr: r.open_idr,
     })),
   };
 }
@@ -117,15 +221,18 @@ export async function vendorDetail(
 
   const bio = await queryOne<{
     vendor_name: string; po_count: number; line_count: number; spend_usd: number | null;
+    spend_idr: number | null;
     unconverted: number; materials: number; areas: number; first_seen: string; last_seen: string;
     otd_num: number; otd_den: number; avg_late: number | null;
-    open_usd: number | null; grir_usd: number | null; rev_101: number; rev_reversals: number;
+    open_usd: number | null; open_idr: number | null;
+    grir_usd: number | null; grir_idr: number | null; rev_101: number; rev_reversals: number;
     otdr_num: number; otdr_den: number;
   }>(
     `SELECT max(pol.vendor_name) AS vendor_name,
             count(DISTINCT pol.po_no)::int AS po_count,
             count(*)::int AS line_count,
             sum(pol.net_order_value_usd) AS spend_usd,
+            sum(pol.net_order_value_idr) AS spend_idr,
             count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unconverted,
             count(DISTINCT pol.material_code)::int AS materials,
             count(DISTINCT pol.plant)::int AS areas,
@@ -137,8 +244,11 @@ export async function vendorDetail(
             avg(pol.receipt_date - pol.delivery_date)
               FILTER (WHERE pol.receipt_date > pol.delivery_date) AS avg_late,
             sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_idr,
             sum(pol.still_invoice_val_usd)
               FILTER (WHERE COALESCE(pol.still_deliver_qty,0) = 0 AND COALESCE(pol.still_invoice_val,0) > 0) AS grir_usd,
+            sum(pol.still_invoice_val_idr)
+              FILTER (WHERE COALESCE(pol.still_deliver_qty,0) = 0 AND COALESCE(pol.still_invoice_val,0) > 0) AS grir_idr,
             sum(pol.receipt_count)::int AS rev_101,
             sum(pol.reversal_count)::int AS rev_reversals,
             count(*) FILTER (WHERE pol.receipt_date IS NOT NULL AND pol.need_by_date IS NOT NULL
@@ -161,17 +271,18 @@ export async function vendorDetail(
     params,
   );
 
-  const spendByMonth = await query<{ mk: string; usd: number | null; n: number }>(
-    `SELECT to_char(pol.document_date,'YYYY-MM') AS mk, sum(pol.net_order_value_usd) AS usd, count(*)::int AS n
+  const spendByMonth = await query<{ mk: string; usd: number | null; idr: number | null; n: number }>(
+    `SELECT to_char(pol.document_date,'YYYY-MM') AS mk, sum(pol.net_order_value_usd) AS usd,
+            sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
       GROUP BY 1 ORDER BY 1`,
     params,
   );
 
-  const byArea = await query<{ plant: string; plant_name: string; usd: number | null; n: number }>(
+  const byArea = await query<{ plant: string; plant_name: string; usd: number | null; idr: number | null; n: number }>(
     `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name,
-            sum(pol.net_order_value_usd) AS usd, count(*)::int AS n
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
@@ -182,11 +293,12 @@ export async function vendorDetail(
   // Materials supplied (v1's v3-mt)
   const materials = await query<{
     material_code: string | null; descr: string; lines: number; qty: number | null;
-    usd: number | null; last_po: string;
+    usd: number | null; idr: number | null; last_po: string;
   }>(
     `SELECT pol.material_code, left(max(pol.short_text), 60) AS descr,
             count(*)::int AS lines, sum(pol.order_qty) AS qty,
-            sum(pol.net_order_value_usd) AS usd, max(pol.document_date)::text AS last_po
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
+            max(pol.document_date)::text AS last_po
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp} AND NOT pol.is_sto
       GROUP BY pol.material_code ORDER BY usd DESC NULLS LAST LIMIT 100`,
@@ -199,7 +311,8 @@ export async function vendorDetail(
             left(pol.short_text, 60) AS "shortText", pol.order_qty AS "orderQty",
             pol.order_unit AS "orderUnit", pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
-            pol.net_order_value_usd AS "netOrderValueUsd", pol.status, pol.receipt_date AS "receiptDate",
+            pol.net_order_value_usd AS "netOrderValueUsd",
+            pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
             pol.gr_completion_pct AS "grCompletionPct",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
@@ -259,16 +372,53 @@ export async function vendorDetail(
     params,
   );
 
+  /**
+   * The Coupa supplier record for this vendor (payload doc §1.8), matched on
+   * the supplier number, which carries the same value as the SAP vendor code.
+   *
+   * Deliberately a LEFT lookup that may find nothing: the supplier master is
+   * Coupa's, the vendor is SAP's, and a vendor that has never been onboarded in
+   * Coupa simply has no record. The popup then says the address is not on file
+   * rather than showing a blank field that reads like a bug.
+   *
+   * Not scoped by dataset version — supplier master data is current state, not
+   * a versioned fact, so it is read live like the rest of the Coupa store.
+   */
+  const supplier = await queryOne<{
+    number: string | null; name: string | null; status: string | null;
+    po_email: string | null; primary_contact_email: string | null;
+    po_method: string | null; on_hold: boolean | null; updated_at: string | null;
+  }>(
+    `SELECT number, COALESCE(display_name, name) AS name, status, po_email,
+            primary_contact_email, po_method, on_hold, updated_at::text
+       FROM ops.coupa_supplier
+      WHERE number = $1
+      ORDER BY updated_at DESC NULLS LAST
+      LIMIT 1`,
+    [vendorCode],
+  );
+
   const totalUnconverted = byCcy.reduce((s2, c) => s2 + c.unconv, 0);
   return {
     vendorCode,
     vendorName: bio.vendor_name,
+    coupaSupplier: supplier === null ? null : {
+      number: supplier.number,
+      name: supplier.name,
+      status: supplier.status,
+      poEmail: supplier.po_email,
+      contactEmail: supplier.primary_contact_email,
+      poMethod: supplier.po_method,
+      onHold: supplier.on_hold,
+      updatedAt: supplier.updated_at,
+    },
     bio: {
       firstSeen: bio.first_seen,
       lastSeen: bio.last_seen,
       poCount: bio.po_count,
       lineCount: bio.line_count,
       spendUsd: totalUnconverted > 0 ? null : bio.spend_usd,
+      spendIdr: bio.spend_idr,
       spendByCurrency: byCcy.map((c) => ({
         currency: c.ccy,
         amount: c.amount,
@@ -281,7 +431,9 @@ export async function vendorDetail(
       otdCaveat: 'On-time = receipt within 7 days of the PO delivery date (EINDT). EINDT equals the document date on 37.4% of all lines, so treat as indicative.',
       avgDaysLate: bio.avg_late === null ? null : Math.round(Number(bio.avg_late) * 10) / 10,
       openExposureUsd: bio.open_usd,
+      openExposureIdr: bio.open_idr,
       deliveredNotInvoicedUsd: bio.grir_usd,
+      deliveredNotInvoicedIdr: bio.grir_idr,
       reversalRatePct:
         bio.rev_101 > 0 ? Math.round((bio.rev_reversals / bio.rev_101) * 1000) / 10 : null,
       // v1's v3x-otdr. Computed against the requested date (EBAN-LFDAT) the
@@ -294,14 +446,15 @@ export async function vendorDetail(
           ? `${bio.otdr_den} lines carry both a receipt and a requested date.`
           : 'Requested delivery date not present in this export (V-M01 / D4).',
     },
-    spendByMonth: spendByMonth.map((m) => ({ monthKey: m.mk, usd: m.usd, lines: m.n })),
-    byArea: byArea.map((a) => ({ plant: a.plant, plantName: a.plant_name, usd: a.usd, lines: a.n })),
+    spendByMonth: spendByMonth.map((m) => ({ monthKey: m.mk, usd: m.usd, idr: m.idr, lines: m.n })),
+    byArea: byArea.map((a) => ({ plant: a.plant, plantName: a.plant_name, usd: a.usd, idr: a.idr, lines: a.n })),
     materials: materials.map((m) => ({
       materialCode: m.material_code,
       description: m.descr,
       lines: m.lines,
       qty: m.qty,
       usd: m.usd,
+      idr: m.idr,
       lastPo: m.last_po,
     })),
     poHistory: decorate(poHistory),
@@ -333,6 +486,14 @@ export async function vendorPivot(
   search: string,
   limit: number,
   offset: number,
+  /** The global filter bar (7 Oct 2026), on the order line. */
+  filter: GlobalFilter = {},
+  /**
+   * 'code' | 'name' | 'total' | a 'YYYY-MM' month column (7 Oct 2026). Applied
+   * where the page of vendors is CHOSEN, so sorting by March ranks every vendor
+   * by March - not just the forty already on screen.
+   */
+  sort: SortSpec = null,
 ): Promise<Record<string, unknown>> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -341,6 +502,9 @@ export async function vendorPivot(
     params.push(`%${search.trim()}%`);
     extra = ` AND (pol.vendor_name ILIKE $${params.length} OR pol.vendor_code ILIKE $${params.length})`;
   }
+  const gf = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gf.params);
+  extra += gf.sql;
   const base = `${where}${extra} AND NOT pol.is_sto AND NOT pol.is_deleted AND pol.vendor_code IS NOT NULL`;
 
   const months = await query<{ mk: string }>(
@@ -357,16 +521,27 @@ export async function vendorPivot(
     params,
   );
 
-  const pageParams = [...params, limit, offset];
+  const pageParams = [...params];
+  const dir = sort?.dir === 'asc' ? 'ASC' : 'DESC';
+  let rank = 'sum(pol.net_order_value_usd)';
+  if (sort?.key === 'code') rank = 'pol.vendor_code';
+  else if (sort?.key === 'name') rank = 'max(pol.vendor_name)';
+  else if (sort && /^[0-9]{4}-[0-9]{2}$/.test(sort.key)) {
+    pageParams.push(sort.key);
+    rank = `sum(pol.net_order_value_usd) FILTER (WHERE to_char(pol.document_date, 'YYYY-MM') = $${pageParams.length})`;
+  }
+  const rankDir = sort ? dir : 'DESC';
+  pageParams.push(limit, offset);
   const rows = await query<{
-    code: string; name: string | null; mk: string; usd: number | null; unrated: number;
+    code: string; name: string | null; mk: string; usd: number | null; unrated: number; rnk: number;
   }>(
     `WITH top AS (
-       SELECT pol.vendor_code AS code, sum(pol.net_order_value_usd) AS total
+       SELECT pol.vendor_code AS code,
+              row_number() OVER (ORDER BY ${rank} ${rankDir} NULLS LAST, pol.vendor_code) AS rnk
          FROM core.fact_po_line pol WHERE ${base}
-        GROUP BY 1 ORDER BY total DESC NULLS LAST
+        GROUP BY 1 ORDER BY ${rank} ${rankDir} NULLS LAST, pol.vendor_code
         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length})
-     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name, max(top.rnk) AS rnk,
             to_char(pol.document_date, 'YYYY-MM') AS mk,
             sum(pol.net_order_value_usd) AS usd,
             count(*) FILTER (WHERE pol.net_order_value IS NOT NULL AND pol.net_order_value_usd IS NULL)::int AS unrated
@@ -376,11 +551,33 @@ export async function vendorPivot(
     pageParams,
   );
 
-  const byVendor = new Map<string, { code: string; name: string | null; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean }>();
+  /**
+   * PO emails for the vendors on this page only — one small query rather than a
+   * join inside the month aggregation, which would have to be carried through
+   * every grouped row for no benefit.
+   */
+  const codes = [...new Set(rows.map((r) => r.code))];
+  const emails = new Map<string, string | null>();
+  const inCoupa = new Set<string>();
+  if (codes.length > 0) {
+    const sup = await query<{ number: string; po_email: string | null }>(
+      `SELECT DISTINCT ON (number) number, po_email FROM ops.coupa_supplier
+        WHERE number = ANY($1) ORDER BY number, updated_at DESC NULLS LAST`,
+      [codes],
+    );
+    for (const x of sup) { emails.set(x.number, x.po_email); inCoupa.add(x.number); }
+  }
+
+  const byVendor = new Map<string, { code: string; name: string | null; poEmail: string | null; inCoupa: boolean; byMonth: Record<string, number | null>; total: number; anyUnrated: boolean; rnk: number }>();
   for (const r of rows) {
     let v = byVendor.get(r.code);
     if (!v) {
-      v = { code: r.code, name: r.name, byMonth: {}, total: 0, anyUnrated: false };
+      v = {
+        code: r.code, name: r.name,
+        poEmail: emails.get(r.code) ?? null,
+        inCoupa: inCoupa.has(r.code),
+        byMonth: {}, total: 0, anyUnrated: false, rnk: Number(r.rnk),
+      };
       byVendor.set(r.code, v);
     }
     v.byMonth[r.mk] = r.unrated > 0 ? null : r.usd === null ? null : Number(r.usd);
@@ -392,7 +589,9 @@ export async function vendorPivot(
     months: months.map((m) => m.mk),
     totalVendors: totalRow?.vendors ?? 0,
     grandTotalUsd: (totalRow?.unrated ?? 0) > 0 ? null : totalRow?.grand_usd ?? null,
-    rows: [...byVendor.values()].sort((a, b) => b.total - a.total),
+    // In the order the page was chosen in - the server's ranking - so the
+    // rows on screen follow the sort the reader picked.
+    rows: [...byVendor.values()].sort((a, b) => a.rnk - b.rnk).map(({ rnk: _r, ...v }) => v),
     note: 'USD-converted, period-matched FX · STO and deleted lines excluded · cells with unrated currencies show —',
   };
 }
@@ -461,19 +660,40 @@ export async function materialDetail(
   versionId: number,
   scope: readonly ScopeEntry[],
   materialCode: string,
+  /**
+   * The popup's own Plant filter (19 Oct 2026). Empty = every plant, as the
+   * popup always showed. Every figure below narrows with it; the plant list
+   * offered does not, so a second plant can be added.
+   */
+  plants: readonly string[] = [],
 ): Promise<Record<string, unknown> | null> {
-  const { where, params } = scoped(versionId, scope, 'pol');
+  const s0 = scoped(versionId, scope, 'pol');
+  const params = s0.params;
   params.push(materialCode);
   const mp = `$${params.length}`;
 
+  const plantOptions = await query<{ plant: string; plant_name: string; n: number }>(
+    `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name, count(*)::int AS n
+       FROM core.fact_po_line pol
+       LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+      WHERE ${s0.where} AND pol.material_code = ${mp} AND pol.plant IS NOT NULL
+      GROUP BY pol.plant ORDER BY 3 DESC, 1`,
+    params,
+  );
+  let where = s0.where;
+  if (plants.length > 0) {
+    params.push([...plants]);
+    where += ` AND pol.plant = ANY($${params.length})`;
+  }
+
   const head = await queryOne<{
     descr: string; grp: string | null; cat: string | null; lines: number; vendors: number;
-    qty: number | null; usd: number | null; avg_price: number | null;
+    qty: number | null; usd: number | null; idr: number | null; avg_price: number | null;
   }>(
     `SELECT left(max(pol.short_text), 80) AS descr, max(pol.material_group) AS grp,
-            max(pol.material_category) AS cat, count(*)::int AS lines,
+            max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors, sum(pol.order_qty) AS qty,
-            sum(pol.net_order_value_usd) AS usd,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
             avg(pol.unit_price) FILTER (WHERE NOT pol.is_sto AND NOT pol.is_token_price AND pol.unit_price > 0) AS avg_price
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.material_code = ${mp}`,
@@ -560,7 +780,8 @@ export async function materialDetail(
             pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
             pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
-            pol.net_order_value_usd AS "netOrderValueUsd", pol.status, pol.receipt_date AS "receiptDate",
+            pol.net_order_value_usd AS "netOrderValueUsd",
+            pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.material_code = ${mp}
@@ -578,6 +799,7 @@ export async function materialDetail(
       vendorCount: head.vendors,
       totalQty: head.qty,
       spendUsd: head.usd,
+      spendIdr: head.idr,
       avgUnitPrice: head.avg_price === null ? null : Math.round(Number(head.avg_price) * 100) / 100,
       avgUnitPriceNote: 'IDR lines only, STO and token prices excluded',
       soleSource: head.vendors === 1,
@@ -596,6 +818,213 @@ export async function materialDetail(
     areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, lines: x.n })),
     poHistory: decorate(poHistory),
     caps: { poHistory: 200 },
+    plantOptions: plantOptions.map((x) => ({ value: x.plant, label: `${x.plant} ${x.plant_name === x.plant ? '' : x.plant_name}`.trim(), count: x.n })),
+  };
+}
+
+// ─────────────────────────────────────────────────────────── category detail
+
+/**
+ * Category 360 (19 Oct 2026): one spend category, drawn like the Material 360
+ * popup, opened from the Material Group page's category charts and summary.
+ *
+ * Population: the category's PO lines, STO and deleted lines excluded - the
+ * basis of the "Item Category by Amount Spend" bars and of the summary's stage
+ * averages. The category is the line's own (the column 020 materialised), as
+ * on both charts. The PR-item figures use the summary's own rule (the
+ * requisition's material, PRI_SPEND_CAT) so they equal its Items / Open.
+ *
+ * `filter` is the page's filter bar with the popup's Plant choice already
+ * folded into its plants; `optionsFilter` is the filter bar alone, which the
+ * plant list is counted under so choosing one plant still offers the others.
+ */
+export async function categoryDetail(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  category: string,
+  filter: GlobalFilter = {},
+  optionsFilter: GlobalFilter = filter,
+): Promise<Record<string, unknown> | null> {
+  const lineWhere = (f: GlobalFilter): { where: string; params: unknown[] } => {
+    const s0 = scoped(versionId, scope, 'pol');
+    s0.params.push(category);
+    let where = `${s0.where} AND ${POL_SPEND_CAT} = $${s0.params.length} AND NOT pol.is_sto AND NOT pol.is_deleted`;
+    const gf = buildFilterClause(f, 'po_line', 'pol.', s0.params.length + 1);
+    s0.params.push(...gf.params);
+    where += gf.sql;
+    return { where, params: s0.params };
+  };
+  const { where, params } = lineWhere(filter);
+
+  const head = await queryOne<{
+    lines: number; pos: number; vendors: number; materials: number; plants: number;
+    usd: number | null; idr: number | null; unrated: number;
+    open_usd: number | null; open_idr: number | null;
+    avg_src: number | null; avg_poa: number | null; avg_dlt: number | null; avg_e2e: number | null;
+  }>(
+    `SELECT count(*)::int AS lines, count(DISTINCT pol.po_no)::int AS pos,
+            count(DISTINCT pol.vendor_code)::int AS vendors,
+            count(DISTINCT pol.material_code)::int AS materials,
+            count(DISTINCT pol.plant)::int AS plants,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
+            count(*) FILTER (WHERE pol.net_order_value_usd IS NULL)::int AS unrated,
+            sum(pol.still_deliver_val_usd) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_usd,
+            sum(pol.still_deliver_val_idr) FILTER (WHERE COALESCE(pol.still_deliver_val,0) > 0) AS open_idr,
+            avg(pol.sourcing_days) FILTER (WHERE pol.sourcing_days >= 0) AS avg_src,
+            avg(pol.po_approval_days) FILTER (WHERE pol.po_approval_days >= 0) AS avg_poa,
+            avg(pol.delivery_days) FILTER (WHERE pol.delivery_days >= 0) AS avg_dlt,
+            avg(pol.receipt_date - pri.requisition_date)
+              FILTER (WHERE pol.receipt_date - pri.requisition_date >= 0) AS avg_e2e
+       FROM core.fact_po_line pol
+       LEFT JOIN core.fact_pr_item pri
+         ON pri.dataset_version_id = pol.dataset_version_id
+        AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
+      WHERE ${where}`,
+    params,
+  );
+
+  // The summary's PR-grain figures, same rule, same filter.
+  const ps = scoped(versionId, scope, 'pri');
+  ps.params.push(category);
+  const priCat = `$${ps.params.length}`;
+  const pgf = buildFilterClause(filter, 'pr_item', 'pri.', ps.params.length + 1);
+  ps.params.push(...pgf.params);
+  const pr = await queryOne<{ items: number; open_n: number; avg_pra: number | null }>(
+    `SELECT count(*)::int AS items,
+            count(*) FILTER (WHERE pri.status IN ('Unapproved PR','PR Approved-No PO')
+              OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
+                          WHERE _pl.dataset_version_id = pri.dataset_version_id
+                            AND _pl.pr_no = pri.pr_no AND _pl.pr_item = pri.pr_item
+                            AND _pl.status IN ('PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')))::int AS open_n,
+            avg(pri.release_final_date - pri.requisition_date)
+              FILTER (WHERE pri.release_final_date - pri.requisition_date >= 0) AS avg_pra
+       FROM core.fact_pr_item pri
+      WHERE ${ps.where} AND NOT pri.is_deleted AND ${PRI_SPEND_CAT} = ${priCat}${pgf.sql}`,
+    ps.params,
+  );
+
+  if ((!head || head.lines === 0) && (!pr || pr.items === 0)) {
+    // Nothing under this filter - still answer, so the popup can offer the
+    // plants and say so, rather than a 404 for a real category.
+    const opt = lineWhere(optionsFilter);
+    const anyAtAll = await queryOne<{ n: number }>(
+      `SELECT count(*)::int AS n FROM core.fact_po_line pol WHERE ${opt.where}`, opt.params,
+    );
+    if ((anyAtAll?.n ?? 0) === 0) return null;
+  }
+
+  // Monthly spend of the top six vendors (by rupiah, which needs no rate).
+  const spendByVendor = await query<{
+    code: string | null; name: string | null; mk: string; usd: number | null; idr: number | null; n: number;
+  }>(
+    `WITH v6 AS (
+       SELECT pol.vendor_code FROM core.fact_po_line pol
+        WHERE ${where} GROUP BY 1 ORDER BY sum(pol.net_order_value_idr) DESC NULLS LAST LIMIT 6)
+     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+            to_char(pol.document_date,'YYYY-MM') AS mk,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
+       FROM core.fact_po_line pol JOIN v6 ON v6.vendor_code IS NOT DISTINCT FROM pol.vendor_code
+      WHERE ${where} AND pol.document_date IS NOT NULL
+      GROUP BY 1, 3 ORDER BY 3`,
+    params,
+  );
+
+  const vendorShare = await query<{ code: string | null; name: string | null; usd: number | null; idr: number | null; n: number }>(
+    `SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
+       FROM core.fact_po_line pol
+      WHERE ${where}
+      GROUP BY pol.vendor_code ORDER BY idr DESC NULLS LAST LIMIT 10`,
+    params,
+  );
+
+  const areaShare = await query<{ plant: string; plant_name: string; usd: number | null; idr: number | null; n: number }>(
+    `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
+       FROM core.fact_po_line pol
+       LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+      WHERE ${where}
+      GROUP BY pol.plant ORDER BY idr DESC NULLS LAST LIMIT 12`,
+    params,
+  );
+
+  const topMaterials = await query<{
+    code: string; descr: string; grp: string | null; lines: number; vendors: number;
+    usd: number | null; idr: number | null;
+  }>(
+    `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
+            max(pol.material_group) AS grp, count(*)::int AS lines,
+            count(DISTINCT pol.vendor_code)::int AS vendors,
+            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr
+       FROM core.fact_po_line pol
+      WHERE ${where} AND pol.material_code IS NOT NULL
+      GROUP BY pol.material_code ORDER BY idr DESC NULLS LAST LIMIT 100`,
+    params,
+  );
+
+  const poHistory = await query<Record<string, unknown>>(
+    `SELECT pol.po_no AS "poNo", pol.po_item AS "poItem", pol.document_date AS "documentDate",
+            pol.material_code AS "materialCode", left(pol.short_text, 60) AS "shortText",
+            pol.plant, pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
+            pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
+            pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
+            pol.net_order_value_usd AS "netOrderValueUsd",
+            pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
+            pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
+       FROM core.fact_po_line pol
+      WHERE ${where}
+      ORDER BY pol.document_date DESC NULLS LAST, pol.po_no DESC LIMIT 200`,
+    params,
+  );
+
+  const opt = lineWhere(optionsFilter);
+  const plantOptions = await query<{ plant: string; plant_name: string; n: number }>(
+    `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name, count(*)::int AS n
+       FROM core.fact_po_line pol
+       LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+      WHERE ${opt.where} AND pol.plant IS NOT NULL
+      GROUP BY pol.plant ORDER BY 3 DESC, 1`,
+    opt.params,
+  );
+
+  const h = head ?? {
+    lines: 0, pos: 0, vendors: 0, materials: 0, plants: 0, usd: null, idr: null, unrated: 0,
+    open_usd: null, open_idr: null, avg_src: null, avg_poa: null, avg_dlt: null, avg_e2e: null,
+  };
+  return {
+    category,
+    kpis: {
+      lineCount: h.lines,
+      poCount: h.pos,
+      vendorCount: h.vendors,
+      materialCount: h.materials,
+      plantCount: h.plants,
+      // USD only when every line carried a rate - the module's rule.
+      spendUsd: h.unrated > 0 ? null : h.usd,
+      spendIdr: h.idr,
+      unratedLines: h.unrated,
+      openCommitUsd: h.open_usd,
+      openCommitIdr: h.open_idr,
+      prItems: pr?.items ?? 0,
+      openPrItems: pr?.open_n ?? 0,
+      avgPra: pr?.avg_pra ?? null,
+      avgSrc: h.avg_src,
+      avgPoa: h.avg_poa,
+      avgDlt: h.avg_dlt,
+      avgE2e: h.avg_e2e,
+    },
+    spendByVendor: spendByVendor.map((x) => ({
+      vendorCode: x.code, vendorName: x.name, monthKey: x.mk, usd: x.usd, idr: x.idr, lines: x.n,
+    })),
+    vendorShare: vendorShare.map((x) => ({ vendorCode: x.code, vendorName: x.name, usd: x.usd, idr: x.idr, lines: x.n })),
+    areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, idr: x.idr, lines: x.n })),
+    topMaterials: topMaterials.map((m) => ({
+      materialCode: m.code, description: m.descr, materialGroup: m.grp, lines: m.lines,
+      vendors: m.vendors, spendUsd: m.usd, spendIdr: m.idr, soleSource: m.vendors === 1,
+    })),
+    poHistory: decorate(poHistory),
+    plantOptions: plantOptions.map((x) => ({ value: x.plant, label: `${x.plant} ${x.plant_name === x.plant ? '' : x.plant_name}`.trim(), count: x.n })),
+    caps: { poHistory: 200, topMaterials: 100, vendorShare: 10, areaShare: 12 },
   };
 }
 
@@ -609,6 +1038,13 @@ export async function materialGroupPage(
   materialGroup: string | null = null,
   limit = 150,
   offset = 0,
+  /**
+   * The filter bar, for the category SUMMARY only (19 Oct 2026): it sits under
+   * the two category charts, which follow the bar, and opens the Category 360
+   * popup, which does too - so all three now count one population. The
+   * explorer and risk lists below stay the full catalogue, as before.
+   */
+  filter: GlobalFilter = {},
 ): Promise<Record<string, unknown>> {
   const { where, params } = scoped(versionId, scope, 'pol');
 
@@ -617,10 +1053,14 @@ export async function materialGroupPage(
   // (PRA on PR items; SRC/POA/DLT/E2E on PO lines). Blank categories are
   // dropped like v1's Boolean filter.
   const priScoped = scoped(versionId, scope, 'pri');
+  const priGf = buildFilterClause(filter, 'pr_item', 'pri.', priScoped.params.length + 1);
+  priScoped.params.push(...priGf.params);
+  const polGf = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  const polParams = [...params, ...polGf.params];
   const priSummary = await query<{
     cat: string; items: number; open_n: number; avg_pra: number | null;
   }>(
-    `SELECT pri.material_category AS cat, count(*)::int AS items,
+    `SELECT ${PRI_SPEND_CAT} AS cat, count(*)::int AS items,
             count(*) FILTER (WHERE pri.status IN ('Unapproved PR','PR Approved-No PO')
               OR EXISTS (SELECT 1 FROM core.fact_po_line _pl
                           WHERE _pl.dataset_version_id = pri.dataset_version_id
@@ -629,14 +1069,14 @@ export async function materialGroupPage(
             avg(pri.release_final_date - pri.requisition_date)
               FILTER (WHERE pri.release_final_date - pri.requisition_date >= 0) AS avg_pra
        FROM core.fact_pr_item pri
-      WHERE ${priScoped.where} AND NOT pri.is_deleted AND pri.material_category IS NOT NULL
+      WHERE ${priScoped.where} AND NOT pri.is_deleted${priGf.sql}
       GROUP BY 1`,
     priScoped.params,
   );
   const polSummary = await query<{
     cat: string; avg_src: number | null; avg_poa: number | null; avg_dlt: number | null; avg_e2e: number | null;
   }>(
-    `SELECT pol.material_category AS cat,
+    `SELECT ${POL_SPEND_CAT} AS cat,
             avg(pol.sourcing_days) FILTER (WHERE pol.sourcing_days >= 0) AS avg_src,
             avg(pol.po_approval_days) FILTER (WHERE pol.po_approval_days >= 0) AS avg_poa,
             avg(pol.delivery_days) FILTER (WHERE pol.delivery_days >= 0) AS avg_dlt,
@@ -646,10 +1086,9 @@ export async function materialGroupPage(
        LEFT JOIN core.fact_pr_item pri
          ON pri.dataset_version_id = pol.dataset_version_id
         AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
-      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted
-        AND pol.material_category IS NOT NULL
+      WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted${polGf.sql}
       GROUP BY 1`,
-    params,
+    polParams,
   );
   const polByCat = new Map(polSummary.map((x) => [x.cat, x]));
 
@@ -659,7 +1098,7 @@ export async function materialGroupPage(
   let extra = '';
   if (category) {
     matParams.push(category);
-    extra += ` AND COALESCE(pol.material_category,'Other') = $${matParams.length}`;
+    extra += ` AND ${POL_SPEND_CAT} = $${matParams.length}`;
   }
   if (materialGroup) {
     matParams.push(materialGroup);
@@ -689,7 +1128,7 @@ export async function materialGroupPage(
     vendors: number; qty: number | null; usd: number | null; idr: number | null;
   }>(
     `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
-            max(pol.material_group) AS grp, max(pol.material_category) AS cat, count(*)::int AS lines,
+            max(pol.material_group) AS grp, max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors,
             sum(pol.order_qty) AS qty, sum(pol.net_order_value_usd) AS usd,
             sum(pol.net_order_value_idr) AS idr
@@ -892,7 +1331,7 @@ export async function topMaterialsSpend(
   versionId: number,
   scope: readonly ScopeEntry[],
   limit = 10,
-): Promise<{ rows: TopMaterialRow[]; totalUsd: number | null }> {
+): Promise<{ rows: TopMaterialRow[]; totalUsd: number | null; totalIdr: number | null }> {
   const { where, params } = scoped(versionId, scope, 'pol');
   const rows = await query<TopMaterialRow>(
     `SELECT pol.material_code AS "materialCode",
@@ -909,11 +1348,12 @@ export async function topMaterialsSpend(
       LIMIT ${Math.min(Math.max(limit, 1), 50)}`,
     params,
   );
-  const tot = await queryOne<{ usd: number | null }>(
-    `SELECT sum(pol.net_order_value_usd)::float AS usd
+  const tot = await queryOne<{ usd: number | null; idr: number | null }>(
+    `SELECT sum(pol.net_order_value_usd)::float AS usd,
+            sum(pol.net_order_value_idr)::float AS idr
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND NOT pol.is_deleted`,
     params,
   );
-  return { rows, totalUsd: tot?.usd ?? null };
+  return { rows, totalUsd: tot?.usd ?? null, totalIdr: tot?.idr ?? null };
 }

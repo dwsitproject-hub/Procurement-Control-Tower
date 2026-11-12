@@ -27,6 +27,16 @@ export interface ContractColumn {
 export interface TemplateContract {
   feed: Feed;
   note?: string;
+  /**
+   * The feed uses CONTINUATION ROWS: a row may leave its key columns blank and
+   * inherit them from the row above.
+   *
+   * Set only where that is the export's actual shape. It suppresses the blank-key
+   * row error (V-P02), which would otherwise fire on every continuation line —
+   * on PR Release that was 13,338 of 27,742 rows reported as unreadable data
+   * when nothing was wrong with any of them.
+   */
+  continuationRows?: boolean;
   /** Header signature: all of `all`, at least one of `any`, none of `none`. */
   signature: { all: string[]; any?: string[]; none?: string[] };
   columns: ContractColumn[];
@@ -98,6 +108,7 @@ const PR: TemplateContract = {
 
 const PREL: TemplateContract = {
   feed: 'prel',
+  continuationRows: true,
   note: 'SAP PR release-strategy list. 48% of rows are continuation rows with blank identifiers.',
   signature: {
     all: ['prno'],
@@ -325,7 +336,109 @@ const FX: TemplateContract = {
   ],
 };
 
-export const TEMPLATE_CONTRACTS: TemplateContract[] = [PR, PREL, PO, POR, GR, FX];
+// ──────────────────────────────────────────── reference / master-data feeds
+//
+// These four differ from the six transactional exports in three ways worth
+// stating, because each one caused a design choice below:
+//
+//   * They are SAP LIST OUTPUT, not spreadsheets. Three are tab-delimited text
+//     named .csv, with a blank first line and — for the user listing — a title
+//     line and a pipe-delimited header sitting above tab-delimited data. The
+//     reader in parse.ts handles that shape; the contracts here see the same
+//     clean {headers, rows} as any workbook.
+//   * They are OPTIONAL. Absent from REQUIRED_FEEDS below, so a bundle without
+//     them publishes normally.
+//   * They are SMALL and header-poor. A two-column file gives a weak signature,
+//     so `none` is used to keep them from shadowing each other: the purchasing
+//     ORG file must not match the purchasing GROUP contract, and vice versa.
+
+const PGRP: TemplateContract = {
+  feed: 'pgrp',
+  note: 'SAP purchasing-group master (ME_PGR list). Telephone and Fax exist in '
+    + 'the header but are empty for all 300 rows, so they are lineage only.',
+  signature: {
+    all: ['pgr'],
+    none: ['porg', 'user'],
+  },
+  columns: [
+    col('PGr', 'str', 'PK', 'code'),
+    col('Description', 'str', 'REQ', 'description', "buyer desk or person; two rows carry an 'INACTIVE' prefix typed by hand"),
+    col('Telephone', 'str', 'IGN'),
+    col('Fax Number', 'str', 'IGN'),
+  ],
+  aliases: [
+    { field: 'code', aliasNorm: 'purchasinggroup' },
+    { field: 'code', aliasNorm: 'purchgroup' },
+    { field: 'description', aliasNorm: 'purchgroupdescr' },
+  ],
+};
+
+const PORG: TemplateContract = {
+  feed: 'porg',
+  note: 'SAP purchasing-organisation master. 491 codes; covers every purch_org '
+    + 'present in the PR and PO facts.',
+  signature: {
+    all: ['porg'],
+    none: ['pgr', 'user'],
+  },
+  columns: [
+    col('POrg', 'str', 'PK', 'code'),
+    col('Purch. org. descr.', 'str', 'REQ', 'description'),
+  ],
+  aliases: [
+    { field: 'code', aliasNorm: 'purchasingorganization' },
+    { field: 'code', aliasNorm: 'purchasingorg' },
+    { field: 'description', aliasNorm: 'purchorgdescr' },
+    { field: 'description', aliasNorm: 'description' },
+  ],
+};
+
+const MATM: TemplateContract = {
+  feed: 'matm',
+  note: 'Material master with SAP spend category. The file is called '
+    + '"Mat group.xlsx" but is keyed by material CODE, not material group — see '
+    + 'migration 018 for why its category is stored alongside material_category '
+    + 'rather than replacing it.',
+  signature: {
+    all: ['code', 'desc', 'category'],
+  },
+  columns: [
+    col('No', 'int', 'IGN', undefined, 'row counter in the export, not a business key'),
+    col('Code', 'str', 'PK', 'materialCode'),
+    col('Desc', 'str', 'REQ', 'description'),
+    col('Category', 'str', 'REQ', 'category', 'MRO GENERAL, MRO SPECIFIC, HEVE, OFFICE IT, CAPEX, ...'),
+  ],
+  aliases: [
+    { field: 'materialCode', aliasNorm: 'material' },
+    { field: 'materialCode', aliasNorm: 'materialcode' },
+    { field: 'description', aliasNorm: 'materialdescription' },
+  ],
+};
+
+const ZUSER: TemplateContract = {
+  feed: 'zuser',
+  note: 'SAP user listing (ZUSER). Maps the user id in created_by / login_name '
+    + 'to a person. PERSONAL DATA — see migration 018.',
+  signature: {
+    all: ['user', 'firstname', 'lastname'],
+  },
+  columns: [
+    col('Client', 'str', 'PK', 'client', 'SAP client; 300 throughout'),
+    col('User', 'str', 'PK', 'userId'),
+    col('First Name', 'str', 'OPT', 'firstName', 'blank for background-job users'),
+    col('Last Name', 'str', 'REQ', 'lastName'),
+  ],
+  aliases: [
+    { field: 'userId', aliasNorm: 'username' },
+    { field: 'userId', aliasNorm: 'userid' },
+    { field: 'firstName', aliasNorm: 'name' },
+  ],
+};
+
+export const TEMPLATE_CONTRACTS: TemplateContract[] = [
+  PR, PREL, PO, POR, GR, FX,
+  PGRP, PORG, MATM, ZUSER,
+];
 
 export const CONTRACT_BY_FEED: Record<Feed, TemplateContract> = {
   pr: PR,
@@ -334,7 +447,25 @@ export const CONTRACT_BY_FEED: Record<Feed, TemplateContract> = {
   por: POR,
   gr: GR,
   fx: FX,
+  pgrp: PGRP,
+  porg: PORG,
+  matm: MATM,
+  zuser: ZUSER,
 };
 
-/** Feeds that must all be present for a bundle to be considered complete. */
-export const REQUIRED_FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr', 'fx'];
+/**
+ * Feeds that must all be present for a bundle to be considered complete.
+ *
+ * FIVE, not six: `fx` was removed 27 Aug 2026 (user decision). The monthly rate
+ * table changes rarely, and requiring an unchanged copy in every bundle was
+ * friction with no safety benefit — buildFx already takes a version's rates from
+ * ops.fx_rate_source, the store fed by both the SAP file and the Coupa API, so a
+ * bundle without the file inherits the rates already known. V-R08 reports that
+ * it happened, and blocks when no rates exist at all.
+ *
+ * The reference feeds
+ * (pgrp, porg, matm, zuser) are recognised and ingested when present but never
+ * gate a publish: master data changes quarterly while PR/PO land daily, so
+ * requiring them would stop the pickup for a file nobody re-exported.
+ */
+export const REQUIRED_FEEDS: Feed[] = ['pr', 'prel', 'po', 'por', 'gr'];

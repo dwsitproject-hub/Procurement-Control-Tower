@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * Coupa integration — TECH_04. Two pieces:
@@ -39,7 +40,16 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
   }, []);
   useEffect(load, [load]);
 
-  if (!d) return <div className="panel"><h2>🔄 Coupa sync</h2><div className="spinner" /></div>;
+  // A cold sync runs for minutes in the background (the request returns at
+  // once), so poll while any object is still 'running'.
+  const running = ((d?.status ?? []) as WatermarkRow[]).some((w) => w.last_status === 'running');
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [running, load]);
+
+  if (!d) return <div className="panel"><h2>🔄 <Lbl>Coupa sync</Lbl></h2><div className="spinner" /></div>;
 
   const saveConfig = async () => {
     setBusy('save');
@@ -66,9 +76,11 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
         out.outcome === 'not_configured'
           ? 'Coupa credentials are not configured on this environment.'
           : out.outcome === 'locked'
-            ? 'Another sync is already running.'
-            : `Sync ${out.outcome}: ` +
-              out.objects.map((o: any) => `${o.object} ${o.status === 'ok' ? `+${o.rowsUpserted}` : '✗'}`).join(' · '),
+            ? 'Another sync is already running — watch the table below for progress.'
+            : out.outcome === 'started'
+              ? 'Sync started in the background. A first (cold) run pages every object and can take several minutes — this table refreshes itself.'
+              : `Sync ${out.outcome}: ` +
+                out.objects.map((o: any) => `${o.object} ${o.status === 'ok' ? `+${o.rowsUpserted}` : '✗'}`).join(' · '),
       );
       load();
     } catch (e) {
@@ -80,7 +92,7 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div className="panel">
-      <h2>🔄 Coupa sync <span className="muted">— {d.configured ? d.host : 'not configured'}</span></h2>
+      <h2>🔄 <Lbl>Coupa sync</Lbl> <span className="muted">— {d.configured ? d.host : 'not configured'}</span></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
         The poller pulls sourcing events, POs, receipts, invoices (payments ride inside invoices)
         and exchange rates incrementally by <code>updated-at</code> watermark. Data lands in the Coupa tab; the SAP
@@ -124,7 +136,12 @@ export function CoupaPanel({ isAdmin }: { isAdmin: boolean }) {
                 <td><code>{w.object}</code></td>
                 <td>{w.last_updated_at ?? DASH}</td>
                 <td>{w.last_run_at ?? DASH}</td>
-                <td>{w.last_status === 'ok' ? '✓ ok' : w.last_status === 'error' ? `✗ ${(w.last_error ?? '').slice(0, 60)}` : DASH}</td>
+                <td>
+                  {w.last_status === 'ok' ? '✓ ok'
+                    : w.last_status === 'running' ? <span className="dt-appr-next">⟳ running…</span>
+                    : w.last_status === 'error' ? `✗ ${(w.last_error ?? '').slice(0, 60)}`
+                    : DASH}
+                </td>
                 <td className="num">{formatNumber(w.rows_upserted)}</td>
               </tr>
             ))}

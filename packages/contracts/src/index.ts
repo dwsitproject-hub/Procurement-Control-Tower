@@ -9,8 +9,25 @@ import { z } from 'zod';
 
 // ─────────────────────────────────────────────────────────────── feeds & roles
 
-export const FEEDS = ['pr', 'prel', 'po', 'por', 'gr', 'fx'] as const;
+/**
+ * Every feed the ingest can recognise.
+ *
+ * The first six are TRANSACTIONAL and required: a dataset publishes with all of
+ * them or not at all, so a figure can never be assembled from a partial bundle.
+ * The last four are REFERENCE data — SAP master exports that describe what a
+ * code means. They are optional by design (see REQUIRED_FEEDS in
+ * Backend/src/modules/ingest/contracts.ts): they refresh on their own cadence,
+ * and a missing one must not stop the daily PR/PO pickup.
+ */
+export const FEEDS = [
+  'pr', 'prel', 'po', 'por', 'gr', 'fx',
+  'pgrp', 'porg', 'matm', 'zuser',
+] as const;
 export type Feed = (typeof FEEDS)[number];
+
+/** Feeds that carry reference/master data rather than transactions. */
+export const REFERENCE_FEEDS = ['pgrp', 'porg', 'matm', 'zuser'] as const;
+export type ReferenceFeed = (typeof REFERENCE_FEEDS)[number];
 
 export const FEED_LABELS: Record<Feed, string> = {
   pr: 'PR Report',
@@ -19,10 +36,65 @@ export const FEED_LABELS: Record<Feed, string> = {
   por: 'PO Release',
   gr: 'GR List',
   fx: 'FX Rates',
+  pgrp: 'Purchasing Groups',
+  porg: 'Purchasing Orgs',
+  matm: 'Material Master',
+  zuser: 'SAP Users',
 };
 
 export const ROLES = ['viewer', 'analyst', 'manager', 'auditor', 'steward', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
+
+/**
+ * User Access (011): organisational job roles, the per-page permission matrix,
+ * and the page keys it is keyed by. The four-tier capability Role above is
+ * unchanged — a job role maps onto it, the matrix layers page access on top.
+ */
+export const JOB_ROLES = [
+  'staff', 'section_head', 'dept_head', 'division_head', 'management', 'admin',
+] as const;
+export type JobRole = (typeof JOB_ROLES)[number];
+
+export const JOB_ROLE_LABELS: Record<JobRole, string> = {
+  staff: 'Staff',
+  section_head: 'Section Head',
+  dept_head: 'Dept Head',
+  division_head: 'Division Head',
+  management: 'Management',
+  admin: 'Admin',
+};
+
+export const PAGE_ACCESS = ['none', 'view', 'edit'] as const;
+export type PageAccess = (typeof PAGE_ACCESS)[number];
+
+/** Every page the matrix can grant, in menu order. */
+export const PAGE_KEYS = [
+  'execsummary',
+  'executive', 'openitems', 'pr', 'coupa_src', 'po', 'delivery', 'coupa_inv',
+  'approvals', 'materials', 'vendors', 'governance',
+  'detail', 'master', 'custom', 'admin', 'datacheck',
+] as const;
+export type PageKey = (typeof PAGE_KEYS)[number];
+
+export const PAGE_LABELS: Record<PageKey, string> = {
+  execsummary: 'Executive Summary',
+  executive: 'Overview',
+  openitems: 'Open Items',
+  pr: 'PR Analysis',
+  coupa_src: 'Sourcing',
+  po: 'PO Analysis',
+  delivery: 'Delivery',
+  coupa_inv: 'Invoicing & Payment',
+  approvals: 'Approvals',
+  materials: 'Material Group',
+  vendors: 'Vendor 360',
+  governance: 'Governance',
+  detail: 'Detail Table',
+  master: 'Master',
+  custom: 'Custom',
+  admin: 'Admin',
+  datacheck: 'Data Quality',
+};
 
 export const ROLE_RANK: Record<Role, number> = {
   viewer: 10,
@@ -50,6 +122,12 @@ export const MeSchema = z.object({
   roles: z.array(z.enum(ROLES)),
   scope: z.array(ScopeEntrySchema),
   capabilities: z.array(z.string()),
+  department: z.string().nullable().optional(),
+  jobRole: z.enum(JOB_ROLES).nullable().optional(),
+  /** Effective per-page access; absent keys mean 'none'. */
+  pages: z.record(z.enum(PAGE_ACCESS)).optional(),
+  /** True until an admin-issued default password has been rotated. */
+  mustChangePassword: z.boolean().optional(),
 });
 export type Me = z.infer<typeof MeSchema>;
 
@@ -147,6 +225,11 @@ export const KPI_IDS = [
   'top_vendor_share_pct','top5_vendor_share_pct','avg_suppliers_per_material',
   'worst_approver_gap','auto_release_share_pct',
   'urgent_po_before_pr','open_pr_with_wbs','median_pr_approval','pr_approval_lead_time',
+  // Executive Summary (020). Concentration and fragmentation, the two facts the
+  // page is built to state.
+  'active_purch_groups','desks_for_80pct_value','vendors_for_80pct_value',
+  'top5_category_share_pct','lines_under_25jt_pct','value_under_25jt_pct',
+  'ho_share_value_pct','ho_share_lines_pct',
 ] as const;
 export type KpiId = (typeof KPI_IDS)[number];
 
@@ -204,7 +287,7 @@ export const KPI_TITLES: Record<KpiId, string> = {
   sole_source_materials: 'Sole-Source Materials',
   delivered_not_invoiced: 'Delivered, Not Invoiced',
   po_irc: 'Info-Record Coverage %',
-  otd_vs_requested: 'On-Time vs Requested %',
+  otd_vs_requested: 'On-Time vs PO Delivery Date %',
   tail_spend_po_pct: 'Tail Spend % (by PO)',
   valuation_coverage_pct: 'Valuation Coverage %',
   unique_requisitioners: 'Unique Requisitioners',
@@ -222,6 +305,14 @@ export const KPI_TITLES: Record<KpiId, string> = {
   open_pr_with_wbs: 'Open PR with WBS',
   median_pr_approval: 'Median PR Approval',
   pr_approval_lead_time: 'PR Approval Lead Time (median)',
+  active_purch_groups: 'Active purchasing desks',
+  desks_for_80pct_value: 'Desks holding 80% of value',
+  vendors_for_80pct_value: 'Vendors holding 80% of value',
+  top5_category_share_pct: 'Top 5 categories (% of value)',
+  lines_under_25jt_pct: 'PO lines under Rp 25 Jt',
+  value_under_25jt_pct: 'Value on lines under Rp 25 Jt',
+  ho_share_value_pct: 'Head Office share of value',
+  ho_share_lines_pct: 'Head Office share of PO lines',
 };
 
 export const KpiValueSchema = z.object({

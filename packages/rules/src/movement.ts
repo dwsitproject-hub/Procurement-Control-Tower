@@ -35,6 +35,18 @@ export const MOVEMENT_REGISTER: Readonly<Record<string, MovementRule>> = Object.
     countsAsReceipt: true,
     description: 'Return delivery (registered; absent from reference data)',
   },
+  // Registered 2 Nov 2026: the first one arrived in a staging GR file and, as
+  // V-R07 requires, blocked every pickup until it was registered. SAP's
+  // standard meaning, fixed for every client: reversal of a return delivery -
+  // it cancels a 122 and puts the returned quantity back as received. So the
+  // exact mirror of 122: receipt-class, sign +1, counts toward received qty.
+  // It does not set the receipt DATE (only 101 does, establishesReceiptDate).
+  '123': {
+    cls: 'receipt',
+    signFactor: 1,
+    countsAsReceipt: true,
+    description: 'Reversal of return delivery (cancels a 122)',
+  },
   '641': {
     cls: 'transfer',
     signFactor: 1,
@@ -77,7 +89,7 @@ export function signedQty(mvt: string, qtyInUnitOfEntry: number): number {
  *
  * This distinction is easy to get wrong and matters:
  *
- *   Receipt class (101/102/122) — the movement type IS the direction. A 102 is a
+ *   Receipt class (101/102/122/123) — the movement type IS the direction. A 102 is a
  *     reversal whatever sign the export sends, so we derive.
  *
  *   Transfer class (641/642) — the source sign is a debit/credit LEG, not a

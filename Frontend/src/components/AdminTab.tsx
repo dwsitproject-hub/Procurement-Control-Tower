@@ -391,7 +391,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
    * finite option list to tick.
    */
   const holdAndInterco = () => (
-    <details className="dt-facet" open={current.holdPos || current.intercoVendorPrefixes.length > 0}>
+    <details className="dt-facet" open={!hasDataset || current.holdPos || current.intercoVendorPrefixes.length > 0}>
       <summary>
         Held POs and intercompany
         {(current.holdPos || current.intercoVendorPrefixes.length > 0) && (

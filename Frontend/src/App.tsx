@@ -26,6 +26,7 @@ import {
  * the first paint, and deferring them would only add a round trip.
  */
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { BrandMark } from './components/BrandMark';
 import { Lbl, LabelProvider } from './lib/labels';
 import { hubIdentify, hubReset, hubTrack } from './lib/hub';
 
@@ -567,7 +568,7 @@ export default function App() {
     <div className="app">
       {/* v1's .bar: navy sticky header */}
       <div className="topbar">
-        <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>🏭</span>
+        <BrandMark />
         <h1>Procurement Control Tower</h1>
         {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
         {dataCheckCount > 0 && (

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Signal Tower, small cut: for browser tabs (16-32 px). No arcs, heavier bars. -->
+  <rect width="64" height="64" rx="14" fill="#1F3864"/>
+  <rect x="11" y="35" width="11" height="18" rx="2.5" fill="#6AA9E9"/>
+  <rect x="26.5" y="23" width="11" height="30" rx="2.5" fill="#FFFFFF"/>
+  <rect x="42" y="30" width="11" height="23" rx="2.5" fill="#6AA9E9"/>
+  <circle cx="32" cy="14.5" r="5" fill="#ED7D31"/>
+</svg>

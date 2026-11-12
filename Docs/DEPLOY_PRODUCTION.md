@@ -19,7 +19,7 @@ reads `<` as a redirect. Values to edit are shown as `FILL_...` and edited befor
 | FE server | **172.28.80.50** — container `pct-web`, published on **127.0.0.1:3050**, reached through the host's nginx on :80 |
 | BE server | **172.28.80.51** — containers `pct-api` (published on **172.28.80.51:4100**) and `pct-redis` (not published) |
 | Database | ApsaraDB RDS for PostgreSQL **pgm-d9jn3khh0b3907w4.pgsql.ap-southeast-5.rds.aliyuncs.com:5432**, database `pct`, account `pct` |
-| SAP exports | Synology share `APPs/PCT` → BE host mount **/mnt/pct-nas** → container `/mnt/pct-nas` |
+| SAP exports | Synology share `APPs/PCT` → BE host `/mnt/synology-apps/PCT` (existing share mount, §5a) → container `/mnt/pct-nas` |
 | Code | GitHub `dwsitproject-hub/Procurement-Control-Tower`, branch **`main`**, built on each server |
 | Runtime folder | `/opt/pct` on both servers (`/opt/pct/src` is the checkout) |
 | Docker network | `pct_net`, a **fixed** subnet per server (`PCT_SUBNET`, from the preflight) |
@@ -176,6 +176,29 @@ Write down each server's `suggested PCT_SUBNET=...` line — the two servers get
 
 ## 5. PCT's NAS folder on the BE server (172.28.80.51)
 
+### 5a. Production BE today: use the existing share mount (no host change)
+
+The preflight on 12 Nov 2026 found the whole `APPs` share already mounted at **`/mnt/synology-apps`**
+(`rw`, `uid=1001,gid=1001` — PCT's container user) and **`APPs/PCT` already present**
+(`drwxrwxr-x 1001 1001 /mnt/synology-apps/PCT`). So PCT binds just that subfolder into its container and adds
+no mount, credentials file or fstab line. Only `/mnt/synology-apps/PCT` is visible inside the container.
+
+**PuTTY on 172.28.80.51:**
+
+```bash
+findmnt /mnt/synology-apps && stat -f -c '%T  %n' /mnt/synology-apps/PCT
+grep -n 'synology-apps' /etc/fstab
+```
+
+`stat` must print `cifs`, and `grep` must show an fstab line for `/mnt/synology-apps` (so it returns after a
+reboot). Then in §6 add **`PCT_NAS_HOST_PATH=/mnt/synology-apps/PCT`** to `/opt/pct/.env`.
+
+The NAS route is protected by a static host route (`172.30.1.94 via 172.28.95.253 dev eth0 proto static`):
+another app's network (`tas-production_tas_production_network`) holds 172.30.0.0/16 on this host, and the
+single-address route is what keeps the NAS reachable. Do not remove it.
+
+### 5b. A host without that mount: a dedicated mount of `APPs/PCT`
+
 Only `APPs/PCT` is mounted, at `/mnt/pct-nas`, read/write (after-run filing moves each export to
 `succeed/` or `failed/` inside it). Nothing else on the share is reachable from PCT. Existing mounts are
 not touched.
@@ -238,7 +261,9 @@ printf 'PCT_SUBNET=FILL_FROM_PREFLIGHT\n' > .env
 nano .env
 ```
 
-In `.env`, replace `FILL_FROM_PREFLIGHT` with the BE preflight's subnet (e.g. `172.27.249.0/24`).
+In `.env`, replace `FILL_FROM_PREFLIGHT` with the BE preflight's subnet — **`172.16.250.0/24`** on
+12 Nov 2026, once infra confirms no office / VPN network uses it — and, with §5a, add a second line
+`PCT_NAS_HOST_PATH=/mnt/synology-apps/PCT`.
 
 Fill `production.env` (`nano production.env`):
 

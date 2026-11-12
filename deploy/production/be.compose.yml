@@ -55,7 +55,11 @@ services:
       # PCT_NAS_MODE=ro in .env to make it read-only (then switch filing off).
       # Docker creates an EMPTY folder if the host path is missing; the API's
       # boot check (STORAGE_EXPECT_MOUNT=true) reports that as a WARNING.
-      - /mnt/pct-nas:/mnt/pct-nas:${PCT_NAS_MODE:-rw}
+      # The HOST side is configurable: production's BE already mounts the whole
+      # APPs share at /mnt/synology-apps (uid 1001), so PCT binds just its own
+      # subfolder from there (PCT_NAS_HOST_PATH=/mnt/synology-apps/PCT in .env)
+      # and adds no mount of its own. The container path never changes.
+      - ${PCT_NAS_HOST_PATH:-/mnt/pct-nas}:/mnt/pct-nas:${PCT_NAS_MODE:-rw}
       - spool:/var/lib/pct/spool
     ports:
       # The BE server's private IP only - never 0.0.0.0. Only the FE server's

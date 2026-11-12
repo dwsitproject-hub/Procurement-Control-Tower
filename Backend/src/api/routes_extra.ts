@@ -978,10 +978,15 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   }));
 
   r.get('/api/v1/admin/exclusions', role('steward', async (_req, res) => {
-    const v = await version();
+    // No dataset is NOT an error here: a new installation sets its exclusions
+    // BEFORE the first load (they are applied while loading). The options are
+    // only the values found in the data, so they are empty until then and the
+    // editor takes typed codes instead (hasDataset false).
+    const v = await currentVersion();
     res.json({
+      hasDataset: v !== null,
       current: await loadExclusions(),
-      options: await exclusionOptions(v.id),
+      options: v ? await exclusionOptions(v.id) : { docTypes: [], purchGroups: [], purchOrgs: [] },
       coupaOptions: await coupaExclusionOptions(),
       note: 'Changes apply on the next recompute (Admin > Recompute), not instantly.',
       // The Coupa list is the exception and the UI says so: it is enforced by

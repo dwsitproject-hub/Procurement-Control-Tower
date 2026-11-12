@@ -163,16 +163,26 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [coupaOptions, setCoupaOptions] = useState<CoupaOpt[]>([]);
+  /**
+   * No dataset yet (a new installation): there are no values in the data to
+   * tick, so the three SAP lists become typed, comma-separated codes - the same
+   * raw-text pattern as the prefix box (see prefixText) - and saving does not
+   * rebuild, because there is nothing to rebuild; the first load applies them.
+   */
+  const [hasDataset, setHasDataset] = useState(true);
+  const [freeText, setFreeText] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.get<{ current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[] }>(
+    api.get<{ current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[]; hasDataset?: boolean }>(
       '/api/v1/admin/exclusions',
     )
       .then((d) => {
         setCurrent(d.current);
         setPrefixText(null);
+        setFreeText({});
         setOptions(d.options as never);
         setCoupaOptions(d.coupaOptions ?? []);
+        setHasDataset(d.hasDataset !== false);
       })
       .catch((e: Error) => setMsg(e instanceof ApiError && e.status === 403 ? 'Steward role required.' : e.message));
   }, []);
@@ -219,6 +229,13 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
       setDirty(false);
       // Show the saved, normalised list rather than whatever spacing was typed.
       setPrefixText(null);
+      setFreeText({});
+      if (!hasDataset) {
+        setMsg('Saved. Nothing to rebuild yet — these exclusions apply from the first load '
+          + '(SAP Data Upload, or Sync now in SAP Data Sync).');
+        setBusy(null);
+        return;
+      }
       // A Coupa-only change is live already: the views read the rule store
       // directly. Rebuilding every fact for it would cost a minute and change
       // nothing, so the server tells us whether it is actually needed.
@@ -267,7 +284,34 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     }
   };
 
-  const group = (label: string, key: ListKey, opts: Opt[]) => (
+  const group = (label: string, key: ListKey, opts: Opt[]) => (!hasDataset ? (
+    <details className="dt-facet" open>
+      <summary>
+        {label}
+        {current[key].length > 0 && <span className="dt-badge">{current[key].length}</span>}
+      </summary>
+      <div className="dt-facet-list" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <label className="cu-field" style={{ maxWidth: '32rem' }}>
+          SAP codes to exclude
+          <input
+            className="gf-search-in"
+            disabled={!isAdmin}
+            placeholder="e.g. TG4, TL4 — separate with a comma"
+            value={freeText[key] ?? current[key].join(', ')}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setFreeText((t) => ({ ...t, [key]: raw }));
+              setCurrent({
+                ...current,
+                [key]: raw.split(/[,\s]+/).map((x) => x.trim().toUpperCase()).filter((x) => x !== ''),
+              });
+              setDirty(true);
+            }}
+          />
+        </label>
+      </div>
+    </details>
+  ) : (
     <details className="dt-facet" open={current[key].length > 0}>
       <summary>
         {label}
@@ -298,7 +342,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
           ))}
       </div>
     </details>
-  );
+  ));
 
   /**
    * The Coupa purchasing-group facet.
@@ -425,6 +469,13 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         unticking it restores them on the next save.
         {!isAdmin && ' Editing requires the admin role.'}
       </p>
+      {!hasDataset && (
+        <p className="note" style={{ marginBottom: '.6rem' }}>
+          <span className="bs sl">No data loaded yet</span> Type the SAP codes to exclude. They
+          are applied while the first dataset loads, so set them <strong>before</strong> the first
+          load. Once data is in, this editor lists the values found in it to tick instead.
+        </p>
+      )}
       <div className="dt-facets">
         {group('Document types', 'docTypes', options.docTypes)}
         {group('Purchasing groups', 'purchGroups', options.purchGroups)}
@@ -452,7 +503,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
           >
             {busy === 'saving' ? 'Saving…'
               : busy === 'recompute' ? 'Rebuilding…'
-                : 'Save exclusions & recompute'}
+                : hasDataset ? 'Save exclusions & recompute' : 'Save exclusions'}
           </button>
         </div>
       )}

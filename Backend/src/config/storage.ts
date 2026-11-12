@@ -82,7 +82,7 @@ export function resolveStorage(env: Env = loadEnv()): StorageResolution {
   };
 
   if (explicit) {
-    return { ...common, mode: 'explicit_path', basePath: explicit, expectsNas: false };
+    return { ...common, mode: 'explicit_path', basePath: explicit, expectsNas: env.STORAGE_EXPECT_MOUNT === true };
   }
   if (composable) {
     return {

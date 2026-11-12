@@ -1,0 +1,82 @@
+# Production BE server (172.28.80.51). Runs the API (published on 4100, private
+# IP only) and its private Redis (never published). The database is ApsaraDB
+# RDS. Built on this server from the checkout - this file never builds.
+# Guide: Docs/DEPLOY_PRODUCTION.md.
+#
+# Required next to this file (/opt/pct):
+#   production.env          - from deploy/production/production.env, filled in
+#   secrets.production.env  - Coupa / Data Hub credentials (optional)
+#   .env                    - PCT_SUBNET (and PCT_API_BIND), read by Compose
+#
+# THIS HOST IS SHARED with other applications that also use the Synology NAS.
+# Two rules keep PCT from breaking them:
+#   1. PCT's Docker network has a FIXED subnet (PCT_SUBNET, chosen by
+#      preflight.sh). Left to itself Docker picks from 172.17-172.31, and on
+#      staging it twice picked 172.30.0.0/16 - the NAS's own range - which cut
+#      every app on the host off from the share (DEPLOY_STAGING.md section 10).
+#   2. PCT mounts ONLY its own folder (//NAS/APPs/PCT -> /mnt/pct-nas) with its
+#      own credentials file and fstab line. No existing mount is touched.
+name: pct
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: pct-redis
+    restart: unless-stopped
+    # noeviction is deliberate: Redis holds sessions, not just cache.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    networks: [pct]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: pct-api:production
+    container_name: pct-api
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - ./production.env
+      - path: ./secrets.production.env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379
+      UPLOAD_SPOOL_PATH: /var/lib/pct/spool
+    volumes:
+      # PCT's own NAS folder, mounted on the host at /mnt/pct-nas (guide step 5).
+      # rw because after-run filing moves each export to succeed/ or failed/ in
+      # THIS folder; nothing outside APPs/PCT is reachable from here. Set
+      # PCT_NAS_MODE=ro in .env to make it read-only (then switch filing off).
+      # Docker creates an EMPTY folder if the host path is missing; the API's
+      # boot check (STORAGE_EXPECT_MOUNT=true) reports that as a WARNING.
+      - /mnt/pct-nas:/mnt/pct-nas:${PCT_NAS_MODE:-rw}
+      - spool:/var/lib/pct/spool
+    ports:
+      # The BE server's private IP only - never 0.0.0.0. Only the FE server's
+      # nginx calls it.
+      - "${PCT_API_BIND:-172.28.80.51:4100}:3000"
+    networks: [pct]
+    healthcheck:
+      test: ["CMD", "node", "dist/healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+networks:
+  pct:
+    name: pct_net
+    ipam:
+      config:
+        # Required, no default on purpose: see rule 1 above.
+        - subnet: ${PCT_SUBNET:?set PCT_SUBNET in /opt/pct/.env - run deploy/production/preflight.sh be}
+
+volumes:
+  redisdata:
+  spool:

@@ -85,12 +85,51 @@ function readHidden(prompt: string): Promise<string> {
   });
 }
 
+/**
+ * The FIRST administrator of a new environment (12 Nov 2026).
+ *
+ *   docker exec -it pct-api node dist/cli/set-password.js --email a@b.c --create-admin --name "Full Name"
+ *
+ * A production database has no seeded admin (seed.ts seeds one in development
+ * only), and the User Access page needs a signed-in administrator. This makes
+ * the account - local, roles admin + steward, data scope everything - and then
+ * sets its password exactly as a reset does. Refused when the address already
+ * exists, so it can never quietly promote someone; for an existing account,
+ * use the User Access page or plain --email.
+ */
+async function createAdmin(email: string, name: string): Promise<void> {
+  const exists = await queryOne<{ id: string }>(`SELECT id FROM app.app_user WHERE email = $1`, [email]);
+  if (exists) throw new Error(`${email} already exists; grant roles on the User Access page instead`);
+  await transaction(async (c) => {
+    const u = await c.query<{ id: string }>(
+      `INSERT INTO app.app_user (email, display_name, auth_method, is_active)
+       VALUES ($1, $2, 'local', true) RETURNING id`,
+      [email, name],
+    );
+    const id = u.rows[0]!.id;
+    await c.query(`INSERT INTO app.user_role (user_id, role_code) VALUES ($1, 'admin'), ($1, 'steward')`, [id]);
+    await c.query(`INSERT INTO app.data_scope (user_id, company_code, plant, purch_org) VALUES ($1, '*', '*', '*')`, [id]);
+  });
+  await recordAudit({
+    action: 'auth.admin.cli_bootstrap',
+    actorEmail: 'cli',
+    outcome: 'success',
+    detail: { targetEmail: email, roles: ['admin', 'steward'], scope: 'all' },
+  });
+  stdout.write(`Created ${email} as an administrator with access to all data.\n`);
+}
+
 async function main(): Promise<void> {
   loadEnv();
   const email = arg('email');
   const forceChange = process.argv.includes('--force-change');
   if (!email) {
-    throw new Error('usage: set-password --email <address> [--force-change]');
+    throw new Error('usage: set-password --email <address> [--force-change] [--create-admin --name "Full Name"]');
+  }
+  if (process.argv.includes('--create-admin')) {
+    const name = arg('name');
+    if (!name) throw new Error('--create-admin needs --name "Full Name"');
+    await createAdmin(email, name);
   }
 
   const user = await queryOne<{ id: string; is_active: boolean; auth_method: string }>(

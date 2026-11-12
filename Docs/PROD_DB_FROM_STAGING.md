@@ -147,7 +147,7 @@ Any other error: stop and look.
 **Prove the copy is complete** — every table's row count must match staging's:
 
 ```bash
-$PG sh -c 'psql "$DBURL" -c "ANALYZE" > /dev/null && psql "$DBURL" -At -f /w/count.sql' > /root/pct-export/prd.cnt; wc -l /root/pct-export/*.cnt; diff /root/pct-export/stg.cnt /root/pct-export/prd.cnt && echo IDENTICAL
+$PG sh -c 'psql "$DBURL" -c "SET client_min_messages = error" -c "ANALYZE" > /dev/null && psql "$DBURL" -At -f /w/count.sql' > /root/pct-export/prd.cnt; wc -l /root/pct-export/*.cnt; diff /root/pct-export/stg.cnt /root/pct-export/prd.cnt && echo IDENTICAL
 ```
 
 It must print `IDENTICAL`. Do not continue past a difference.

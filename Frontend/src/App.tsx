@@ -682,12 +682,32 @@ export default function App() {
           datasetVersionId={dataset.datasetVersionId}
         />}
       <main>
-        {dataset?.datasetVersionId == null ? (
+        {/*
+          Admin first, ahead of the no-dataset gate: it is where the first
+          dataset is loaded, so a brand-new installation (production, 12 Nov
+          2026) could not reach it at all. It needs no dataset of its own.
+        */}
+        {tab === 'admin' ? (
+          <PageChunk tab={tab}>
+            <AdminTab
+              isAdmin={me.roles.includes('admin')}
+              canIngest={me.capabilities.includes('ingest')}
+              section={route.sub}
+              onSection={(id) => navigate('admin', id)}
+            />
+          </PageChunk>
+        ) : dataset?.datasetVersionId == null ? (
           <div className="panel">
             <h2>No data yet</h2>
-            <p className="note">
-              Publish a dataset first: <code>npm run ingest -w @pct/backend</code>
-            </p>
+            {me.capabilities.includes('ingest') ? (
+              <p className="note">
+                Load the SAP exports first:{' '}
+                <a href={hrefFor('admin')} onClick={linkHandler('admin')}>Admin → SAP Data Upload</a>
+                {' '}(upload the files, or <b>Sync now</b> in SAP Data Sync).
+              </p>
+            ) : (
+              <p className="note">The SAP data has not been loaded yet. Ask a PCT administrator.</p>
+            )}
           </div>
         ) : tab === 'execsummary' ? (
           <>
@@ -758,15 +778,6 @@ export default function App() {
           <PageChunk tab={tab}><CoupaInvoicesTab /></PageChunk>
         ) : tab === 'custom' ? (
           <PageChunk tab={tab}><CustomTab onDrill={onDrill} currency={currency} /></PageChunk>
-        ) : tab === 'admin' ? (
-          <PageChunk tab={tab}>
-            <AdminTab
-              isAdmin={me.roles.includes('admin')}
-              canIngest={me.capabilities.includes('ingest')}
-              section={route.sub}
-              onSection={(id) => navigate('admin', id)}
-            />
-          </PageChunk>
         ) : tab === 'master' ? (
           <PageChunk tab={tab}>
             <MasterTab

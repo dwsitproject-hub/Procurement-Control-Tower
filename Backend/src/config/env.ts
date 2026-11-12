@@ -83,6 +83,11 @@ export const EnvSchema = z
     STORAGE_DEPLOYMENT: optional(z.enum(['dev', 'prod']).optional()),
     STORAGE_PROJECT_SLUG: optional(z.string().min(1).optional()),
     STORAGE_LOCAL_PATH: optional(z.string().optional()),
+    // With STORAGE_LOCAL_PATH: the path is a NAS mount, so check it is one at
+    // boot (12 Nov 2026). Production reads APPs/PCT at the share root, which the
+    // composed root/deployment/slug form cannot express ('prod' would add a
+    // folder), so it uses an explicit path - and keeps the missing-mount check.
+    STORAGE_EXPECT_MOUNT: bool.default(false),
 
     // Fallback share folder, and the local stand-in for the NAS in dev: any
     // readable directory holding the six SAP exports.

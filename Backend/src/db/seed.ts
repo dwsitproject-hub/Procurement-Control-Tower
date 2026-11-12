@@ -153,8 +153,13 @@ async function seedChartMeta(): Promise<void> {
  * accounts require documented approval and an expiry date.
  */
 async function seedDevAdmin(): Promise<void> {
-  if (env.NODE_ENV === 'production') {
-    process.stdout.write('  skipping dev admin (NODE_ENV=production)\n');
+  // Development ONLY (12 Nov 2026). It used to be skipped only under
+  // NODE_ENV=production, but production PCT runs as NODE_ENV=staging until it
+  // has TLS (the Secure cookie production mode demands needs HTTPS), and a
+  // production database must never receive a published, well-known password.
+  // The first production admin is created with set-password --create-admin.
+  if (env.NODE_ENV !== 'development') {
+    process.stdout.write(`  skipping dev admin (NODE_ENV=${env.NODE_ENV})\n`);
     return;
   }
 

@@ -71,7 +71,7 @@ None of these can be done from the servers. Send them together; the guide stops 
 | 4 | Infra (network) | **172.28.80.51 → outbound 443** to `kpn.coupahost.com`, `dwshub.kpndomain.com`, the Data Hub; **465** to `mail.energi-up.com`; **22** to `github.com` (both servers) | §2, §6 |
 | 5 | DBA / RDS console | Add **172.28.80.51** to the RDS instance's **whitelist**; create account **`pct`** (standard) and database **`pct`** owned by it | §3 |
 | 6 | NAS owner | Folder **`APPs/PCT`** (uppercase, at the share ROOT — not under `dev`), and an SMB account with **read/write on that folder only** | §5 |
-| 7 | Hub admin (optional) | Register PCT in the **production** Hub: redirect URI `APP_BASE_URL/auth/oidc/callback` (best registered once the domain exists, §7b), public client / PKCE → `client_id`; and the SDK key (`dwsk_…`) | §8 |
+| 7 | Hub admin (optional) | Register PCT in the **production** Hub: application address `http://172.28.80.50:3050`, redirect URI **`http://172.28.80.50:3050/auth/oidc/callback`**, public client / PKCE → `client_id`; and the SDK key (`dwsk_…`). Both addresses change to the hostname in §7b | §8 |
 | 8 | Coupa admin | Production OAuth client (client id + secret) for `https://kpn.coupahost.com` | §6 |
 | 9 | Data Hub integrator (optional) | A PCT application with `exchange_rate` on its allowlist → key pair | §6 |
 | 10 | You | **`main` up to date**: a pull request merging `sit2` into `main`, reviewed and merged | §2 |
@@ -383,9 +383,21 @@ curl -s -o /dev/null -w 'root %{http_code}\n' http://pct.kpndomain.com/
 curl -s -o /dev/null -w 'api %{http_code}\n' http://pct.kpndomain.com/api/v1/kpi
 ```
 
-Expect `200`, `401`. Everyone signs in once more (cookies were issued for the IP address). If SSO was
-registered by IP, change its redirect URI in the Hub and `OIDC_REDIRECT_URI` to the hostname. The IP address
-keeps working too.
+Expect `200`, `401`. Everyone signs in once more (cookies were issued for the IP address).
+
+**SSO and the Hub SDK** (registered by IP in §8): in the production Hub, **Admin → Applications → Procurement
+Control Tower**, change the application address to `http://pct.kpndomain.com` and the redirect URI to
+`http://pct.kpndomain.com/auth/oidc/callback` (add the new one before removing the IP one, if the Hub allows
+two, so nobody is locked out in between). Then on the BE server:
+
+```bash
+cd /opt/pct && sed -i 's|^OIDC_REDIRECT_URI=.*|OIDC_REDIRECT_URI=http://pct.kpndomain.com/auth/oidc/callback|' production.env && grep '^OIDC_REDIRECT_URI' production.env
+docker compose -f compose.yml up -d --force-recreate api
+```
+
+Sign in through the Hub once to confirm. Until both sides match, Hub sign-in fails with a redirect-URI
+error while local sign-in keeps working. The IP address keeps working for local sign-in; SSO follows the
+one registered redirect URI.
 
 ---
 
@@ -405,10 +417,12 @@ Sign in at **http://172.28.80.50:3050** (or the hostname, after §7b) with the a
 4. **Admin → Notifications** — recipients, both SAP toggles on, **Send test email** must report `sent`.
 5. **Admin → Coupa Sync** — *Sync now*: every object `ok`; then enable the schedule.
 6. **Admin → FX rates** — Data Hub box: *Sync now* and check the *Fields read* line if configured.
-7. **SSO (when request #7 is done — best after §7b, so the Hub redirect URI is registered once, with the
-   hostname)** — on the BE server, uncomment the three `OIDC_*` lines in
-   `/opt/pct/production.env`, set `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URI` to `APP_BASE_URL` +
-   `/auth/oidc/callback`, then
+7. **SSO (when request #7 is done)** — registered by IP for now (§7b moves it to the hostname). First
+   check the BE server reaches the production Hub:
+   `curl -s -o /dev/null -w '%{http_code}\n' https://dwshub.kpndomain.com/api/sso/.well-known/openid-configuration`
+   (expect `200`). Then uncomment the three `OIDC_*` lines in `/opt/pct/production.env`, set
+   `OIDC_CLIENT_ID` from the Hub, keep `OIDC_REDIRECT_URI=http://172.28.80.50:3050/auth/oidc/callback`
+   (it must equal the Hub's redirect URI character for character), then
    `cd /opt/pct && docker compose -f compose.yml up -d --force-recreate api`. A user arriving through the
    Hub gets the viewer role and **no data**: grant scope, department and role on the User Access page.
 

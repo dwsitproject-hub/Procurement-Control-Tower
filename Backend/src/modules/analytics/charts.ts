@@ -111,9 +111,11 @@ export const CHART_META: ChartMeta[] = [
       + 'last step ends is what the next month brings forward.',
       'Brought forward is a STOCK, not a flow: a requisition waiting three months '
       + 'is counted in all three, so those bars must not be added up.',
-      'Deleted requisitions are left out of every figure, so nothing is shown as '
-      + 'cancelled. Under a Year filter only requisitions raised that year are '
-      + 'counted, so the first month brings forward nothing from the year before.',
+      'Deleted requisitions are left out of every figure. A requisition whose purchase '
+      + 'order was deleted (status PO-Deleted) leaves the stock as Cancelled, in the month '
+      + 'it was raised - SAP gives no deletion date. Under a Year filter only requisitions '
+      + 'raised that year are counted, so the first month brings forward nothing from the '
+      + 'year before.',
     ],
   },
   {

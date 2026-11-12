@@ -496,6 +496,24 @@ export function checkMetrics(m: TransformMetrics, rules: Record<string, unknown>
     });
   }
 
+  // A requisition follows its orders out (12 Nov 2026) - said in numbers, so
+  // a PR that disappeared or turned PO-Deleted can be accounted for.
+  if ((m.prItemsFollowedOrdersOut ?? 0) > 0 || (m.prItemsPoDeleted ?? 0) > 0) {
+    out.push({
+      ruleId: 'V-C02',
+      severity: 'INFO',
+      feed: 'pr',
+      message: `${m.prItemsFollowedOrdersOut ?? 0} PR item(s) were excluded because every order line raised from them `
+        + `was excluded (e.g. an intercompany vendor), and ${m.prItemsPoDeleted ?? 0} PR item(s) whose only order lines `
+        + 'were deleted are marked PO-Deleted and kept out of every figure (Detail Table: Include deleted). '
+        + 'Neither is shown as outstanding.',
+      affectedRows: (m.prItemsFollowedOrdersOut ?? 0) + (m.prItemsPoDeleted ?? 0),
+      measured: { followedOrdersOut: m.prItemsFollowedOrdersOut ?? 0, poDeleted: m.prItemsPoDeleted ?? 0 },
+      disablesKpis: [],
+      drillPredicate: null,
+    });
+  }
+
   out.push({
     ruleId: 'V-B08',
     severity: 'INFO',

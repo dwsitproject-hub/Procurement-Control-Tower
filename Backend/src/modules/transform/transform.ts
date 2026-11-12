@@ -108,6 +108,10 @@ export interface TransformMetrics {
   unratedCurrencies: string[];
   excludedPoLines: number;
   excludedPrItems: number;
+  /** PR items excluded because every one of their order lines was (12 Nov 2026). */
+  prItemsFollowedOrdersOut: number;
+  /** PR items whose only order lines were deleted: status PO-Deleted, flagged deleted. */
+  prItemsPoDeleted: number;
   /** Rows dropped because their key repeated in the export; the first was kept. */
   duplicatePrItems: number;
   duplicatePoLines: number;
@@ -487,6 +491,48 @@ export async function runTransform(
     return null;
   };
 
+  /**
+   * A requisition follows its orders out (12 Nov 2026).
+   *
+   * The linkage below is built from SURVIVING order lines only, so a deleted
+   * or excluded order cannot make its requisition look ordered. The other half
+   * was missing: a requisition whose EVERY order line had been removed was left
+   * with no order at all and derived "PR Approved-No PO" - outstanding - though
+   * it had been ordered. On staging that put 288 items behind intercompany
+   * orders (vendors LN2... and IN2..., e.g. PO 1602001285, 1602001218, which PCT cannot find
+   * because they are excluded) and 146 behind deleted order lines on the open
+   * list.
+   *
+   * So, per requisition item, over its order lines in this upload:
+   *   any line survives           -> nothing changes, its live orders decide;
+   *   none survives, and at least one was excluded for a reason OTHER than
+   *     deletion (intercompany vendor, the order's own doc type / group / org,
+   *     a held order)           -> the requisition is excluded too, as its
+   *                                 order was ("orders interco_vendor=...");
+   *   none survives, every one deleted
+   *                              -> status PO-Deleted, flagged deleted: the rule
+   *                                 of 7 Oct 2026 keeps anything "Deleted" out of
+   *                                 every figure, and the Detail Table still
+   *                                 shows it under "Include deleted".
+   * Lines excluded only BECAUSE of this requisition ("requisition ...") are not
+   * counted - that requisition is already excluded.
+   */
+  const orderFate = new Map<string, { live: number; deleted: number; excludedWhy: string | null }>();
+  for (const r of poRows) {
+    const prNo = s(r.payload.prNo);
+    const prItem = i(r.payload.prItem);
+    if (prNo === null || prItem === null || s(r.payload.poNo) === null) continue;
+    const k = `${prNo}|${prItem}`;
+    const f = orderFate.get(k) ?? { live: 0, deleted: 0, excludedWhy: null };
+    const why = poExclusionOf(r.payload);
+    if (why === null) f.live += 1;
+    else if (why === 'deleted') f.deleted += 1;
+    else if (!why.startsWith('requisition ')) f.excludedWhy = f.excludedWhy ?? why;
+    orderFate.set(k, f);
+  }
+  let prItemsFollowedOrdersOut = 0;
+  let prItemsPoDeleted = 0;
+
   // ── linkage (PO side authoritative), over the order lines that survive ──
   const poLinkRefs: PoLinkRef[] = poRows
     .filter((r) => poExclusionOf(r.payload) === null)
@@ -822,10 +868,24 @@ export async function runTransform(
       excludedDocRows.push(['pr', prNo, prItem, prExclusion]);
       continue;
     }
+    // Its orders were all excluded: the requisition goes with them (above).
+    const fate = orderFate.get(key);
+    if (fate !== undefined && fate.live === 0 && fate.excludedWhy !== null) {
+      const why = `orders ${fate.excludedWhy}`;
+      excludedPrItems += 1;
+      prItemsFollowedOrdersOut += 1;
+      excludedPrKeys.add(key);
+      excludedPrNos.add(prNo);
+      excludedDocRows.push(['pr', prNo, prItem, why]);
+      continue;
+    }
+    // Its orders were all deleted: PO-Deleted, and out of every figure.
+    const ordersDeleted = fate !== undefined && fate.live === 0 && fate.deleted > 0;
+    if (ordersDeleted) prItemsPoDeleted += 1;
     keptPrNos.add(prNo);
 
     const appr = derivePrApproval(releaseByPrItem.get(key) ?? []);
-    const deleted = (s(p.deletionIndicator) ?? '').toLowerCase() === 'true';
+    const deleted = (s(p.deletionIndicator) ?? '').toLowerCase() === 'true' || ordersDeleted;
     const totalValue = n(p.totalValueIdr);
     const materialCode = s(p.materialCode);
     const wbsElement = s(p.wbsElement);
@@ -840,10 +900,12 @@ export async function runTransform(
     const poCount = poLineCountByPrItem.get(key) ?? 0;
     const st = rowStatus(
       {
-        prDeleted: deleted,
-        hasPo: poCount > 0,
+        // PR-Deleted only for the requisition's OWN deletion; a requisition
+        // whose orders were deleted reads PO-Deleted.
+        prDeleted: deleted && !ordersDeleted,
+        hasPo: poCount > 0 || ordersDeleted,
         prFullyReleased: appr.fullyReleased,
-        poReleaseState: null,
+        poReleaseState: ordersDeleted ? 'deleted' : null,
         poIncomplete: false,
         orderedQty: null,
         netReceiptQty: null,
@@ -1343,6 +1405,8 @@ export async function runTransform(
     unratedCurrencies: [...unrated],
     excludedPoLines,
     excludedPrItems,
+    prItemsFollowedOrdersOut,
+    prItemsPoDeleted,
     excludedPrReleaseRows: excludedPrRelRows,
     excludedPoReleaseRows: excludedPoRelRows,
     invoiceDatedFxLines: invoiceDatedLines,

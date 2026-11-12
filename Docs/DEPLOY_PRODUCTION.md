@@ -15,8 +15,8 @@ reads `<` as a redirect. Values to edit are shown as `FILL_...` and edited befor
 
 | | Production |
 |---|---|
-| Address | **http://pct.kpndomain.com** (HTTP for now — see §12 *Going to HTTPS*) |
-| FE server | **172.28.80.50** — container `pct-web`, published on **127.0.0.1:3050**, reached through the host's nginx on :80 |
+| Address | **http://172.28.80.50:3050** until the domain is ready, then **http://pct.kpndomain.com** (§7b). HTTP for now — see §12 |
+| FE server | **172.28.80.50** — container `pct-web`, published on the private IP **172.28.80.50:3050**; later also reached through the host's nginx on :80 |
 | BE server | **172.28.80.51** — containers `pct-api` (published on **172.28.80.51:4100**) and `pct-redis` (not published) |
 | Database | ApsaraDB RDS for PostgreSQL **pgm-d9jn3khh0b3907w4.pgsql.ap-southeast-5.rds.aliyuncs.com:5432**, database `pct`, account `pct` |
 | SAP exports | Synology share `APPs/PCT` → BE host `/mnt/synology-apps/PCT` (existing share mount, §5a) → container `/mnt/pct-nas` |
@@ -31,7 +31,7 @@ From `docker ps` on 12 Nov 2026 — host services that Docker does not show are 
 
 | Server | Already published | PCT takes |
 |---|---|---|
-| FE 172.28.80.50 | 2001, 3001, 3002, 3020, 3040, 3042, 3070, 3080, 3100, 3160, 8000, 8080, 8081, 8090, 8443 (+ the host nginx on 80) | **3050**, on 127.0.0.1 only — the same port as staging |
+| FE 172.28.80.50 | 2001, 3001, 3002, 3010, 3020, 3040, 3042, 3070, 3080, 3081, 3100, 3160, 8000, 8080, 8081, 8090, 8443, 9999 (+ the host nginx on 80 and 443) | **3050**, on the private IP 172.28.80.50 only — the same port as staging. Confirmed free by the preflight, 12 Nov 2026 |
 | BE 172.28.80.51 | 3000, 3003, 4000, 4001, 4160, 5000, 5001, 5003, 5010, 5050, 5070, 5433, 5434, 8001, 8091, 13000 | **4100**, on 172.28.80.51 only — the same port as staging |
 
 PCT's Redis is never published (the API reaches it on the private Docker network), so it cannot clash with
@@ -64,13 +64,14 @@ None of these can be done from the servers. Send them together; the guide stops 
 
 | # | Who | What | Needed at |
 |---|---|---|---|
-| 1 | Infra (DNS) | A record **pct.kpndomain.com → 172.28.80.50** on the internal resolver | §7 |
+| 1 | Infra (DNS) | A record **pct.kpndomain.com → 172.28.80.50** on the internal resolver — *requested; until then PCT is used by IP* | §7b |
+| 1b | Infra (network) | **Users' office / VPN networks → 172.28.80.50 TCP 3050** (access by IP) | §7 |
 | 2 | Infra (network) | **172.28.80.50 → 172.28.80.51 TCP 4100** (FE nginx to API) | §7 |
 | 3 | Infra (network) | **172.28.80.51 → 172.30.1.94 TCP 445** (BE to the NAS) | §5 |
 | 4 | Infra (network) | **172.28.80.51 → outbound 443** to `kpn.coupahost.com`, `dwshub.kpndomain.com`, the Data Hub; **465** to `mail.energi-up.com`; **22** to `github.com` (both servers) | §2, §6 |
 | 5 | DBA / RDS console | Add **172.28.80.51** to the RDS instance's **whitelist**; create account **`pct`** (standard) and database **`pct`** owned by it | §3 |
 | 6 | NAS owner | Folder **`APPs/PCT`** (uppercase, at the share ROOT — not under `dev`), and an SMB account with **read/write on that folder only** | §5 |
-| 7 | Hub admin (optional) | Register PCT in the **production** Hub: redirect URI `http://pct.kpndomain.com/auth/oidc/callback`, public client / PKCE → `client_id`; and the SDK key (`dwsk_…`) | §8 |
+| 7 | Hub admin (optional) | Register PCT in the **production** Hub: redirect URI `APP_BASE_URL/auth/oidc/callback` (best registered once the domain exists, §7b), public client / PKCE → `client_id`; and the SDK key (`dwsk_…`) | §8 |
 | 8 | Coupa admin | Production OAuth client (client id + secret) for `https://kpn.coupahost.com` | §6 |
 | 9 | Data Hub integrator (optional) | A PCT application with `exchange_rate` on its allowlist → key pair | §6 |
 | 10 | You | **`main` up to date**: a pull request merging `sit2` into `main`, reviewed and merged | §2 |
@@ -330,12 +331,31 @@ cp src/deploy/production/nginx/production.conf production.conf
 printf 'PCT_SUBNET=FILL_FROM_PREFLIGHT\n' > .env
 nano .env
 docker compose -f compose.yml up -d
-curl -s -o /dev/null -w 'container %{http_code}\n' http://127.0.0.1:3050/
+curl -s -o /dev/null -w 'container %{http_code}\n' http://172.28.80.50:3050/
 ```
 
-`.env` gets the **FE** preflight's subnet. `container 200` means the SPA is served.
+`.env` gets the **FE** preflight's subnet (`172.16.250.0/24` on 12 Nov 2026). Then, still on the FE server:
 
-**The host's front proxy.** Port 80 belongs to the nginx shared by every app on this server — never stop
+```bash
+curl -s -o /dev/null -w 'root %{http_code}\n' http://172.28.80.50:3050/
+curl -s -o /dev/null -w 'deep link %{http_code}\n' http://172.28.80.50:3050/po-analysis
+curl -s -o /dev/null -w 'api %{http_code}\n' http://172.28.80.50:3050/api/v1/kpi
+```
+
+Expect `200`, `200`, `401` - the SPA is served and the API answers through it (the 401 is correct: no
+session). Open **http://172.28.80.50:3050** in a browser on the office network or VPN; if it times out
+there while the server's own `curl` works, it is request #1b (the security group).
+
+**Until the domain is ready, PCT is used by IP.** Nothing is added to the host nginx yet, and
+`APP_BASE_URL` in `/opt/pct/production.env` stays `http://172.28.80.50:3050` (the cookie and any absolute
+link follow it).
+
+### 7b. When pct.kpndomain.com is ready
+
+Once the A record resolves to 172.28.80.50 for the users, add the hostname in front of the same container -
+no container is rebuilt or rebound.
+
+**PuTTY on 172.28.80.50 (FE).** Port 80 belongs to the nginx shared by every app on this server — never stop
 it, never take its port. See what it already serves, then add PCT as one more vhost:
 
 ```bash
@@ -347,25 +367,31 @@ nginx -t && systemctl reload nginx
 
 **`nginx -t` before the reload is not optional**: a syntax error in a shared nginx takes every site on the
 host down. If this host keeps vhosts in `sites-available` + `sites-enabled` instead of `conf.d`, put the
-file there the same way the others are. If the preflight said port 80 is a **container**, add the server
-block to that container's configuration instead and reload that container.
+file there the same way the others are.
 
-Verify (from a PC on the network, once DNS is in):
+**PuTTY on 172.28.80.51 (BE)** — tell the API its new address:
+
+```bash
+cd /opt/pct && sed -i 's|^APP_BASE_URL=.*|APP_BASE_URL=http://pct.kpndomain.com|' production.env && grep '^APP_BASE_URL' production.env
+docker compose -f compose.yml up -d --force-recreate api
+```
+
+Verify from a PC on the network:
 
 ```bash
 curl -s -o /dev/null -w 'root %{http_code}\n' http://pct.kpndomain.com/
-curl -s -o /dev/null -w 'deep link %{http_code}\n' http://pct.kpndomain.com/po-analysis
 curl -s -o /dev/null -w 'api %{http_code}\n' http://pct.kpndomain.com/api/v1/kpi
 ```
 
-Expect `200`, `200`, `401`. The nginx welcome page instead of PCT means the request reached the host nginx
-but not the vhost: check `server_name` and that `nginx -T` lists the file.
+Expect `200`, `401`. Everyone signs in once more (cookies were issued for the IP address). If SSO was
+registered by IP, change its redirect URI in the Hub and `OIDC_REDIRECT_URI` to the hostname. The IP address
+keeps working too.
 
 ---
 
 ## 8. In the application (browser, as the first admin)
 
-Sign in at **http://pct.kpndomain.com** with the account from §6.
+Sign in at **http://172.28.80.50:3050** (or the hostname, after §7b) with the account from §6.
 
 1. **Admin → Data exclusions** — production starts with none. Staging's are: purchasing groups **TG4,
    TL4**; purchasing orgs **LGL1, TL04, TSE1**; intercompany vendor prefixes **LN2, IN2**. Confirm with the
@@ -379,8 +405,10 @@ Sign in at **http://pct.kpndomain.com** with the account from §6.
 4. **Admin → Notifications** — recipients, both SAP toggles on, **Send test email** must report `sent`.
 5. **Admin → Coupa Sync** — *Sync now*: every object `ok`; then enable the schedule.
 6. **Admin → FX rates** — Data Hub box: *Sync now* and check the *Fields read* line if configured.
-7. **SSO (when request #7 is done)** — on the BE server, uncomment the three `OIDC_*` lines in
-   `/opt/pct/production.env`, set `OIDC_CLIENT_ID`, then
+7. **SSO (when request #7 is done — best after §7b, so the Hub redirect URI is registered once, with the
+   hostname)** — on the BE server, uncomment the three `OIDC_*` lines in
+   `/opt/pct/production.env`, set `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URI` to `APP_BASE_URL` +
+   `/auth/oidc/callback`, then
    `cd /opt/pct && docker compose -f compose.yml up -d --force-recreate api`. A user arriving through the
    Hub gets the viewer role and **no data**: grant scope, department and role on the User Access page.
 
@@ -399,7 +427,7 @@ in SAP Data Sync — or wait for the first scheduled slot. Expect `published`, t
 | Open Items | stage cards and the backlog table populated |
 | Detail Table | search a known PO; Excel export downloads |
 | Reload any page | still signed in (cookie works over the hostname) |
-| Card = drill, everywhere (workstation, optional) | `npx tsx Backend/src/cli/sweep.ts --base http://pct.kpndomain.com --email` + admin e-mail + `--password` + its password → `mismatches=0 errors=0`. The password lands in shell history: clear it afterwards, or use a temporary account |
+| Card = drill, everywhere (workstation, optional) | `npx tsx Backend/src/cli/sweep.ts --base http://172.28.80.50:3050 --email` + admin e-mail + `--password` + its password → `mismatches=0 errors=0`. The password lands in shell history: clear it afterwards, or use a temporary account |
 
 ---
 

@@ -28,10 +28,10 @@ Staging's runbook `Docs/DEPLOY_STAGING.md` is the record of what went wrong befo
 | FE server private IP | 172.28.80.50 |
 | BE server private IP | 172.28.80.51 |
 | ApsaraDB host | pgm-d9jn3khh0b3907w4.pgsql.ap-southeast-5.rds.aliyuncs.com (db `pct`, account `pct`) |
-| Hostname / TLS | pct.kpndomain.com, **HTTP** (so `NODE_ENV=staging`; see guide §12) |
+| Hostname / TLS | http://172.28.80.50:3050 until DNS for pct.kpndomain.com is ready (guide §7b), **HTTP** (so `NODE_ENV=staging`; see guide §12) |
 | Branch | `main` (released by PR sit2 -> main) |
 | NAS | 172.30.1.94, share `APPs`, folder `PCT` at the share ROOT, host mount `/mnt/pct-nas` |
-| Ports | FE 127.0.0.1:3050, BE 172.28.80.51:4100 |
+| Ports | FE 172.28.80.50:3050 (host vhost proxies to it once the domain exists), BE 172.28.80.51:4100 |
 | Hub | https://dwshub.kpndomain.com (production) |
 
 **Port lists**: ask for `docker ps` from BOTH servers (screenshots are fine) and, better, the preflight

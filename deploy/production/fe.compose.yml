@@ -1,7 +1,9 @@
 # Production FE server (172.28.80.50). Serves the SPA and reverse-proxies /api
 # and /auth to the BE server - single origin, so the session cookie stays
-# first-party. Published on 127.0.0.1:3050 only; the host's own front proxy
-# (nginx on :80) forwards http://pct.kpndomain.com to it.
+# first-party. Published on the server's PRIVATE IP, 172.28.80.50:3050: users
+# open http://172.28.80.50:3050 until pct.kpndomain.com is ready, and then the
+# host's nginx vhost forwards the hostname to this same address - so the
+# domain switch changes no container (Docs/DEPLOY_PRODUCTION.md 7b).
 # Guide: Docs/DEPLOY_PRODUCTION.md.
 #
 # Required next to this file (/opt/pct):
@@ -18,8 +20,8 @@ services:
       # Overrides the baked-in local config: upstream is the BE server.
       - ./production.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      # Loopback by default: only the host's front proxy should reach it.
-      - "${PCT_WEB_BIND:-127.0.0.1:3050}:80"
+      # The private IP only - never 0.0.0.0 and never 80 (the host nginx's).
+      - "${PCT_WEB_BIND:-172.28.80.50:3050}:80"
     networks: [pct]
 
 networks:

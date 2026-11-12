@@ -86,20 +86,33 @@ for tok in (os.environ["SUBNETS"] + " " + os.environ["ROUTES"] + " " + os.enviro
 # Never the servers' LAN (172.28/16), nor 172.29-172.31 (the NAS sits in 172.30).
 fence = [ipaddress.ip_network(x) for x in ("172.28.0.0/16", "172.29.0.0/16", "172.30.0.0/16", "172.31.0.0/16")]
 fence.append(ipaddress.ip_network(os.environ["NAS_IP"] + "/16", strict=False))
-for second in range(27, 16, -1):          # 172.27 down to 172.17, highest first
+def candidates():
+    # Docker's usual pool first (172.17-172.27), then 172.16.x, then 192.168.32.x
+    # and up. On the production hosts (12 Nov 2026) other apps already hold
+    # every 172.17-172.31 /16 and 192.168.0-31, so the later ranges are the
+    # only free ones there. Any of them must also be unused by the company's
+    # office / VPN networks - the host would route replies to those users into
+    # the bridge - which only infra can confirm.
+    for second in range(27, 16, -1):
+        for third in range(250, 0, -1):
+            yield f"172.{second}.{third}.0/24"
     for third in range(250, 0, -1):
-        cand = ipaddress.ip_network(f"172.{second}.{third}.0/24")
-        if any(cand.overlaps(t) for t in taken + fence):
-            continue
+        yield f"172.16.{third}.0/24"
+    for third in range(250, 31, -1):
+        yield f"192.168.{third}.0/24"
+for c in candidates():
+    cand = ipaddress.ip_network(c)
+    if not any(cand.overlaps(t) for t in taken + fence):
         print(cand)
         raise SystemExit
 print("NONE")
 PY
 )
 if [ "$SUGGEST" = "NONE" ]; then
-  say FAIL "no free /24 found in 172.17-172.27 - choose PCT_SUBNET by hand"
+  say FAIL "no free /24 found in 172.16-172.27 or 192.168.32-250 - choose PCT_SUBNET by hand"
 else
   say OK "suggested PCT_SUBNET=$SUGGEST  (overlaps no Docker network, route, local address, the LAN or the NAS range)"
+  case "$SUGGEST" in 172.1[7-9].*|172.2[0-7].*) ;; *) say WARN "$SUGGEST is outside Docker's usual pool - confirm with infra that the office / VPN networks do not use it";; esac
 fi
 if echo "$SUBNETS" | grep -Eq ' 172\.30\.'; then
   say WARN "a Docker network ALREADY holds a 172.30.x range - the NAS ($NAS_IP) may be shadowed for every app on this host (DEPLOY_STAGING.md 10)"

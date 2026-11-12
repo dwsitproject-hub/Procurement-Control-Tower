@@ -457,6 +457,36 @@ async function upsertSsoUser(sub: string, email: string, name: string): Promise<
     return existing.id;
   }
 
+  // An account the administrator already made for this address (set-password
+  // --create-admin, or the User Access page) and that has no Hub identity yet:
+  // link it rather than INSERT, which would hit the unique email and fail the
+  // sign-in with a 500. The account keeps its roles, scope and password - one
+  // person, two routes in. One already linked to ANOTHER subject is never taken
+  // over; that stays a refusal. is_active is left as it is (loadPrincipal checks).
+  if (email) {
+    const linked = await queryOne<{ id: string }>(
+      `UPDATE app.app_user SET sso_subject = $1, display_name = $3, last_login_at = now()
+        WHERE email = $2 AND sso_subject IS NULL RETURNING id`,
+      [sub, email, name],
+    );
+    if (linked) {
+      await recordAudit({
+        action: 'auth.sso_linked', actorUserId: linked.id, actorEmail: email, outcome: 'success',
+        detail: { reason: 'existing account with this email had no Hub identity' },
+      });
+      return linked.id;
+    }
+    const taken = await queryOne<{ id: string }>(
+      `SELECT id FROM app.app_user WHERE email = $1`, [email],
+    );
+    if (taken) {
+      throw new AuthError(
+        'invalid-credentials',
+        'this email belongs to an account linked to a different Hub identity - ask an administrator',
+      );
+    }
+  }
+
   const ins = await queryOne<{ id: string }>(
     `INSERT INTO app.app_user (sso_subject, email, display_name, auth_method, is_active, last_login_at)
      VALUES ($1, $2, $3, 'sso', true, now()) RETURNING id`,

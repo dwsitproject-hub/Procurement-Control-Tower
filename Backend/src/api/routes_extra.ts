@@ -6,6 +6,8 @@
  * 9457, and nothing user-supplied reaches SQL as text.
  */
 
+import { clearResultCache, memo } from '../modules/analytics/cache.js';
+import { warmDefaultView } from '../modules/analytics/warm.js';
 import { qint } from './guards.js';
 import type { Router } from 'express';
 import { ROLE_RANK, PAGE_ACCESS, PAGE_KEYS } from '@pct/contracts';
@@ -173,6 +175,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       if (e instanceof EditError) throw new HttpProblem(400, 'invalid-edit', e.message);
       throw e;
     }
+    // Label edits show at once and mart inputs feed the live views: cached
+    // results of this version must not outlive the edit.
+    clearResultCache();
+    void warmDefaultView().catch(() => undefined);
     await recordAudit({
       action: `master.${verb}`, actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
       outcome: 'success', detail: { relation, values }, ip: req.ip,
@@ -234,15 +240,14 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/entity/vendors', role('analyst', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const out = await vendorList(
-      v.id,
-      ctx.scope,
+    const vlArgs = [
       String(req.query.q ?? ''),
       qint(req.query.limit, 50, 1, 200),
       qint(req.query.offset, 0, 0, 1_000_000_000),
       parseGlobalFilter(req.query as Record<string, unknown>),
       sortOf(req.query as Record<string, unknown>),
-    );
+    ] as const;
+    const out = await memo(v.id, ['vendors', ctx.scope, vlArgs], () => vendorList(v.id, ctx.scope, ...vlArgs));
     res.json({ datasetVersionId: v.id, asOfDate: v.asOfDate, ...out });
   }));
 
@@ -871,14 +876,16 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/entity/top-vendors-spend', role('viewer', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const out = await vendorList(v.id, ctx.scope, '', qint(req.query.limit, 10, 1, 50));
+    const tvLimit = qint(req.query.limit, 10, 1, 50);
+    const out = await memo(v.id, ['topvendors', ctx.scope, tvLimit], () => vendorList(v.id, ctx.scope, '', tvLimit));
     res.json({ datasetVersionId: v.id, totalVendors: out.totalVendors, rows: out.rows });
   }));
 
   r.get('/api/v1/entity/top-materials-spend', role('viewer', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const out = await topMaterialsSpend(v.id, ctx.scope, qint(req.query.limit, 10, 1, 500));
+    const tmLimit = qint(req.query.limit, 10, 1, 500);
+    const out = await memo(v.id, ['topmaterials', ctx.scope, tmLimit], () => topMaterialsSpend(v.id, ctx.scope, tmLimit));
     res.json({ datasetVersionId: v.id, ...out });
   }));
 
@@ -920,16 +927,15 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     requireScope(ctx);
     const v = await version();
     const gf = parseGlobalFilter(req.query as Record<string, unknown>);
-    const out = await materialGroupPage(
-      v.id,
-      ctx.scope,
+    const mgArgs = [
       req.query.category === undefined ? null : String(req.query.category),
       String(req.query.q ?? ''),
       req.query.materialGroup === undefined ? null : String(req.query.materialGroup),
       qint(req.query.limit, 150, 1, 500),
       qint(req.query.offset, 0, 0, 1_000_000_000),
       gf,
-    );
+    ] as const;
+    const out = await memo(v.id, ['materialgroups', ctx.scope, mgArgs], () => materialGroupPage(v.id, ctx.scope, ...mgArgs));
     // v1's mgx drill: each category's counts open as rows (G3.4).
     const fp = sessionFingerprint(ctx.sid);
     // The mgt summary counts PR items (v1's grain), so its drills do too.

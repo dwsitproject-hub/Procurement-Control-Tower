@@ -6,6 +6,7 @@
  * to every request is harder to diagnose than one that never came up.
  */
 
+import { warmDefaultView } from './modules/analytics/warm.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -114,6 +115,12 @@ async function main(): Promise<void> {
 `,
     );
   }
+
+  // Precompute the default view of the version being served, so the first
+  // visitor after a restart does not pay for every live query.
+  setTimeout(() => {
+    void warmDefaultView((m) => process.stdout.write(`${m}\n`)).catch(() => undefined);
+  }, 5_000).unref();
 
   const server = app.listen(env.PORT, () => {
     process.stdout.write(

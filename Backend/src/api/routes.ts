@@ -6,6 +6,9 @@
  * than silently public.
  */
 
+import { clearResultCache, memo } from '../modules/analytics/cache.js';
+import { warmDefaultView } from '../modules/analytics/warm.js';
+
 import { storageHealth } from '../config/storage.js';
 import { qint } from './guards.js';
 import express, { type NextFunction, type Request, type Response, type Router } from 'express';
@@ -63,6 +66,12 @@ import {
   computeLiveChart, computeLiveChartSeries, computeLiveKpis, globalFilterOptions, liveChartAvailable,
 } from '../modules/analytics/live.js';
 import { mountExtraRoutes } from './routes_extra.js';
+
+/** Drop cached results of the current version and re-warm the default view in the background. */
+function refreshResultCache(): void {
+  clearResultCache();
+  void warmDefaultView().catch(() => undefined);
+}
 
 const env = loadEnv();
 
@@ -619,7 +628,7 @@ export function buildRouter(): Router {
       [id],
     );
     if (!v) throw new HttpProblem(404, 'not-found', 'Dataset version not found');
-    res.json({ datasetVersionId: id, batchId: v.batch_id, findings: await getFindings(v.batch_id) });
+    res.json({ datasetVersionId: id, batchId: v.batch_id, findings: await memo(id, ['findings', v.batch_id], () => getFindings(v.batch_id)) });
   }));
 
   // ── KPIs ──
@@ -628,7 +637,7 @@ export function buildRouter(): Router {
     requireScope(ctx);
     const v = await currentVersion();
     if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
-    res.json({ datasetVersionId: v.id, ...(await globalFilterOptions(v.id)) });
+    res.json({ datasetVersionId: v.id, ...(await memo(v.id, ['filters'], () => globalFilterOptions(v.id))) });
   }));
 
   r.get('/api/v1/kpi', role('viewer', async (req, res, ctx) => {
@@ -661,7 +670,7 @@ export function buildRouter(): Router {
     // live path cannot affect the default dashboard.
     if (!isEmptyFilter(gf)) {
       const fpLive = sessionFingerprint(ctx.sid);
-      const liveAll = await computeLiveKpis(v.id, gf);
+      const liveAll = await memo(v.id, ['kpi', gf], () => computeLiveKpis(v.id, gf));
       const live = wanted ? liveAll.filter((k) => wanted.has(k.kpiId)) : liveAll;
       // Membership is tested against EVERY live KPI, not just the requested
       // ones: a KPI that recomputes live must not be listed as unavailable
@@ -791,7 +800,7 @@ export function buildRouter(): Router {
     if (!isEmptyFilter(gf) && liveChartAvailable(meta.chartId)) {
       // Every series, not just the first: computeLiveChart used to return one,
       // so a filtered multi-series panel silently lost the rest.
-      const liveSeries = await computeLiveChartSeries(v.id, meta.chartId, gf);
+      const liveSeries = await memo(v.id, ['chart', meta.chartId, gf], () => computeLiveChartSeries(v.id, meta.chartId, gf));
       if (liveSeries) {
         const fpLive = sessionFingerprint(ctx.sid);
         // Buckets are the UNION across series, ordered by the ordinal the specs
@@ -1294,6 +1303,9 @@ export function buildRouter(): Router {
       // One transaction: a half-rebuilt mart would leave pages with some
       // figures and not others, and no way to tell which.
       await client.query('COMMIT');
+      // Mart inputs (HO flag, plant area...) are read by the live views too:
+      // the cached results of this version are stale now.
+      refreshResultCache();
 
       await recordAudit({
         action: 'admin.mart.rebuild', actorUserId: ctx.principal.userId,
@@ -1348,7 +1360,7 @@ export function buildRouter(): Router {
     const gf = parseGlobalFilter(req.query as Record<string, unknown>);
     res.json({
       datasetVersionId: v.id,
-      ...(await execTilePeriods(v.id, v.asOfDate, ctx.scope, gf)),
+      ...(await memo(v.id, ['tiles', ctx.scope, gf], () => execTilePeriods(v.id, v.asOfDate, ctx.scope, gf))),
     });
   }));
 
@@ -1369,7 +1381,7 @@ export function buildRouter(): Router {
     try {
       res.json({
         datasetVersionId: v.id,
-        ...(await openItemsSummary(v.id, v.asOfDate, ctx.scope, gf, section)),
+        ...(await memo(v.id, ['openitems', ctx.scope, gf, section], () => openItemsSummary(v.id, v.asOfDate, ctx.scope, gf, section))),
       });
     } catch (e) {
       throw new HttpProblem(

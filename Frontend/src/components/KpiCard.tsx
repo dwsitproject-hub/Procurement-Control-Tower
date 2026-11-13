@@ -12,7 +12,10 @@ import { Lbl } from '../lib/labels';
  */
 // v1's card palette (each .kc carries a --c accent). Severity still wins:
 // a critical figure is red and a warning amber regardless of the decoration.
-const CARD_PALETTE = ['#1F3864', '#2E75B6', '#0D9488', '#7C3AED', '#ED7D31', '#4CAF50'];
+// The first slot is the theme's heading colour, not the literal navy: the same
+// #1F3864 in light mode, but readable in dark mode, where navy is the card
+// background family and the value disappeared (functional test FT-40).
+const CARD_PALETTE = ['var(--heading)', '#2E75B6', '#0D9488', '#7C3AED', '#ED7D31', '#4CAF50'];
 
 function accentFor(kpi: Kpi): string {
   if (kpi.severity === 'critical') return '#C0392B';

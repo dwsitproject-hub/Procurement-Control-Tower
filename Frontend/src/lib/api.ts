@@ -12,12 +12,16 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, background = false): Promise<T> {
+  const headers: Record<string, string> = body ? { 'content-type': 'application/json' } : {};
+  // A poll the user did not ask for: the server reads it but does not count it
+  // as activity, so an unattended tab still reaches the idle timeout.
+  if (background) headers['x-pct-background'] = '1';
   const res = await fetch(path, {
     method,
     // Single origin: the session cookie is first-party.
     credentials: 'same-origin',
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -35,6 +39,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   get: <T>(p: string) => request<T>('GET', p),
+  /** A GET made by a timer, not by the user (see request()). */
+  poll: <T>(p: string) => request<T>('GET', p, undefined, true),
   post: <T>(p: string, b?: unknown) => request<T>('POST', p, b),
   put: <T>(p: string, b?: unknown) => request<T>('PUT', p, b),
   patch: <T>(p: string, b?: unknown) => request<T>('PATCH', p, b),

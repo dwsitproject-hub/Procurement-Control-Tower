@@ -56,14 +56,17 @@ export function LabelProvider({
     setLabels(s.labels);
   }, []);
 
-  const load = useCallback(() => {
-    api.get<LabelSet>('/api/v1/ui-labels').then(take).catch(() => undefined);
+  const load = useCallback((background = false) => {
+    (background ? api.poll<LabelSet>('/api/v1/ui-labels') : api.get<LabelSet>('/api/v1/ui-labels'))
+      .then(take).catch(() => undefined);
   }, [take]);
 
   useEffect(() => {
     load();
+    // Timer-driven: marked as background so it cannot keep the session alive
+    // (it used to reset the idle timeout every 30 s - architecture review).
     const t = window.setInterval(() => {
-      if (document.visibilityState === 'visible') load();
+      if (document.visibilityState === 'visible') load(true);
     }, POLL_MS);
     const onFocus = () => load();
     window.addEventListener('focus', onFocus);

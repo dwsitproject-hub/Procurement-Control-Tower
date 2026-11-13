@@ -189,9 +189,9 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
                     server's whitelist (entity.ts VENDOR_SORT). */}
                 {([
                   ['vendorName', 'Vendor', false], ['vendorCode', 'Code', false], ['poEmail', 'PO Email', false],
-                  ['poCount', 'POs', true], ['lineCount', 'Lines', true], ['spendUsd', 'Spend USD', true],
+                  ['poCount', 'POs', true], ['lineCount', 'Lines', true], ['spendUsd', currency === 'IDR' ? 'Spend IDR' : 'Spend USD', true],
                   ['materials', 'Materials', true], ['areas', 'Areas', true], ['otdPct', 'OTD %', true],
-                  ['avgDaysLate', 'Avg late (d)', true], ['openExposureUsd', 'Open USD', true],
+                  ['avgDaysLate', 'Avg late (d)', true], ['openExposureUsd', currency === 'IDR' ? 'Open IDR' : 'Open USD', true],
                 ] as const).map(([key, label, right]) => (
                   <th key={key} style={right ? { textAlign: 'right' } : undefined}>
                     <SortButton label={label} colKey={key} sort={sort} onSort={setSort} />
@@ -242,7 +242,7 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
       <VendorOtdBars onOpenVendor={setOpen} />
     </div>
 
-    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} />}
+    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} filterQuery={filterQuery} />}
     {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} currency={currency} />}
     </>
   );
@@ -480,9 +480,11 @@ function SupplierContact({ code, supplier }: { code: string; supplier: any }) {
 }
 
 export function VendorModal({
-  code, onClose, onDrill, currency = 'USD',
+  code, onClose, onDrill, currency = 'USD', filterQuery = '',
 }: {
   code: string; onClose: () => void; onDrill: (t: string, l: string) => void;
+  /** The page's filter bar, so the popup's figures match the row it opened from. */
+  filterQuery?: string;
   /** Topbar display currency — every money cell below reads it. */
   currency?: 'USD' | 'IDR';
 }) {
@@ -490,10 +492,10 @@ export function VendorModal({
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    api.get<Record<string, any>>(`/api/v1/entity/vendor/${encodeURIComponent(code)}`)
+    api.get<Record<string, any>>(`/api/v1/entity/vendor/${encodeURIComponent(code)}${filterQuery ? `?${filterQuery}` : ''}`)
       .then(setD)
       .catch((e: Error) => setErr(e.message));
-  }, [code]);
+  }, [code, filterQuery]);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -560,7 +562,7 @@ export function VendorModal({
               <h4 className="ent-h"><Lbl>Materials supplied</Lbl> <span className="muted">(top {d.materials.length} of cap {d.caps.materials})</span></h4>
               <SimpleTable
                 prefKey="vendor_materials_layout"
-                head={['Material', 'Description', 'Lines', 'Qty', 'Spend USD', 'Last PO']}
+                head={['Material', 'Description', 'Lines', 'Qty', currency === 'IDR' ? 'Spend IDR' : 'Spend USD', 'Last PO']}
                 right={[false, false, true, true, true, false]}
                 rows={d.materials.map((m: any) => [
                   m.materialCode ?? '(service)', m.description, formatNumber(m.lines),

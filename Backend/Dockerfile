@@ -24,6 +24,22 @@ RUN npm run build -w @pct/rules \
  && npm run build -w @pct/contracts \
  && npm run build -w @pct/backend
 
+# ── production dependencies only ──
+# The build stage installs every workspace with dev tooling (vite, react,
+# typescript, vitest, esbuild ...) because it compiles. The runtime needs only
+# the API's own production dependencies, so they are installed separately here
+# (architecture review: the image shipped ~124 MB of node_modules it never used).
+FROM node:22-bookworm-slim AS proddeps
+WORKDIR /app
+RUN apt-get update  && apt-get install -y --no-install-recommends python3 make g++  && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+COPY vendor/ vendor/
+COPY packages/rules/package.json      packages/rules/
+COPY packages/contracts/package.json  packages/contracts/
+COPY Backend/package.json             Backend/
+COPY Frontend/package.json            Frontend/
+RUN npm ci --omit=dev --workspace=@pct/backend --workspace=@pct/rules --workspace=@pct/contracts --include-workspace-root
+
 # ── runtime ──
 FROM node:22-bookworm-slim AS runtime
 RUN groupadd -g 1001 pct && useradd -u 1001 -g 1001 -m pct
@@ -38,7 +54,7 @@ ARG BUILT_AT=
 ARG APP_VERSION=2.0.0
 ENV GIT_SHA=$GIT_SHA BUILT_AT=$BUILT_AT APP_VERSION=$APP_VERSION
 
-COPY --from=build --chown=1001:1001 /app/node_modules            ./node_modules
+COPY --from=proddeps --chown=1001:1001 /app/node_modules         ./node_modules
 # Node resolves module type from the nearest package.json. The workspace root has
 # no "type" field, so without this every dist/*.js is reparsed as ESM at a cost.
 RUN echo '{"name":"pct-runtime","private":true,"type":"module"}' > /app/package.json \

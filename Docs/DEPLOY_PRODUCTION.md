@@ -503,6 +503,34 @@ build, and `/api/v1/ready` reports `storage` and `session_store` as well as the 
 rates only — functional test FT-05). Audit entries written from now on use hash version 2; `/api/v1/audit/verify`
 reports the older entries as `legacyEntries`.
 
+### 10b. Release of 13 Nov 2026 (later the same day) — speed, image size, staging cleanup
+
+The usual §10 BE and FE updates. Nothing to copy by hand. What changes:
+
+- **Faster pages.** Computed charts, KPIs and summaries are cached per dataset version and pre-computed
+  after every publish and at start-up (the log shows `cache warm: version N, 61 views ready in … s`).
+  PO Analysis went from ~13 s to ~1.5 s locally on first load; Material Group from 3.6 s to 0.2 s.
+- **Smaller API image** (488 MB → 370 MB): the runtime holds only the API's production dependencies.
+- **Staging retention (migration 044).** After every publish, `core.prune_staging(14)` removes the staged
+  source rows of batches that never became a dataset version and are over 14 days old, and marks runs stuck
+  "in progress" for over a day as failed. Rows of every existing version are kept.
+
+**One-off: reclaim the space now (optional, BE server, a quiet moment).** The database copied from staging
+carries those orphan rows; the first publish after this release deletes them, or run it now. Deleting frees
+the space for reuse inside the database; `VACUUM FULL` returns it to ApsaraDB's disk but locks
+`staging.raw_row` while it rewrites it (27 s locally for 3.2 GB → 0.5 GB) — a pickup in that window waits.
+
+```bash
+export DBURL="$(grep '^DATABASE_URL=' /opt/pct/production.env | cut -d= -f2-)"
+docker run --rm -i -e DBURL postgres:18 sh -c 'psql "$DBURL"' <<'SQL'
+SELECT pg_size_pretty(pg_total_relation_size('staging.raw_row')) AS before;
+SELECT * FROM core.prune_staging(14);
+VACUUM (FULL, ANALYZE) staging.raw_row;
+SELECT pg_size_pretty(pg_total_relation_size('staging.raw_row')) AS after;
+SQL
+unset DBURL
+```
+
 ## 11. Rollback
 
 **On the affected server:**

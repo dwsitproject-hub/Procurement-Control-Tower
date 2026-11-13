@@ -26,6 +26,7 @@
  * The published version is still built atomically from what was accepted.
  */
 
+import { warmDefaultView } from '../analytics/warm.js';
 import type { BatchState, Feed } from '@pct/contracts';
 import { exec, insertMany, pool, query, queryOne, transaction } from '../../db/client.js';
 import { loadRuleSnapshot, type RuleSnapshot } from '../admin/rules.js';
@@ -675,6 +676,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       );
       await setState('PUBLISHED');
       await pruneOldVersions();
+      scheduleWarm();
       return {
         outcome: 'published', batchId,
         datasetVersionId: result.datasetVersionId, findings, rowSummary,
@@ -897,11 +899,20 @@ async function persistFindings(batchId: number, findings: readonly Finding[]): P
 /** Atomic: one transaction, one pointer row. */
 export async function publishVersion(versionId: number, userId: string | null): Promise<void> {
   await exec('SELECT core.publish_version($1, $2)', [versionId, userId]);
+  scheduleWarm();
+}
+
+/** Precompute the default view of the newly published version, in the background. */
+function scheduleWarm(): void {
+  void warmDefaultView((m) => process.stdout.write(`${m}\n`)).catch(() => undefined);
 }
 
 export async function pruneOldVersions(): Promise<number> {
   const keep = Number(process.env.DATASET_VERSIONS_RETAINED ?? 12);
   const r = await queryOne<{ n: number }>('SELECT core.prune_versions($1) AS n', [keep]);
+  // And the staged rows of batches that never became a version (migration 044):
+  // two weeks is enough to download a failed run's "rows set aside" workbook.
+  await queryOne('SELECT * FROM core.prune_staging(14)');
   return r?.n ?? 0;
 }
 

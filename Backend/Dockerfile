@@ -8,6 +8,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
+# SheetJS ships fixed releases only from its own CDN (npm's xlsx stopped at the
+# vulnerable 0.18.5), so the tarball is vendored: builds need no new egress.
+COPY vendor/ vendor/
 COPY packages/rules/package.json      packages/rules/
 COPY packages/contracts/package.json  packages/contracts/
 COPY Backend/package.json             Backend/
@@ -28,6 +31,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NODE_OPTIONS=--max-old-space-size=2048
+# Release metadata for /api/v1/health - production reported version
+# 2.0.0-local / gitSha dev, which makes "which build is running?" unanswerable.
+ARG GIT_SHA=dev
+ARG BUILT_AT=
+ARG APP_VERSION=2.0.0
+ENV GIT_SHA=$GIT_SHA BUILT_AT=$BUILT_AT APP_VERSION=$APP_VERSION
 
 COPY --from=build --chown=1001:1001 /app/node_modules            ./node_modules
 # Node resolves module type from the nearest package.json. The workspace root has

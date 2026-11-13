@@ -3,6 +3,9 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+# SheetJS ships fixed releases only from its own CDN (npm's xlsx stopped at the
+# vulnerable 0.18.5), so the tarball is vendored: builds need no new egress.
+COPY vendor/ vendor/
 COPY packages/rules/package.json      packages/rules/
 COPY packages/contracts/package.json  packages/contracts/
 COPY Backend/package.json             Backend/

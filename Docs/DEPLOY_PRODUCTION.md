@@ -254,7 +254,7 @@ the other apps' mounts must still be there, unchanged.
 **PuTTY on 172.28.80.51.** Build the API image from the checkout:
 
 ```bash
-cd /opt/pct/src && docker build -f Backend/Dockerfile -t pct-api:production .
+cd /opt/pct/src && docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) --build-arg BUILT_AT=$(date -u +%FT%TZ) -f Backend/Dockerfile -t pct-api:production .
 ```
 
 Lay out the runtime files:
@@ -459,7 +459,7 @@ in SAP Data Sync — or wait for the first scheduled slot. Expect `published`, t
    the previous image as `:prev`, and migrations run at start:
 
    ```bash
-   cd /opt/pct/src && git fetch origin && if [ -z "$(git diff --stat origin/main...HEAD)" ] && [ -z "$(git status --porcelain --untracked-files=no)" ]; then docker tag pct-api:production pct-api:prev && git reset --hard origin/main && git log --oneline -1 && docker build -f Backend/Dockerfile -t pct-api:production . && docker compose -f /opt/pct/compose.yml up -d --force-recreate api; else echo 'STOP - this checkout has its own changes, check git status -sb'; fi
+   cd /opt/pct/src && git fetch origin && if [ -z "$(git diff --stat origin/main...HEAD)" ] && [ -z "$(git status --porcelain --untracked-files=no)" ]; then docker tag pct-api:production pct-api:prev && git reset --hard origin/main && git log --oneline -1 && docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) --build-arg BUILT_AT=$(date -u +%FT%TZ) -f Backend/Dockerfile -t pct-api:production . && docker compose -f /opt/pct/compose.yml up -d --force-recreate api; else echo 'STOP - this checkout has its own changes, check git status -sb'; fi
    ```
 
 3. **PuTTY on 172.28.80.50 (FE):**
@@ -476,6 +476,32 @@ in SAP Data Sync — or wait for the first scheduled slot. Expect `published`, t
 `--force-recreate` is required: Compose compares the image *name*, not its contents, so a plain `up -d`
 after a rebuild keeps the old code running. `docker compose --build` does nothing here (these compose files
 have no build context).
+
+### 10a. Release of 13 Nov 2026 — security and review fixes
+
+On top of the usual §10 steps, this release changes two files that live in `/opt/pct` on the servers:
+
+**PuTTY on 172.28.80.50 (FE)** — the nginx config now forwards `X-Forwarded-Host` (the API uses it to refuse
+cross-site writes) and a request id on `/auth/`:
+
+```bash
+cd /opt/pct && cp production.conf production.conf.bak && cp src/deploy/production/nginx/production.conf production.conf && docker compose -f compose.yml up -d --force-recreate web
+```
+
+**PuTTY on 172.28.80.51 (BE)** — the compose file gained log rotation. Compare first, then carry it over
+(`.env` and the env files are untouched):
+
+```bash
+cd /opt/pct && diff src/deploy/production/be.compose.yml compose.yml; cp compose.yml compose.yml.bak && cp src/deploy/production/be.compose.yml compose.yml && docker compose -f compose.yml up -d --force-recreate api redis
+```
+
+The FE compose (`fe.compose.yml`) gained the same log rotation; copy it the same way on the FE server when
+convenient. After the API is up, `curl -s http://172.28.80.51:4100/api/v1/health` shows the git SHA of the
+build, and `/api/v1/ready` reports `storage` and `session_store` as well as the database.
+
+**In the application:** Admin → SAP Data Sync → **Rebuild** once (figures are recomputed with the SAP FX
+rates only — functional test FT-05). Audit entries written from now on use hash version 2; `/api/v1/audit/verify`
+reports the older entries as `legacyEntries`.
 
 ## 11. Rollback
 

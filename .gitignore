@@ -40,3 +40,14 @@ deploy/migrate/migrate.env
 deploy/migrate/*.dump
 deploy/migrate/*.dump.sha256
 
+# Production values filled on the servers (security review SEC-S-33). The
+# templates (production.env, *.example) stay tracked; filled copies never are.
+deploy/production/secrets.production.env
+deploy/production/fe-build.env
+deploy/production/*.filled.env
+**/fe-build.env
+# Database password files and dumps made during migrations/seeding.
+*.pgpass
+**/pgpass
+*.dump
+pct-export*.tar

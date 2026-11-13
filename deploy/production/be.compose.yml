@@ -22,6 +22,9 @@ services:
   redis:
     image: redis:7.4-alpine
     container_name: pct-redis
+    # Rotate container logs: the default json-file driver grows without limit
+    # on a shared host (architecture review).
+    logging: { driver: json-file, options: { max-size: \"10m\", max-file: \"5\" } }
     restart: unless-stopped
     # noeviction is deliberate: Redis holds sessions, not just cache.
     command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
@@ -37,6 +40,9 @@ services:
   api:
     image: pct-api:production
     container_name: pct-api
+    # Rotate container logs: the default json-file driver grows without limit
+    # on a shared host (architecture review).
+    logging: { driver: json-file, options: { max-size: \"10m\", max-file: \"5\" } }
     restart: unless-stopped
     depends_on:
       redis:

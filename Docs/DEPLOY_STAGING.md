@@ -183,7 +183,7 @@ Build the API image from the checkout:
 
 ```bash
 cd /opt/pct/src
-docker build -f Backend/Dockerfile -t pct-api:staging .
+docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) --build-arg BUILT_AT=$(date -u +%FT%TZ) -f Backend/Dockerfile -t pct-api:staging .
 ```
 
 Lay out the runtime files from the repo's templates:
@@ -602,7 +602,7 @@ git push origin sit2
 
 # BE server (172.28.92.57) — services: api, redis
 cd /opt/pct/src && git pull --ff-only
-docker build -f Backend/Dockerfile -t pct-api:staging .
+docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) --build-arg BUILT_AT=$(date -u +%FT%TZ) -f Backend/Dockerfile -t pct-api:staging .
 docker compose -f /opt/pct/compose.yml up -d --force-recreate api   # migrations apply at boot
 docker logs pct-api 2>&1 | grep -i migration | tail -3
 

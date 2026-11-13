@@ -39,6 +39,8 @@ async function fetchToken(): Promise<string> {
     scope: env.COUPA_SCOPES,
   });
   const res = await fetch(`${env.COUPA_BASE_URL}/oauth2/token`, {
+    // A hung connection must not hold the poller (and its lock) for ever.
+    signal: AbortSignal.timeout(30_000),
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
@@ -82,6 +84,7 @@ export async function coupaGet(path: string, params: Record<string, string> = {}
     const token = await getToken(retriedAuth);
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(120_000),
     });
 
     if (res.status === 401 && !retriedAuth) {

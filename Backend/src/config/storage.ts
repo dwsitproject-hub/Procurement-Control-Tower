@@ -26,6 +26,7 @@
 
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { posix } from 'node:path';
 import { loadEnv, type Env } from './env.js';
 
 /** How basePath was decided. */
@@ -98,6 +99,25 @@ export function resolveStorage(env: Env = loadEnv()): StorageResolution {
 /** The folder feeds default to when no per-feed path has been configured. */
 export function storageBasePath(env: Env = loadEnv()): string {
   return resolveStorage(env).basePath;
+}
+
+/**
+ * The folders the SAP pickup may read from and file into: the resolved storage
+ * root and the legacy SHARE_PATH. A path an admin types into SAP Data Sync must
+ * sit inside one of them - the API cannot arrange a new mount anyway, so this
+ * loses nothing, and it stops the folder settings and the folder preview from
+ * reading or writing anywhere else in the container, /etc included (security
+ * review SEC-S-10).
+ */
+export function storageRoots(env: Env = loadEnv()): string[] {
+  const roots = [resolveStorage(env).basePath, env.SHARE_PATH].map((p) => posix.resolve(p));
+  return [...new Set(roots)];
+}
+
+export function insideStorage(p: string, env: Env = loadEnv()): boolean {
+  if (!p.startsWith('/')) return false;
+  const n = posix.resolve(p);
+  return storageRoots(env).some((r) => n === r || n.startsWith(r.endsWith('/') ? r : `${r}/`));
 }
 
 export interface StorageHealth extends StorageResolution {

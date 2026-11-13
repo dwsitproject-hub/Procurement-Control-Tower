@@ -9,11 +9,11 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { randomUUID } from 'node:crypto';
 import { loadEnv, isOidcConfigured } from './config/env.js';
 import { storageHealth, storageSummary } from './config/storage.js';
 import { closePool, healthCheck } from './db/client.js';
 import { buildRouter, problemHandler } from './api/routes.js';
+import { apiNoStore, rateLimit, requestIdGuard, sameOriginWrites } from './api/guards.js';
 import { migrate } from './db/migrate.js';
 import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
@@ -68,14 +68,18 @@ async function main(): Promise<void> {
       crossOriginEmbedderPolicy: false,
     }),
   );
+  // Request id first, so every response - a malformed-JSON 400 included -
+  // carries one that matches the log line.
+  app.use(requestIdGuard());
+  app.use(apiNoStore());
+  app.use(sameOriginWrites());
+  // Guessing passwords or hammering the SSO start: per client IP (TRUST_PROXY
+  // makes req.ip the real client behind nginx).
+  app.use('/auth/local/login', rateLimit({ name: 'sign-in', windowMs: 60_000, max: 10 }));
+  app.use('/auth/oidc', rateLimit({ name: 'SSO', windowMs: 60_000, max: 30 }));
+  app.use('/api/v1/detail/export', rateLimit({ name: 'exports', windowMs: 60_000, max: 20 }));
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
-
-  app.use((req, res, next) => {
-    req.requestId = (req.get('x-request-id') ?? randomUUID()).slice(0, 64);
-    res.setHeader('X-Request-Id', req.requestId);
-    next();
-  });
 
   app.use(buildRouter());
   app.use(problemHandler());

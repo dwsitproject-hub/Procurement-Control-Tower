@@ -214,10 +214,18 @@ export async function vendorDetail(
   versionId: number,
   scope: readonly ScopeEntry[],
   vendorCode: string,
+  filter: GlobalFilter = {},
 ): Promise<Record<string, unknown> | null> {
-  const { where, params } = scoped(versionId, scope, 'pol');
+  const s0 = scoped(versionId, scope, 'pol');
+  const params = s0.params;
   params.push(vendorCode);
   const vp = `$${params.length}`;
+  // The page's filter bar applies here too, as it does in Category 360: the
+  // vendor list showed 2026 figures while this popup showed all time
+  // (functional test FT-25, 12 Nov 2026). Every query below shares this WHERE.
+  const gfc = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gfc.params);
+  const where = `${s0.where}${gfc.sql}`;
 
   const bio = await queryOne<{
     vendor_name: string; po_count: number; line_count: number; spend_usd: number | null;

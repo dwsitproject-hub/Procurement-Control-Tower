@@ -6,18 +6,21 @@
  * than silently public.
  */
 
+import { storageHealth } from '../config/storage.js';
+import { qint } from './guards.js';
 import express, { type NextFunction, type Request, type Response, type Router } from 'express';
 import multer from 'multer';
+import { FileFormatError } from '../modules/ingest/parse.js';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { freshnessState, type FreshnessState } from '@pct/rules';
-import { FEEDS, KPI_TITLES, ROLE_RANK, type Role } from '@pct/contracts';
+import { FEEDS, KPI_TITLES, ROLE_RANK, type PageKey, type Role } from '@pct/contracts';
 import {
   buildErrorWorkbook, errorWorkbookName, loadFindingRows, loadRowErrors,
 } from '../modules/ingest/error_report.js';
-import { resolvePages } from '../modules/authz/pages.js';
+import { allows, resolvePages } from '../modules/authz/pages.js';
 import { loadEnv } from '../config/env.js';
 import { healthCheck, pool, query, queryOne } from '../db/client.js';
 import { buildMart } from '../modules/analytics/mart.js';
@@ -31,7 +34,7 @@ import {
 import {
   destroySession, loadSession, sessionFingerprint, sessionStoreHealthy, sessionStoreKind,
 } from '../modules/auth/session.js';
-import { resolveScope, type ScopeEntry } from '../modules/authz/scope.js';
+import { resolveScope, scopeIsUnrestricted, type ScopeEntry } from '../modules/authz/scope.js';
 import { recordAudit, listAudit, verifyAuditChain } from '../modules/audit/audit.js';
 import {
   DrillTokenError, executeDrill, issueDrillToken, openDrillToken, type DrillPredicate,
@@ -40,7 +43,7 @@ import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
 import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
 import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
 import {
-  PerFeedShareSource, archiveAfterRun, diagnoseMissing, loadShareConfig,
+  INGEST_LOCK_KEY, PerFeedShareSource, archiveAfterRun, diagnoseMissing, loadShareConfig, withIngestLock,
 } from '../modules/ingest/share_poller.js';
 import { archiveSummary } from '../modules/ingest/archive.js';
 import { notify } from '../modules/notify/mailer.js';
@@ -109,6 +112,50 @@ function pub(handler: (req: Request, res: Response) => Promise<void> | void) {
   };
 }
 
+/**
+ * Endpoints that return totals over ALL data. They are not yet computed per
+ * data scope, so a user whose scope is narrower than everything must not get
+ * them - they would see figures for plants and companies outside their grant
+ * (security review SEC-S-06). Every grant today is ('*','*','*'), so nobody is
+ * affected now; this keeps the User Access scope editor from silently leaking
+ * the day someone is narrowed. Row-level routes (drill, rows, detail, export)
+ * ARE scope-filtered and stay open.
+ */
+const FULL_SCOPE_PREFIXES = [
+  '/api/v1/kpi', '/api/v1/chart', '/api/v1/filters', '/api/v1/exec/', '/api/v1/openitems/',
+  '/api/v1/snapshot', '/api/v1/coupa/', '/api/v1/admin/fx', '/api/v1/entity/', '/api/v1/custom/',
+  '/api/v1/master',
+];
+
+/**
+ * API routes that belong to ONE page of the page-permission matrix. The matrix
+ * used to hide tabs only; a user with 'none' on a page could still call its
+ * API (security review SEC-S-07). Shared endpoints (KPIs, charts, drills, the
+ * 360 popups that open from many pages) are deliberately not listed - they
+ * serve every page. Writes need 'edit', reads 'view'.
+ */
+const PAGE_ROUTES: [string, PageKey][] = [
+  ['/api/v1/exec/', 'execsummary'],
+  ['/api/v1/coupa/sourcing', 'coupa_src'],
+  ['/api/v1/coupa/invoices', 'coupa_inv'],
+  ['/api/v1/master', 'master'],
+  ['/api/v1/admin/master/', 'master'],
+  ['/api/v1/entity/vendors', 'vendors'],
+  ['/api/v1/entity/vendor-pivot', 'vendors'],
+  ['/api/v1/entity/vendor-otd', 'vendors'],
+  ['/api/v1/entity/material-groups', 'materials'],
+];
+// Not listed, on purpose: /openitems/summary (the sidebar badge on every page),
+// /custom/saved (layouts load on every page), /dataset/:id/validation (inline
+// findings on every tab) and /detail (the Detail Table is embedded in Open
+// Items). Guarding them would break pages the user IS allowed to see; their
+// rows are scope-filtered regardless.
+
+function pageFor(path: string): PageKey | null {
+  for (const [prefix, key] of PAGE_ROUTES) if (path === prefix || path.startsWith(prefix)) return key;
+  return null;
+}
+
 function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Promise<void> | void) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -138,12 +185,67 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
         );
       }
       const scope = await resolveScope(principal.userId);
+      if (scope.length > 0 && !scopeIsUnrestricted(scope)
+          && FULL_SCOPE_PREFIXES.some((p) => req.path === p || req.path.startsWith(p))) {
+        throw new HttpProblem(
+          403, 'scope-restricted', 'This view summarises all data',
+          'Your data access covers part of the data, and this summary is not yet computed per scope. '
+            + 'Use the Detail Table, which shows exactly the rows you may see.',
+        );
+      }
+      const page = pageFor(req.path);
+      if (page && rank < ROLE_RANK.admin) {
+        const need = req.method === 'GET' ? 'view' : 'edit';
+        if (!allows(await resolvePages(principal.userId, principal.roles), page, need)) {
+          await recordAudit({
+            action: 'authz.denied', actorUserId: principal.userId, actorEmail: principal.email,
+            outcome: 'denied', detail: { page, need, path: req.path }, ip: req.ip,
+          });
+          throw new HttpProblem(403, 'page-not-permitted', `Your access does not include this page (${page})`);
+        }
+      }
       const ctx: Ctx = { principal, scope, sid: session.sid };
       req.ctx = ctx;
       await handler(req, res, ctx);
     } catch (e) {
       next(e);
     }
+  };
+}
+
+/**
+ * The same session + role test as role(), as a plain middleware, for routes
+ * whose body is parsed by a middleware that would otherwise run first. The
+ * upload route used to let multer buffer up to 10 x 60 MB into memory for an
+ * anonymous caller before role('steward') ever looked (security review
+ * SEC-S-11). role() still runs afterwards and does the audit and scope work.
+ */
+function preAuth(min: Role) {
+  return async (req: Request, _res: Response, next: NextFunction) => {
+    try {
+      const session = await loadSession(req);
+      if (!session) throw new HttpProblem(401, 'not-authenticated', 'Not signed in');
+      const principal = await loadPrincipal(session.data.userId);
+      if (!principal) throw new HttpProblem(401, 'not-authenticated', 'Session no longer valid');
+      const rank = Math.max(...principal.roles.map((r) => ROLE_RANK[r] ?? 0), 0);
+      if (rank < ROLE_RANK[min]) throw new HttpProblem(403, 'insufficient-role', `Requires ${min}`);
+      next();
+    } catch (e) {
+      next(e);
+    }
+  };
+}
+
+/** UPLOAD_MAX_BATCH_MB across all files of one request (it was declared, never enforced). */
+function batchLimit() {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const files = (req.files ?? []) as Express.Multer.File[];
+    const total = files.reduce((n, f) => n + f.size, 0);
+    if (total > env.UPLOAD_MAX_BATCH_MB * 1024 * 1024) {
+      return next(new HttpProblem(413, 'batch-too-large',
+        `The files total ${Math.round(total / 1048576)} MB, over the ${env.UPLOAD_MAX_BATCH_MB} MB limit for one upload`));
+    }
+    next();
   };
 }
 
@@ -237,7 +339,11 @@ export function buildRouter(): Router {
     // FEEDS.length, not 6: the bundle grew by four optional reference files
     // (018) and multer silently rejects the surplus, which would surface as a
     // confusing "incomplete bundle" for a user who selected all ten.
-    limits: { fileSize: env.UPLOAD_MAX_FILE_MB * 1024 * 1024, files: FEEDS.length },
+    limits: {
+      fileSize: env.UPLOAD_MAX_FILE_MB * 1024 * 1024, files: FEEDS.length,
+      // No form fields are expected beyond the files themselves.
+      fields: 20, fieldSize: 64 * 1024, parts: FEEDS.length + 20,
+    },
   });
 
   // ── auth ──
@@ -252,7 +358,7 @@ export function buildRouter(): Router {
     if (!(await ensureOidcReady())) {
       throw new HttpProblem(503, 'sso-unavailable', 'The DWS Hub is not reachable right now');
     }
-    res.redirect(302, buildAuthorizeUrl(req.query.returnTo as string | undefined));
+    res.redirect(302, await buildAuthorizeUrl(req.query.returnTo as string | undefined));
   }));
 
   r.get('/auth/oidc/callback', pub(async (req, res) => {
@@ -260,17 +366,37 @@ export function buildRouter(): Router {
     if (!(await ensureOidcReady())) {
       throw new HttpProblem(503, 'sso-unavailable', 'The DWS Hub is not reachable right now');
     }
-    const out = await handleOidcCallback(
-      {
-        code: req.query.code as string | undefined,
-        state: req.query.state as string | undefined,
-        // Present ONLY in the IdP-initiated flow: the Hub created the PKCE
-        // challenge itself. Branching on this is what makes both flows work.
-        code_verifier: req.query.code_verifier as string | undefined,
-      },
-      req,
-      res,
-    );
+    let out;
+    try {
+      out = await handleOidcCallback(
+        {
+          code: req.query.code as string | undefined,
+          state: req.query.state as string | undefined,
+          // Present ONLY in the IdP-initiated flow: the Hub created the PKCE
+          // challenge itself. Branching on this is what makes both flows work.
+          code_verifier: req.query.code_verifier as string | undefined,
+        },
+        req,
+        res,
+      );
+    } catch (e) {
+      // A refused SSO sign-in is a page the person reads in the browser, not an
+      // API error: say why, in words, instead of a bare 500 JSON body.
+      if (!(e instanceof AuthError)) throw e;
+      await recordAudit({
+        action: 'auth.login', outcome: 'failure', ip: req.ip,
+        detail: { method: 'sso', reason: e.message.slice(0, 300) },
+      });
+      const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+      res.status(e.code === 'disabled' ? 403 : 401).type('html').send(
+        `<!doctype html><meta charset="utf-8"><title>Sign-in failed</title>`
+        + `<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#1f2a3c">`
+        + `<h1 style="font-size:1.4rem">Sign-in through the DWS Hub did not complete</h1>`
+        + `<p>${esc(e.code === 'invalid-credentials' && /e-mail|email|Hub/.test(e.message) ? e.message : 'The sign-in could not be verified. Please try again from the Hub.')}</p>`
+        + `<p><a href="/">Back to the Procurement Control Tower sign-in page</a></p></body>`,
+      );
+      return;
+    }
     // 303 so the browser issues a GET carrying the fresh cookie.
     res.redirect(303, out.returnTo);
   }));
@@ -304,7 +430,7 @@ export function buildRouter(): Router {
       throw new HttpProblem(400, 'invalid-body', 'currentPassword and newPassword are required');
     }
     try {
-      await changeLocalPassword(ctx.principal.userId, currentPassword, newPassword);
+      await changeLocalPassword(ctx.principal.userId, currentPassword, newPassword, ctx.sid);
     } catch (e) {
       if (e instanceof AuthError) {
         await recordAudit({
@@ -326,7 +452,7 @@ export function buildRouter(): Router {
   r.post('/auth/logout', pub(async (req, res) => {
     const session = await loadSession(req);
     if (session) {
-      await destroySession(res, session.sid);
+      await destroySession(res, session.sid, session.data.userId);
       await recordAudit({ action: 'auth.logout', actorUserId: session.data.userId, outcome: 'success', ip: req.ip });
     }
     res.status(204).end();
@@ -373,6 +499,17 @@ export function buildRouter(): Router {
   r.put('/api/v1/me/preferences/:key', role('viewer', async (req, res, ctx) => {
     const value = (req.body ?? {}).value;
     if (value === undefined) throw new HttpProblem(400, 'invalid-body', 'value is required');
+    // Bounded per user (security review SEC-S-34): a sane key, at most 64 KB a
+    // value and 200 keys - enough for every layout and view the app saves.
+    const pkey = String(req.params.key ?? '');
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(pkey)) throw new HttpProblem(400, 'invalid-key', 'Invalid preference key');
+    if (JSON.stringify(value).length > 64 * 1024) throw new HttpProblem(413, 'too-large', 'Preference value over 64 KB');
+    const count = await queryOne<{ n: number; has: boolean }>(
+      `SELECT count(*)::int AS n, coalesce(bool_or(pref_key = $2), false) AS has
+         FROM app.user_preference WHERE user_id = $1`,
+      [ctx.principal.userId, pkey],
+    );
+    if (!count?.has && (count?.n ?? 0) >= 200) throw new HttpProblem(409, 'too-many', 'Too many saved preferences');
     await query(
       `INSERT INTO app.user_preference (user_id, pref_key, pref_value)
        VALUES ($1, $2, $3::jsonb)
@@ -781,8 +918,8 @@ export function buildRouter(): Router {
   // ── drill ──
 
   r.get('/api/v1/drill/:token', role('analyst', async (req, res, ctx) => {
-    const limit = Math.min(Number(req.query.limit ?? 100), 1000);
-    const offset = Number(req.query.cursor ?? 0);
+    const limit = qint(req.query.limit, 100, 1, 1000);
+    const offset = qint(req.query.cursor, 0, 0, 1_000_000_000);
     try {
       const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
       const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
@@ -942,8 +1079,8 @@ export function buildRouter(): Router {
     );
     const page = await executeDrill(
       payload,
-      Math.min(Number(req.query.limit ?? 100), 1000),
-      Number(req.query.cursor ?? 0),
+      qint(req.query.limit, 100, 1, 1000),
+      qint(req.query.cursor, 0, 0, 1_000_000_000),
     );
     res.json({ ...page, asOfDate: v.asOfDate, appliedFilters: filters });
   }));
@@ -984,8 +1121,8 @@ export function buildRouter(): Router {
       ctx.scope,
       filters,
       sort,
-      Math.min(Number(req.query.limit ?? 200), 1000),
-      Number(req.query.cursor ?? 0),
+      qint(req.query.limit, 200, 1, 1000),
+      qint(req.query.cursor, 0, 0, 1_000_000_000),
       String(req.query.facets ?? '') === 'true',
     );
     res.json(page);
@@ -1121,6 +1258,12 @@ export function buildRouter(): Router {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // The pickup's lock, held to COMMIT: a rebuild must not interleave with a load.
+      const lk = await client.query<{ ok: boolean }>(`SELECT pg_try_advisory_xact_lock($1) AS ok`, [INGEST_LOCK_KEY]);
+      if (!lk.rows[0]?.ok) {
+        await client.query('ROLLBACK');
+        throw new HttpProblem(409, 'busy', 'A load is running - try the rebuild again in a minute');
+      }
 
       // Read the disabled set BEFORE deleting the rows that carry it. A KPI
       // disabled by a validation finding must stay disabled and keep saying
@@ -1264,7 +1407,8 @@ export function buildRouter(): Router {
     const shareCfg = await loadShareConfig();
     const source = new PerFeedShareSource(shareCfg);
     const force = Boolean((req.body ?? {}).force);
-    const out = await runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force });
+    const out = await withIngestLock(() => runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force }));
+    if (out === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
     // The same after-run filing the scheduled pickup does. Sharing one helper is
     // the point: these two paths already share the source so they cannot read
     // different files, and they must not diverge on what happens next either.
@@ -1346,7 +1490,7 @@ export function buildRouter(): Router {
 
   // Multer parses the multipart body first; role() then authorises before any
   // file is written to the spool.
-  r.post('/api/v1/ingest/upload', upload.array('files', FEEDS.length), role('steward', async (req, res, ctx) => {
+  r.post('/api/v1/ingest/upload', preAuth('steward'), upload.array('files', FEEDS.length), batchLimit(), role('steward', async (req, res, ctx) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (files.length === 0) throw new HttpProblem(400, 'invalid-body', 'No files supplied');
 
@@ -1367,12 +1511,13 @@ export function buildRouter(): Router {
         });
       }
 
-      const out = await runIngest({
+      const out = await withIngestLock(() => runIngest({
         source: new ManualUploadSource(staged),
         submittedBy: ctx.principal.userId,
         // Manual batches wait for confirmation; automatic batches publish at once.
         autoPublish: req.query.publish === 'true',
-      });
+      }));
+      if (out === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
 
       await recordAudit({
         action: 'ingest.upload', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
@@ -1445,7 +1590,7 @@ export function buildRouter(): Router {
   }));
 
   r.get('/api/v1/audit', role('auditor', async (req, res) => {
-    res.json({ entries: await listAudit(Number(req.query.limit ?? 100), Number(req.query.offset ?? 0)) });
+    res.json({ entries: await listAudit(qint(req.query.limit, 100, 1, 500), qint(req.query.offset, 0, 0, 1_000_000_000)) });
   }));
 
   r.get('/api/v1/audit/verify', role('admin', async (_req, res) => {
@@ -1469,11 +1614,18 @@ export function buildRouter(): Router {
   r.get('/api/v1/ready', pub(async (_req, res) => {
     const db = await healthCheck();
     const redis = await sessionStoreHealthy();
+    // Redis and the NAS folder count too: without Redis every sign-in falls
+    // back to process memory, and without the folder no pickup can run
+    // (architecture review). Status stays 'fail' only for the database; the
+    // others are 'degraded', which a probe can alert on without restarting.
+    const storage = await storageHealth();
     const checks = [
       { name: 'database', status: db.ok ? 'ok' : 'fail', latencyMs: db.latencyMs },
-      { name: 'session_store', status: redis ? 'ok' : 'fail', detail: sessionStoreKind() },
+      { name: 'session_store', status: redis && sessionStoreKind() === 'redis' ? 'ok' : 'degraded', detail: sessionStoreKind() },
+      { name: 'storage', status: storage.readable && !storage.mountWarning ? 'ok' : 'degraded' },
     ];
-    const status = checks.some((c) => c.status === 'fail' && c.name === 'database') ? 'fail' : 'ok';
+    const status = checks.some((c) => c.status === 'fail') ? 'fail'
+      : checks.some((c) => c.status === 'degraded') ? 'degraded' : 'ok';
     res.status(status === 'fail' ? 503 : 200).json({ status, checks });
   }));
 
@@ -1481,6 +1633,20 @@ export function buildRouter(): Router {
 }
 
 // ─────────────────────────────────────────────────── problem+json error filter
+
+function clientError(err: unknown): { status: number; type: string; title: string } | null {
+  const e = err as { type?: string; status?: number; code?: string; message?: string };
+  if (e?.type === 'entity.parse.failed') return { status: 400, type: 'invalid-json', title: 'The request body is not valid JSON' };
+  if (e?.type === 'entity.too.large') return { status: 413, type: 'too-large', title: 'The request body is too large' };
+  if (err instanceof multer.MulterError) {
+    if (e.code === 'LIMIT_FILE_SIZE') {
+      return { status: 413, type: 'file-too-large', title: `A file is larger than the ${env.UPLOAD_MAX_FILE_MB} MB limit` };
+    }
+    return { status: 400, type: 'invalid-upload', title: `Upload refused: ${e.message ?? e.code}` };
+  }
+  if (err instanceof FileFormatError) return { status: 400, type: 'invalid-file', title: err.message };
+  return null;
+}
 
 export function problemHandler() {
   return (err: unknown, req: Request, res: Response, _next: NextFunction): void => {
@@ -1492,6 +1658,16 @@ export function problemHandler() {
         status: err.status,
         detail: err.detail,
         requestId,
+      });
+      return;
+    }
+    // Client mistakes are 4xx with a reason, never a 500 (security review
+    // SEC-S-27): a body that is not JSON or too big, an upload over the limits,
+    // a file that is not a readable export.
+    const client = clientError(err);
+    if (client) {
+      res.status(client.status).type('application/problem+json').json({
+        type: `/problems/${client.type}`, title: client.title, status: client.status, requestId,
       });
       return;
     }

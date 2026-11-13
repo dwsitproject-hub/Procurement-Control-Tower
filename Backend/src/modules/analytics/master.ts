@@ -30,6 +30,14 @@
 import { query, queryOne } from '../../db/client.js';
 import { spendCategorySql, spendCategorySourceSql } from '@pct/rules';
 
+/**
+ * A free-text search as an ILIKE argument: % _ and the escape character are
+ * matched literally, and the term is capped (security review SEC-S-38).
+ */
+function likeArg(term: string): string {
+  return `%${term.slice(0, 100).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
 export interface MasterColumn {
   key: string;
   label: string;
@@ -423,9 +431,9 @@ export async function loadMasterPage(
     );
 
     if (search !== '') {
-      params.push(`%${search}%`);
+      params.push(likeArg(search));
       const p = `$${params.length}`;
-      clauses.push(`(${t.searchCols.map((c) => `${c}::text ILIKE ${p}`).join(' OR ')})`);
+      clauses.push(`(${t.searchCols.map((c) => `${c}::text ILIKE ${p} ESCAPE '\\'`).join(' OR ')})`);
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
 

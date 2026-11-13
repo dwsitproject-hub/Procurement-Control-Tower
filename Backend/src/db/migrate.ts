@@ -25,11 +25,20 @@ async function ensureLedger(): Promise<void> {
 export async function migrate(): Promise<{ applied: string[]; skipped: string[] }> {
   // Serialise concurrent runners (e.g. two instances booting at once): the
   // second waits here until the first finishes, then applies nothing.
-  await pool.query('SELECT pg_advisory_lock(208671163)');
+  // Lock and unlock on ONE connection: a session-level advisory lock belongs to
+  // the connection that took it, and pool.query may hand the unlock to a
+  // different one - leaving the lock held until that connection closes
+  // (architecture review).
+  const lockClient = await pool.connect();
   try {
-    return await migrateLocked();
+    await lockClient.query('SELECT pg_advisory_lock(208671163)');
+    try {
+      return await migrateLocked();
+    } finally {
+      await lockClient.query('SELECT pg_advisory_unlock(208671163)');
+    }
   } finally {
-    await pool.query('SELECT pg_advisory_unlock(208671163)');
+    lockClient.release();
   }
 }
 

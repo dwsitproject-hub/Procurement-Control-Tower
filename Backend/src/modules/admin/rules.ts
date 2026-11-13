@@ -97,7 +97,7 @@ export async function setRule(
   note: string | null,
   userId: string | null,
 ): Promise<void> {
-  if (!(ruleKey in RULE_DEFAULTS)) {
+  if (!Object.hasOwn(RULE_DEFAULTS, ruleKey)) {
     throw new Error(`unknown rule key: ${ruleKey}`);
   }
   await query(

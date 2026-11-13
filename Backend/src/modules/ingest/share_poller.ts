@@ -27,7 +27,7 @@ import type { Feed } from '@pct/contracts';
 import { pool, query } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
-import { resolveStorage } from '../../config/storage.js';
+import { insideStorage, resolveStorage, storageRoots } from '../../config/storage.js';
 import { runIngest } from './pipeline.js';
 import {
   archiveBundle, archiveSummary, fileRowErrors, recordFiling,
@@ -246,6 +246,11 @@ async function scanFeed(f: FeedConfig, settleSeconds: number): Promise<FeedScan>
     readable: false, chosen: null, others: [],
   };
 
+  // Checked here - not only when the setting is saved - so a value stored
+  // before this rule existed is refused at preview AND at pickup time.
+  if (!insideStorage(f.path)) {
+    return { ...base, error: `outside the storage folder (${storageRoots().join(', ')}) - not read` };
+  }
   try {
     await access(f.path, constants.R_OK);
   } catch (err) {
@@ -488,6 +493,29 @@ export async function archiveAfterRun(
 }
 
 /**
+ * Run `fn` holding the same advisory lock as the scheduled pickup, or return
+ * null at once when a load, an upload or a rebuild is already running. Manual
+ * Sync now, uploads and the mart rebuild used to run without it, so two of them
+ * could interleave (security review SEC-S-36).
+ */
+export async function withIngestLock<T>(fn: () => Promise<T>): Promise<T | null> {
+  const client = await pool.connect();
+  try {
+    const lock = await client.query<{ ok: boolean }>(`SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY]);
+    if (!lock.rows[0]?.ok) return null;
+    try {
+      return await fn();
+    } finally {
+      await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]).catch(() => undefined);
+    }
+  } finally {
+    client.release();
+  }
+}
+
+export const INGEST_LOCK_KEY = ADVISORY_LOCK_KEY;
+
+/**
  * One pass. Advisory-locked so overlapping ticks — or a manual sync at the same
  * moment — cannot ingest the same files twice.
  */
@@ -557,8 +585,14 @@ export function startSharePoller(log: (msg: string) => void): void {
   if (pollerStarted) return;
   pollerStarted = true;
 
+  // After an exception the slots stay unmarked so the pickup is not lost - but
+  // retrying every minute re-read the whole bundle sixty times an hour. Back
+  // off instead: 2, 4, 8 ... up to 30 minutes (architecture review).
+  let errorStreak = 0;
+  let nextTryAt = 0;
   setInterval(() => {
     void (async () => {
+      if (Date.now() < nextTryAt) return;
       try {
         const cfg = await loadShareConfig();
         if (!cfg.enabled) return;
@@ -608,10 +642,14 @@ export function startSharePoller(log: (msg: string) => void): void {
           at: new Date().toISOString(), outcome: r.outcome, detail: r.detail, slots: label,
         };
         log(`share sync (${r.outcome})${r.detail ? `: ${r.detail}` : ''} [${label}]`);
+        errorStreak = 0;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        lastResult = { at: new Date().toISOString(), outcome: 'error', detail: msg };
-        log(`share poller error: ${msg}`);
+        errorStreak += 1;
+        const waitMin = Math.min(2 ** errorStreak, 30);
+        nextTryAt = Date.now() + waitMin * 60_000;
+        lastResult = { at: new Date().toISOString(), outcome: 'error', detail: `${msg} (next try in ${waitMin} min)` };
+        log(`share poller error: ${msg} - next try in ${waitMin} min`);
       }
     })();
   }, 60_000).unref();

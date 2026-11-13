@@ -6,6 +6,7 @@
  * 9457, and nothing user-supplied reaches SQL as text.
  */
 
+import { qint } from './guards.js';
 import type { Router } from 'express';
 import { ROLE_RANK, PAGE_ACCESS, PAGE_KEYS } from '@pct/contracts';
 import argon2 from 'argon2';
@@ -16,7 +17,7 @@ import {
   pendingFxOverrides, revertRow,
 } from '../modules/master/edit.js';
 import { issueDrillToken, type DrillPredicate } from '../modules/analytics/drill.js';
-import { sessionFingerprint } from '../modules/auth/session.js';
+import { revokeAllSessions, sessionFingerprint } from '../modules/auth/session.js';
 import {
   approverBottlenecks, categoryDetail, materialDetail, materialGroupPage, requisitionerDemand,
   topMaterialsSpend, vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
@@ -50,7 +51,7 @@ function sortOf(q: Record<string, unknown>): { key: string; dir: 'asc' | 'desc' 
   if (q['sort'] === undefined || String(q['sort']).trim() === '') return null;
   return { key: String(q['sort']).slice(0, 40), dir: String(q['dir']) === 'asc' ? 'asc' : 'desc' };
 }
-import { storageBasePath, storageHealth } from '../config/storage.js';
+import { insideStorage, storageBasePath, storageHealth, storageRoots } from '../config/storage.js';
 
 // Injected from routes.ts so both files share one implementation.
 export interface RouteHelpers {
@@ -117,7 +118,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // an unknown id is a 404 rather than a malformed statement. The sort key is
     // checked against the page's own columns for the same reason.
     // One page number per table on the master page: page0, page1, ...
-    const pages = [0, 1, 2, 3, 4, 5].map((i) => Number(query[`page${i}`] ?? 0) || 0);
+    const pages = [0, 1, 2, 3, 4, 5].map((i) => qint(query[`page${i}`], 0, 0, 100_000));
     const page = await loadMasterPage(String(req.params.id), v.id, q, sort, pages);
     if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
 
@@ -237,8 +238,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       v.id,
       ctx.scope,
       String(req.query.q ?? ''),
-      Math.min(Number(req.query.limit ?? 50), 200),
-      Math.max(Number(req.query.offset ?? 0), 0),
+      qint(req.query.limit, 50, 1, 200),
+      qint(req.query.offset, 0, 0, 1_000_000_000),
       parseGlobalFilter(req.query as Record<string, unknown>),
       sortOf(req.query as Record<string, unknown>),
     );
@@ -248,7 +249,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/entity/vendor/:code', role('analyst', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const detail = await vendorDetail(v.id, ctx.scope, String(req.params.code));
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    const detail = await vendorDetail(v.id, ctx.scope, String(req.params.code), gf);
     if (!detail) throw new HttpProblem(404, 'not-found', 'Vendor not found or outside your data scope');
 
     // Drill tokens for the vendor's own populations, so the popup's figures obey
@@ -256,7 +258,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const fp = sessionFingerprint(ctx.sid);
     const mk = (filters: Record<string, unknown>, label: string) =>
       issueDrillToken(
-        { grain: 'po_line', filters, label } as DrillPredicate, v.id, ctx.scope, fp,
+        mergeIntoPredicate({ grain: 'po_line', filters, label }, gf) as unknown as DrillPredicate, v.id, ctx.scope, fp,
       );
     res.json({
       datasetVersionId: v.id,
@@ -484,6 +486,13 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
           `${meta.label}: "${path}" is not an absolute folder — it must start with "/".`,
         );
       }
+      if (!insideStorage(path)) {
+        throw new HttpProblem(
+          400, 'invalid-body',
+          `${meta.label}: "${path}" is outside the storage folder. Use a folder inside `
+          + `${storageRoots().join(' or ')} (the mounted NAS folder).`,
+        );
+      }
       const rawSlots = Array.isArray(row['slots']) ? (row['slots'] as unknown[]) : [];
       const slots: string[] = [];
       for (let i = 0; i < 3; i += 1) {
@@ -520,6 +529,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       }
       if (!v.startsWith('/')) {
         throw new HttpProblem(400, 'invalid-body', `${label}: "${v}" must start with "/".`);
+      }
+      if (!insideStorage(v)) {
+        throw new HttpProblem(400, 'invalid-body',
+          `${label}: "${v}" is outside the storage folder. Use a folder inside ${storageRoots().join(' or ')}.`);
       }
       return v;
     };
@@ -723,6 +736,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       }
       await query(`UPDATE app.app_user SET is_active = $2 WHERE id = $1`, [id, active]);
       detail['isActive'] = active;
+      // Every request re-checks is_active, but ending the sessions also clears
+      // them out of the store instead of leaving them to expire.
+      if (!active) detail['sessionsEnded'] = await revokeAllSessions(id);
     }
     if (typeof b['resetPassword'] === 'string' && b['resetPassword'] !== '') {
       const pw = String(b['resetPassword']);
@@ -738,6 +754,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       );
       await query(`UPDATE app.app_user SET must_change_password = true WHERE id = $1`, [id]);
       detail['passwordReset'] = true;
+      // Whoever held the old password - or a session from it - is out now
+      // (security review SEC-S-16).
+      detail['sessionsEnded'] = await revokeAllSessions(id);
       // Worth recording explicitly: for a Hub-provisioned account this does not
       // just rotate a password, it ADDS password sign-in to an account that had
       // only SSO. The audit trail should show that decision rather than leave it
@@ -852,14 +871,14 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/entity/top-vendors-spend', role('viewer', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const out = await vendorList(v.id, ctx.scope, '', Math.min(Number(req.query.limit ?? 10), 50));
+    const out = await vendorList(v.id, ctx.scope, '', qint(req.query.limit, 10, 1, 50));
     res.json({ datasetVersionId: v.id, totalVendors: out.totalVendors, rows: out.rows });
   }));
 
   r.get('/api/v1/entity/top-materials-spend', role('viewer', async (req, res, ctx) => {
     requireScope(ctx);
     const v = await version();
-    const out = await topMaterialsSpend(v.id, ctx.scope, Number(req.query.limit ?? 10));
+    const out = await topMaterialsSpend(v.id, ctx.scope, qint(req.query.limit, 10, 1, 500));
     res.json({ datasetVersionId: v.id, ...out });
   }));
 
@@ -907,8 +926,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       req.query.category === undefined ? null : String(req.query.category),
       String(req.query.q ?? ''),
       req.query.materialGroup === undefined ? null : String(req.query.materialGroup),
-      Math.min(Number(req.query.limit ?? 150), 500),
-      Math.max(Number(req.query.offset ?? 0), 0),
+      qint(req.query.limit, 150, 1, 500),
+      qint(req.query.offset, 0, 0, 1_000_000_000),
       gf,
     );
     // v1's mgx drill: each category's counts open as rows (G3.4).
@@ -943,8 +962,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const v = await version();
     const out = await vendorPivot(
       v.id, ctx.scope, String(req.query.q ?? ''),
-      Math.min(Number(req.query.limit ?? 40), 200),
-      Math.max(Number(req.query.offset ?? 0), 0),
+      qint(req.query.limit, 40, 1, 200),
+      qint(req.query.offset, 0, 0, 1_000_000_000),
       parseGlobalFilter(req.query as Record<string, unknown>),
       sortOf(req.query as Record<string, unknown>),
     );
@@ -966,7 +985,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     res.json({
       datasetVersionId: v.id,
       note: 'On-time = receipt within 7 days of the PO delivery date (EINDT). EINDT equals the document date on 37.4% of lines — treat as indicative.',
-      vendors: await vendorOtdChart(v.id, ctx.scope, Math.min(Number(req.query.limit ?? 40), 100)),
+      vendors: await vendorOtdChart(v.id, ctx.scope, qint(req.query.limit, 40, 1, 100)),
     });
   }));
 

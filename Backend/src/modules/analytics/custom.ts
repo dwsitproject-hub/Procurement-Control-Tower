@@ -128,15 +128,24 @@ interface Compiled {
   predicate: Record<string, unknown>;
 }
 
+/**
+ * Own-property whitelist test. `x in obj` and obj[x] also find inherited keys -
+ * "constructor", "__proto__" - which turned a crafted spec into a 500 instead
+ * of a clean refusal (security review SEC-S-25).
+ */
+function own<T extends object>(obj: T | undefined, key: unknown): key is keyof T {
+  return obj !== undefined && typeof key === 'string' && Object.hasOwn(obj, key);
+}
+
 function compile(
   spec: CustomKpiSpec,
   versionId: number,
   scope: readonly ScopeEntry[],
 ): Compiled {
-  if (!TABLES[spec.grain]) throw new Error(`unknown grain: ${String(spec.grain)}`);
-  if (!AGGS[spec.agg]) throw new Error(`unknown aggregation: ${String(spec.agg)}`);
+  if (!own(TABLES, spec.grain)) throw new Error(`unknown grain: ${String(spec.grain)}`);
+  if (!own(AGGS, spec.agg)) throw new Error(`unknown aggregation: ${String(spec.agg)}`);
   if (spec.agg !== 'count') {
-    if (!spec.measure || !MEASURE_COLUMNS[spec.grain][spec.measure]) {
+    if (!spec.measure || !own(MEASURE_COLUMNS[spec.grain], spec.measure)) {
       throw new Error(`unknown measure for ${spec.grain}: ${String(spec.measure)}`);
     }
   }
@@ -148,7 +157,7 @@ function compile(
   const predFilters: Record<string, unknown> = {};
 
   for (const [dim, values] of Object.entries(spec.filters ?? {})) {
-    const col = DIMENSION_COLUMNS[spec.grain][dim];
+    const col = own(DIMENSION_COLUMNS[spec.grain], dim) ? DIMENSION_COLUMNS[spec.grain][dim] : undefined;
     if (!col) throw new Error(`unknown filter dimension: ${dim}`);
     if (!Array.isArray(values) || values.length === 0) continue;
     params.push(values.map(String));
@@ -232,7 +241,7 @@ export async function computeCustomChart(
 ): Promise<{
   points: { bucket: string; value: number | null; rowCount: number; predicate: Record<string, unknown> }[];
 }> {
-  const dimCol = DIMENSION_COLUMNS[spec.grain][spec.dimension];
+  const dimCol = own(DIMENSION_COLUMNS[spec.grain], spec.dimension) ? DIMENSION_COLUMNS[spec.grain][spec.dimension] : undefined;
   if (!dimCol) throw new Error(`unknown dimension: ${String(spec.dimension)}`);
   const c = compile(spec, versionId, scope);
 

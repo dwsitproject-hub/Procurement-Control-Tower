@@ -17,6 +17,14 @@ import {
   DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
 
+/**
+ * A free-text search as an ILIKE argument: % _ and the escape character are
+ * matched literally, and the term is capped (security review SEC-S-38).
+ */
+function likeArg(term: string): string {
+  return `%${term.slice(0, 100).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
 export interface DetailColumn {
   key: string;
   label: string;
@@ -587,9 +595,9 @@ function buildDetailWhere(
 
   const search = (filters.search ?? '').trim();
   if (search !== '') {
-    params.push(`%${search}%`);
+    params.push(likeArg(search));
     const ph = `$${params.length}`;
-    where.push(`(${SEARCH_COLUMNS.map((c) => `d.${c} ILIKE ${ph}`).join(' OR ')})`);
+    where.push(`(${SEARCH_COLUMNS.map((c) => `d.${c} ILIKE ${ph} ESCAPE '\\'`).join(' OR ')})`);
   }
 
   return { sql: where.join(' AND '), params };

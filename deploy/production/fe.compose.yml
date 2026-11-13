@@ -17,7 +17,7 @@ services:
     container_name: pct-web
     # Rotate container logs: the default json-file driver grows without limit
     # on a shared host (architecture review).
-    logging: { driver: json-file, options: { max-size: \"10m\", max-file: \"5\" } }
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     restart: unless-stopped
     volumes:
       # Overrides the baked-in local config: upstream is the BE server.

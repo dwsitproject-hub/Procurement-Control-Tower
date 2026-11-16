@@ -852,8 +852,7 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 }
 /* The cell is the control, so the whole figure is the hit area. */
 /* Clickable figures: a dotted underline says "this opens something" without
-   colouring a whole table of numbers (16 Nov 2026 - the cells were already
-   clickable but read as plain text, so nobody knew). */
+   colouring a whole table of numbers (16 Nov 2026). */
 .xs-mc-cell {
   background: none; border: 0; padding: 0; font: inherit; color: inherit;
   cursor: pointer; font-variant-numeric: tabular-nums;
@@ -888,7 +887,12 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
 .xs-mc-seg:last-child { border-radius: 0 3px 3px 0; }
 .xs-mc-seg:hover { filter: brightness(1.12); }
 .xs-mc-seg:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
-.xs-mc-num { pointer-events: none; }
+/* Only the figure printed INSIDE a bar segment: it must let the click through to
+   its segment. Never the table cells - they share the class for alignment, and
+   `pointer-events: none` on the <td> is inherited by the button in it, which
+   made every table figure unclickable by mouse (a scripted .click() still
+   worked, so a JS test passed; found 16 Nov 2026). */
+span.xs-mc-num { pointer-events: none; }
 .xs-mc-total {
   font-size: .7rem; font-variant-numeric: tabular-nums;
   white-space: nowrap; font-weight: 600;

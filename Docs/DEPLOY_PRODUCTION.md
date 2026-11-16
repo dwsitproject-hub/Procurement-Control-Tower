@@ -15,7 +15,7 @@ reads `<` as a redirect. Values to edit are shown as `FILL_...` and edited befor
 
 | | Production |
 |---|---|
-| Address | **http://172.28.80.50:3050** until the domain is ready, then **http://pct.kpndomain.com** (§7b). HTTP for now — see §12 |
+| Address | **http://pct.kpndomain.com** (live 16 Nov 2026, §7b); http://172.28.80.50:3050 still answers. HTTP for now — see §12 |
 | FE server | **172.28.80.50** — container `pct-web`, published on the private IP **172.28.80.50:3050**; later also reached through the host's nginx on :80 |
 | BE server | **172.28.80.51** — containers `pct-api` (published on **172.28.80.51:4100**) and `pct-redis` (not published) |
 | Database | ApsaraDB RDS for PostgreSQL **pgm-d9jn3khh0b3907w4.pgsql.ap-southeast-5.rds.aliyuncs.com:5432**, database `pct`, account `pct` |

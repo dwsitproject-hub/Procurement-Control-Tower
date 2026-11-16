@@ -87,6 +87,8 @@ export interface IngestNotifyInput {
   archive?: string;
   /** Which pickup slots fired, e.g. "pr@06:00 po@06:00". */
   slots?: string;
+  /** The pickup folder(s) the run looked in, as the server sees them. */
+  folders?: string;
   /**
    * Per-feed diagnosis for incomplete_bundle. Passed in rather than read back
    * from the database on purpose: an incomplete bundle never creates a batch
@@ -200,6 +202,7 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
   // travel inside `detail`, which the success body never printed, so a run that
   // filed its files said nothing about having done so.
   if (input.archive) lines.push(`Filed:    ${input.archive}`);
+  if (input.folders) lines.push(`Folder:   ${input.folders}`);
   lines.push('');
 
   // What each file contributed. Emitted unconditionally, NOT inside the
@@ -209,9 +212,16 @@ export async function ingestSuccessBody(input: IngestNotifyInput): Promise<{ sub
   lines.push(...await perFeedRowLines(input.batchId));
 
   if (input.outcome === 'awaiting_exports') {
-    lines.push('The pickup folder is empty because a previous run FILED ITS FILES AWAY');
-    lines.push('after publishing them, and the next exports have not landed yet. Nothing');
-    lines.push('is wrong and nothing needed doing.');
+    // "Empty" was not true: the folder can hold other files (on 16 Nov 2026
+    // staging's held only "Initial ..." and "Additional ..." exports), just none
+    // that a feed's name pattern selects.
+    lines.push('No file in the pickup folder matches the export name patterns, because a');
+    lines.push('previous run FILED ITS FILES AWAY after publishing them and the next');
+    lines.push('exports have not landed yet. Nothing is wrong and nothing needed doing.');
+    if (input.detail) lines.push(`(Last filing: ${input.detail}.)`);
+    lines.push('');
+    lines.push('If new exports ARE in the folder above, check each feed\'s name pattern in');
+    lines.push('Admin -> SAP Data Sync ("Test / preview folders" shows what each one picks).');
     lines.push('');
     lines.push('This used to be reported as a failed run with every file missing, which');
     lines.push('is what the after-run filing feature does on purpose. If the exports stop');
@@ -319,6 +329,7 @@ export async function ingestFailureBody(input: IngestNotifyInput): Promise<{ sub
   lines.push(`Trigger:  ${input.trigger}${input.slots ? ` (${input.slots})` : ''}`);
   if (input.batchId) lines.push(`Batch:    ${input.batchId}`);
   if (input.archive) lines.push(`Filed:    ${input.archive}`);
+  if (input.folders) lines.push(`Folder:   ${input.folders}`);
   lines.push('');
 
   // The read/accepted/unreadable table first: on a failure the first question is

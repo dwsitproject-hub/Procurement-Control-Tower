@@ -120,15 +120,43 @@ export interface SendResult {
 }
 
 /**
+ * Which server sent this, for the subject and the footer.
+ *
+ * Staging and production mail the same people from the same sender with the
+ * same "[PCT]" subjects, and both run NODE_ENV=staging while production is on
+ * HTTP - so on 16 Nov 2026 staging's (correct) "waiting for the next exports"
+ * was read as production failing to see files that were plainly in ITS
+ * folder. The address the app is served on is the one thing that differs, so
+ * the tag comes from APP_BASE_URL: a host that names itself a test system
+ * (test-pct..., staging..., localhost) gets "TEST"; anything else is untagged.
+ */
+export function environmentTag(baseUrl: string): string | null {
+  let host = '';
+  try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { return null; }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return 'LOCAL';
+  return /(^|[.-])(test|staging|stg|dev|sit|uat|qa)([.-]|$)/.test(host) ? 'TEST' : null;
+}
+
+export function labelForEnvironment(
+  subject: string, bodyText: string, baseUrl: string,
+): { subject: string; bodyText: string } {
+  const tag = environmentTag(baseUrl);
+  const s = tag === null ? subject
+    : subject.startsWith('[PCT]') ? `[PCT ${tag}]${subject.slice(5)}` : `[PCT ${tag}] ${subject}`;
+  return { subject: s, bodyText: `${bodyText.replace(/\s+$/, '')}\n\n-- \nSent by PCT at ${baseUrl}\n` };
+}
+
+/**
  * Send one notification. Never throws: a broken mail server must not fail the
  * ingest or sync that triggered it — the outcome is recorded and returned.
  */
 export async function notify(
   event: NotifyEvent,
-  subject: string,
-  bodyText: string,
+  rawSubject: string,
+  rawBody: string,
   opts: { to?: string[]; ignoreToggles?: boolean } = {},
 ): Promise<SendResult> {
+  const { subject, bodyText } = labelForEnvironment(rawSubject, rawBody, loadEnv().APP_BASE_URL);
   const cfg = await loadNotifyConfig();
   const to = opts.to ?? cfg.recipients;
 

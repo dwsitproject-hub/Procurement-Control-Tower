@@ -618,6 +618,7 @@ export function startSharePoller(log: (msg: string) => void): void {
             batchId: r.batchId,
             datasetVersionId: r.datasetVersionId,
             slots: label,
+            folders: [...new Set(cfg.feeds.map((f) => f.path))].join(', '),
           };
           if (FAILURE_OUTCOMES.has(r.outcome)) {
             const m = await ingestFailureBody(input);

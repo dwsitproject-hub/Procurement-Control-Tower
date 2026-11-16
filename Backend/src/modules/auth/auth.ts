@@ -449,6 +449,7 @@ export async function handleOidcCallback(
   const emailVerified = payload.email_verified === true;
 
   const userId = await upsertSsoUser(sub, email, name, emailVerified);
+  await retireTemporaryPassword(userId, email);
   const principal = await loadPrincipal(userId);
   if (!principal) throw new AuthError('disabled', 'account is disabled');
 
@@ -471,6 +472,34 @@ export async function handleOidcCallback(
  * data scope: they can sign in and see the shell, and no procurement data at all,
  * until an administrator grants scope. Nothing is inferred from an email domain.
  */
+/**
+ * Someone who signs in through the DWS Hub has proved who they are without
+ * PCT's password. If an administrator had issued a TEMPORARY password for the
+ * account (still unchanged - must_change_password set), it is now pointless and
+ * a liability: it would keep working for password sign-in although its owner
+ * never chose it. Remove it and clear the flag, so the Hub user is never sent to
+ * the "change your temporary password" screen (16 Nov 2026). A password the
+ * user CHOSE (flag already clear) is left alone - two routes in, by design.
+ */
+async function retireTemporaryPassword(userId: string, email: string): Promise<void> {
+  const r = await queryOne<{ had_temp: boolean }>(
+    `WITH u AS (
+       UPDATE app.app_user SET must_change_password = false
+        WHERE id = $1 AND must_change_password RETURNING id
+     ), d AS (
+       DELETE FROM app.local_credential c USING u WHERE c.user_id = u.id RETURNING c.user_id
+     )
+     SELECT EXISTS (SELECT 1 FROM u) AS had_temp`,
+    [userId],
+  );
+  if (r?.had_temp) {
+    await recordAudit({
+      action: 'auth.temp_password_retired', actorUserId: userId, actorEmail: email, outcome: 'success',
+      detail: { reason: 'signed in through the DWS Hub; the unchanged temporary password was removed' },
+    });
+  }
+}
+
 async function upsertSsoUser(sub: string, email: string, name: string, emailVerified: boolean): Promise<string> {
   const existing = await queryOne<{ id: string }>(
     `SELECT id FROM app.app_user WHERE sso_subject = $1`,

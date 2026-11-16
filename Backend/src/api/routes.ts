@@ -81,6 +81,8 @@ interface Ctx {
   principal: Principal;
   scope: ScopeEntry[];
   sid: string;
+  /** How THIS session signed in - a Hub session never owes a password change. */
+  authMethod: 'sso' | 'local';
 }
 
 declare global {
@@ -187,7 +189,10 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
       // Forced rotation (011): while the flag is set the ONLY reachable
       // endpoints are the ones needed to change it. Enforced here, in the one
       // guard every authenticated route goes through — not merely in the UI.
-      if (principal.mustChangePassword && !PASSWORD_CHANGE_ALLOWLIST.has(req.path)) {
+      // Not for a Hub session: it did not use a password, so a temporary one
+      // (e.g. issued by an admin later) is no reason to block it.
+      if (principal.mustChangePassword && session.data.authMethod !== 'sso'
+          && !PASSWORD_CHANGE_ALLOWLIST.has(req.path)) {
         throw new HttpProblem(
           403, 'password-change-required',
           'Your temporary password must be changed before using the application.',
@@ -213,7 +218,7 @@ function role(min: Role, handler: (req: Request, res: Response, ctx: Ctx) => Pro
           throw new HttpProblem(403, 'page-not-permitted', `Your access does not include this page (${page})`);
         }
       }
-      const ctx: Ctx = { principal, scope, sid: session.sid };
+      const ctx: Ctx = { principal, scope, sid: session.sid, authMethod: session.data.authMethod };
       req.ctx = ctx;
       await handler(req, res, ctx);
     } catch (e) {
@@ -484,7 +489,9 @@ export function buildRouter(): Router {
       department: ctx.principal.department,
       jobRole: ctx.principal.jobRole,
       pages: await resolvePages(ctx.principal.userId, ctx.principal.roles),
-      mustChangePassword: ctx.principal.mustChangePassword,
+      // The browser shows the change-password screen from this flag; never to
+      // a Hub session.
+      mustChangePassword: ctx.principal.mustChangePassword && ctx.authMethod !== 'sso',
       ssoEnabled: oidcEnabled(),
       // The Hub user id (OIDC `sub`) of an SSO user, for the Hub SDK's
       // identify call (11 Nov 2026). Null for a local-password user.

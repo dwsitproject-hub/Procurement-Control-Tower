@@ -851,11 +851,16 @@ th[style*="right"] .ms-sort { justify-content: flex-end; }
   border-top: 2px solid var(--border); font-weight: 700;
 }
 /* The cell is the control, so the whole figure is the hit area. */
+/* Clickable figures: a dotted underline says "this opens something" without
+   colouring a whole table of numbers (16 Nov 2026 - the cells were already
+   clickable but read as plain text, so nobody knew). */
 .xs-mc-cell {
   background: none; border: 0; padding: 0; font: inherit; color: inherit;
   cursor: pointer; font-variant-numeric: tabular-nums;
+  text-decoration: underline dotted; text-decoration-color: var(--muted, #94a3b8);
+  text-underline-offset: 3px;
 }
-.xs-mc-cell:hover { color: var(--accent); text-decoration: underline; }
+.xs-mc-cell:hover { color: var(--accent); text-decoration: underline solid; text-decoration-color: currentColor; }
 .xs-mc-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* Monthly Spend Category: one stacked bar per month, stacked by category.

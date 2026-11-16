@@ -407,6 +407,22 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
   }
   const legend = [...legendTotals.entries()].sort((a, b) => b[1] - a[1]);
 
+  /** The range the table spans, for the captions of its total cells. */
+  const span = months.length > 1
+    ? `${months[0]![1].label} – ${months[months.length - 1]![1].label}`
+    : months[0]![1].label;
+  /** One clickable figure in the table. Same handler as the bar segments. */
+  const fig = (shown: string, tip: string, title: string, subtitle: string, slice: string) => (
+    <button
+      type="button"
+      className="xs-mc-cell"
+      title={`${tip}. Click for the Overview of this slice.`}
+      onClick={() => onFocus(title, subtitle, slice)}
+    >
+      {shown}
+    </button>
+  );
+
   /** Q1..Q4 from the month number, printed once per quarter as in the design. */
   const quarterOf = (mk: string): string => `Q${Math.floor((Number(mk.slice(5, 7)) - 1) / 3) + 1}`;
 
@@ -497,23 +513,27 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
                   }
                   return (
                     <td key={mk} className="xs-mc-num">
-                      <button
-                        type="button"
-                        className="xs-mc-cell"
-                        title={`${m.label} — ${cat}: ${money(cell.value)}, ${formatNumber(cell.rowCount)} delivered PO lines`}
-                        onClick={() => onFocus(
-                          `${cat} — delivered in ${m.label}`,
-                          `${money(cell.value)} · ${formatNumber(cell.rowCount)} PO lines`,
-                          `spendCategory=${encodeURIComponent(cat)}`
-                          + `&monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
-                        )}
-                      >
-                        {money(cell.value)}
-                      </button>
+                      {fig(
+                        money(cell.value),
+                        `${m.label} — ${cat}: ${money(cell.value)}, ${formatNumber(cell.rowCount)} delivered PO lines`,
+                        `${cat} — delivered in ${m.label}`,
+                        `${money(cell.value)} · ${formatNumber(cell.rowCount)} PO lines`,
+                        `spendCategory=${encodeURIComponent(cat)}`
+                        + `&monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
+                      )}
                     </td>
                   );
                 })}
-                <td className="xs-mc-num xs-mc-tot">{money(catTotal)}</td>
+                <td className="xs-mc-num xs-mc-tot">
+                  {/* Every month the table shows, i.e. the page's own period. */}
+                  {fig(
+                    money(catTotal),
+                    `${cat}, ${span}: ${money(catTotal)} delivered`,
+                    `${cat} — delivered in ${span}`,
+                    money(catTotal),
+                    `spendCategory=${encodeURIComponent(cat)}&lifecycle=closed`,
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -521,10 +541,24 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
             <tr>
               <th scope="row" className="xs-mc-th-cat">All categories</th>
               {months.map(([mk, m]) => (
-                <td key={mk} className="xs-mc-num">{money(m.total)}</td>
+                <td key={mk} className="xs-mc-num">
+                  {fig(
+                    money(m.total),
+                    `${m.label}, all categories: ${money(m.total)} delivered`,
+                    `All categories — delivered in ${m.label}`,
+                    money(m.total),
+                    `monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
+                  )}
+                </td>
               ))}
               <td className="xs-mc-num xs-mc-tot">
-                {money(months.reduce((a, [, m]) => a + m.total, 0))}
+                {fig(
+                  money(months.reduce((a, [, m]) => a + m.total, 0)),
+                  `All categories, ${span}`,
+                  `All categories — delivered in ${span}`,
+                  money(months.reduce((a, [, m]) => a + m.total, 0)),
+                  'lifecycle=closed',
+                )}
               </td>
             </tr>
           </tfoot>
@@ -536,7 +570,7 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
         ordered. Every bar shares one scale — the widest month is the largest — and in-bar
         figures are {isIdr ? 'billions of rupiah' : 'millions of USD'}, printed only where
         the segment is wide enough to hold them. The table below carries every figure in
-        full, and its cells open the same slice the segments do.
+        full, and every figure in it, totals included, opens its slice as the segments do.
       </p>
     </div>
   );
@@ -713,6 +747,37 @@ function HoSiteBars({ data, onFocus, currency }: {
 
   const bandLabel = (b: string) => (b === 'Unit' ? 'Site' : b);
 
+  /**
+   * The slice for a band, optionally one month of it. managedBy is the band
+   * itself; before 16 Nov 2026 only the month was sent, so "HO — Jan 2026"
+   * opened HO and Site together and its cards did not match the bar.
+   */
+  const sliceOf = (band: string, mk?: string) =>
+    `managedBy=${encodeURIComponent(band)}`
+    + (mk ? `&monthKey=${encodeURIComponent(mk)}` : '');
+  const openBand = (band: string, mk?: string) => {
+    const m = bands.get(band);
+    const cell = mk ? m?.get(mk) : undefined;
+    const value = mk ? (cell?.value ?? 0) : totalOf(m ?? new Map(), 'value');
+    const lines = mk ? (cell?.lines ?? 0) : totalOf(m ?? new Map(), 'lines');
+    onFocus(
+      `${bandLabel(band)} — ${mk ? (cell?.label ?? mk) : 'all months'}`,
+      `${money(value)} · ${formatNumber(lines)} PO lines`,
+      sliceOf(band, mk),
+    );
+  };
+  /** One clickable figure in the table, opening what its segment opens. */
+  const fig = (shown: string, band: string, mk?: string) => (
+    <button
+      type="button"
+      className="xs-mc-cell"
+      title={`${bandLabel(band)} — ${mk ? (bands.get(band)?.get(mk)?.label ?? mk) : 'all months'}. Click for the Overview of this slice.`}
+      onClick={() => openBand(band, mk)}
+    >
+      {shown}
+    </button>
+  );
+
   const track = (
     band: string,
     m: Map<string, { value: number; lines: number; label: string }>,
@@ -733,11 +798,7 @@ function HoSiteBars({ data, onFocus, currency }: {
             className="xs-seg xs-mo-seg"
             style={{ width: `${w}%`, background: MONTH_COLORS[i % MONTH_COLORS.length] }}
             title={`${bandLabel(band)} — ${cell?.label ?? mk}: ${money(cell?.value ?? 0)}, ${formatNumber(cell?.lines ?? 0)} PO lines`}
-            onClick={() => onFocus(
-              `${bandLabel(band)} — ${cell?.label ?? mk}`,
-              `${money(cell?.value ?? 0)} · ${formatNumber(cell?.lines ?? 0)} PO lines`,
-              `monthKey=${encodeURIComponent(mk)}`,
-            )}
+            onClick={() => openBand(band, mk)}
           >
             {w >= 9 ? <span className="xs-mc-num">{shown}</span> : null}
           </button>
@@ -791,19 +852,19 @@ function HoSiteBars({ data, onFocus, currency }: {
                   <th scope="row" className="xs-mc-th-cat">{bandLabel(band)} <span className="muted">value</span></th>
                   {months.map((mk) => (
                     <td key={mk} className="xs-mc-num">
-                      {m.get(mk) ? money(m.get(mk)!.value) : <span className="muted">&mdash;</span>}
+                      {m.get(mk) ? fig(money(m.get(mk)!.value), band, mk) : <span className="muted">&mdash;</span>}
                     </td>
                   ))}
-                  <td className="xs-mc-num xs-mc-tot">{money(totalOf(m, 'value'))}</td>
+                  <td className="xs-mc-num xs-mc-tot">{fig(money(totalOf(m, 'value')), band)}</td>
                 </tr>
                 <tr>
                   <th scope="row" className="xs-mc-th-cat">{bandLabel(band)} <span className="muted">lines</span></th>
                   {months.map((mk) => (
                     <td key={mk} className="xs-mc-num">
-                      {m.get(mk) ? formatNumber(m.get(mk)!.lines) : <span className="muted">&mdash;</span>}
+                      {m.get(mk) ? fig(formatNumber(m.get(mk)!.lines), band, mk) : <span className="muted">&mdash;</span>}
                     </td>
                   ))}
-                  <td className="xs-mc-num xs-mc-tot">{formatNumber(totalOf(m, 'lines'))}</td>
+                  <td className="xs-mc-num xs-mc-tot">{fig(formatNumber(totalOf(m, 'lines')), band)}</td>
                 </tr>
               </Fragment>
             ))}

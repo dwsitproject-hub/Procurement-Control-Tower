@@ -22,7 +22,7 @@ import {
   ageBandPredicateSql, prSpendCategoryMatchSql, spendCategoryWithPlantSql,
 } from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
-import { datePredicate, dimPredicate } from './globalfilter.js';
+import { datePredicate, dimPredicate, managedBySql } from './globalfilter.js';
 
 const env = loadEnv();
 
@@ -451,6 +451,17 @@ const FILTERS: Record<string, Compiler> = {
    * to select them too. Without this the month filter alone returned every band
    * and the parity sweep reported 54 mismatches.
    */
+  /** The global managedBy filter, merged into a drill (mergeIntoPredicate). */
+  createdByHoUnitIn: (v, a, ps, grain) => {
+    const ph = p(ps, (v as unknown[]).map(String));
+    if (grain === 'pr_item') {
+      return `EXISTS (SELECT 1 FROM core.fact_po_line _xs
+                       WHERE _xs.dataset_version_id = ${a}.dataset_version_id
+                         AND _xs.pr_no = ${a}.pr_no AND _xs.pr_item = ${a}.pr_item
+                         AND ${managedBySql('_xs.', ph)})`;
+    }
+    return managedBySql(`${a}.`, ph);
+  },
   createdByHoUnit: (v, a, ps) => {
     const band = String(v);
     const sub = `(SELECT min(hu_.ho_unit) FROM core.dim_user_purch_org hu_

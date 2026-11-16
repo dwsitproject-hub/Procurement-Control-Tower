@@ -288,6 +288,7 @@ function detailFilterClause(
   // 030 put spend_category on the view, so this one IS applied now.
   add('d.spend_category', f.spendCategory);
   if ((f.sizeBand?.length ?? 0) > 0) ignored.push('PO size band');
+  if ((f.managedBy?.length ?? 0) > 0) ignored.push('HO/Site');
   // Both mean "delivered vs not", and every stage this page counts is already
   // not delivered: honouring them would either change nothing or empty the
   // page, and neither is what the reader asked for.

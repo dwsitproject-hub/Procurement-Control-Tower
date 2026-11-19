@@ -17,11 +17,13 @@ import { hubTrack } from '../lib/hub';
 
 export interface EditField {
   col: string; key: string; label: string;
-  kind: 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice';
+  kind: 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice' | 'multichoice';
   effect: 'label' | 'recompute' | 'mart';
   required?: boolean;
   /** A choice field's allowed values, stated by the server. */
   options?: string[];
+  /** Readable names for those values (purchasing organisations). */
+  optionLabels?: Record<string, string>;
   /**
    * A choice that can be left to the rules. Empty means Automatic, and the row
    * value at `viaKey` says whether the current value was chosen by hand.
@@ -131,7 +133,15 @@ export function MasterEditDialog({
   };
 
   const input = (key: string, kind: EditField['kind'], disabled: boolean, field?: EditField) => (
-    kind === 'choice' ? (
+    kind === 'multichoice' ? (
+      <MultiChoice
+        value={form[key] ?? ''}
+        options={field?.options ?? []}
+        labels={field?.optionLabels}
+        disabled={disabled}
+        onChange={(v) => setForm({ ...form, [key]: v })}
+      />
+    ) : kind === 'choice' ? (
       <select
         className="gf-search-in"
         value={form[key] ?? ''}
@@ -188,7 +198,7 @@ export function MasterEditDialog({
               </label>
             ))}
             {edit.fields.map((f) => (
-              <label key={f.key} className="me-field">
+              <label key={f.key} className={`me-field${f.kind === 'multichoice' ? ' me-field-wide' : ''}`}>
                 <span className="me-label">
                   {f.label}{f.required ? ' *' : ''}
                 </span>
@@ -221,6 +231,69 @@ export function MasterEditDialog({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Several values from a long list - a user's purchasing organisations (491 to
+ * choose from). Chosen ones sit on top as removable chips; a search box narrows
+ * the list. The value is "A, B", sorted, which is exactly how the Master table
+ * shows the column, so an untouched field compares equal and is not sent.
+ */
+function MultiChoice({ value, options, labels, disabled, onChange }: {
+  value: string;
+  options: string[];
+  labels: Record<string, string> | undefined;
+  disabled: boolean;
+  onChange: (v: string) => void;
+}) {
+  const [q, setQ] = useState('');
+  const chosen = value.split(',').map((x) => x.trim()).filter((x) => x !== '');
+  const set = (next: string[]) => onChange([...new Set(next)].sort().join(', '));
+  const name = (o: string) => (labels?.[o] ? `${o} — ${labels[o]}` : o);
+  const needle = q.trim().toLowerCase();
+  const shown = options
+    .filter((o) => !chosen.includes(o))
+    .filter((o) => needle === '' || name(o).toLowerCase().includes(needle))
+    .slice(0, 50);
+  return (
+    <div className="me-multi">
+      <div className="me-multi-chips">
+        {chosen.length === 0 && <span className="muted">None</span>}
+        {chosen.map((o) => (
+          <span key={o} className="me-multi-chip" title={name(o)}>
+            {o}
+            {!disabled && (
+              <button type="button" aria-label={`Remove ${o}`}
+                onClick={(e) => { e.preventDefault(); set(chosen.filter((x) => x !== o)); }}>✕</button>
+            )}
+          </span>
+        ))}
+      </div>
+      {!disabled && (
+        <>
+          <input
+            className="gf-search-in"
+            type="search"
+            placeholder="Search code or name to add…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          {needle !== '' && (
+            <ul className="me-multi-list" role="listbox">
+              {shown.length === 0 && <li className="muted">No match</li>}
+              {shown.map((o) => (
+                <li key={o}>
+                  <button type="button" onClick={(e) => { e.preventDefault(); set([...chosen, o]); setQ(''); }}>
+                    {name(o)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
     </div>
   );
 }

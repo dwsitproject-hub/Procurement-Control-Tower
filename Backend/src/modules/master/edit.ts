@@ -38,9 +38,10 @@ import type { FxRate } from '@pct/rules';
 /**
  * 'date' is YYYY-MM-DD. 'choice' must be one of a list the server states at
  * request time (EditField.choices) - a free-text category would turn every typo
- * into a new bucket on every chart.
+ * into a new bucket on every chart. 'multichoice' is several of such a list,
+ * sent as "A, B" (how the Master page shows it) and stored as an array.
  */
-export type FieldKind = 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice';
+export type FieldKind = 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice' | 'multichoice';
 export type FieldEffect = 'label' | 'recompute' | 'mart';
 
 export interface EditField {
@@ -57,7 +58,7 @@ export interface EditField {
    * spend category (038): it is not a column of dim_material but the first
    * step of the category rule, so it is written to its own table.
    */
-  store?: 'material_category' | 'material_master';
+  store?: 'material_category' | 'material_master' | 'user_org';
   /**
    * For store 'material_master': the column in core.dim_material_master. The
    * field's own `col` is a distinct pseudo-name (master_description) because
@@ -65,7 +66,7 @@ export interface EditField {
    */
   linkedCol?: string;
   /** Where a 'choice' field's allowed values come from (choicesFor). */
-  choices?: 'spend_categories';
+  choices?: 'spend_categories' | 'purch_orgs' | 'ho_units';
   /**
    * A choice that may be left AUTOMATIC - empty means "let the rules decide".
    * The form needs to know which row value says the current one is manual,
@@ -280,14 +281,24 @@ export const EDIT_SPECS: EditSpec[] = [
       { col: 'first_name', key: 'firstName', label: 'First name', kind: 'text', effect: 'label' },
       { col: 'last_name', key: 'lastName', label: 'Last name', kind: 'text', effect: 'label' },
       { col: 'display_name', key: 'displayName', label: 'Display name', kind: 'text', effect: 'label', required: true },
+      // Stored per USER in core.dim_user_org_manual (048), replacing the
+      // business file for that user; the view core.dim_user_purch_org is what
+      // every page reads. Only HO/Unit feeds a figure ("Manage by HO or Site").
+      {
+        col: 'purch_orgs', key: 'purchOrgs', label: 'Purchasing Organization', kind: 'multichoice',
+        effect: 'label', store: 'user_org', choices: 'purch_orgs',
+      },
+      {
+        col: 'ho_unit', key: 'hoUnit', label: 'HO/Unit', kind: 'choice',
+        effect: 'mart', store: 'user_org', choices: 'ho_units',
+      },
     ],
-    readOnly: [
-      { key: 'purchOrgs', reason: 'Assigned from the user-to-organization feed.' },
-      { key: 'hoUnit', reason: 'Assigned from the user-to-organization feed.' },
-    ],
+    readOnly: [],
     allowAdd: true,
     allowDelete: true,
-    note: 'Names are refreshed by every SAP sync; edited ones are kept.',
+    note: 'Names are refreshed by every SAP sync; edited ones are kept. Purchasing Organization and '
+      + 'HO/Unit belong to the user id, so they apply in every SAP client the id exists in; an edit '
+      + 'replaces what the business file says for that user, and Revert hands it back to the file.',
   },
 ];
 
@@ -307,6 +318,14 @@ function ident(name: string): string {
 
 /** Coerce one submitted value to its column's type, or refuse it. */
 function coerce(kind: FieldKind, raw: unknown, label: string, required: boolean): unknown {
+  if (kind === 'multichoice') {
+    // Empty is a real value here - "no organisation" - not "not given".
+    const parts = (Array.isArray(raw) ? raw.map(String) : String(raw ?? '').split(','))
+      .map((x) => x.trim()).filter((x) => x !== '');
+    const out = [...new Set(parts)].sort();
+    if (required && out.length === 0) throw new EditError(`${label} is required`);
+    return out;
+  }
   if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
     if (required) throw new EditError(`${label} is required`);
     return null;
@@ -357,20 +376,44 @@ export async function choicesFor(source: NonNullable<EditField['choices']>): Pro
     );
     return r.map((x) => x.category);
   }
+  if (source === 'purch_orgs') {
+    const r = await query<{ code: string }>(`SELECT code FROM core.dim_purch_org ORDER BY 1`);
+    return r.map((x) => x.code);
+  }
+  // The file's own two words (026); a third would be a value no figure reads.
+  if (source === 'ho_units') return ['HO', 'Unit'];
   return [];
 }
 
+/** Readable names for a choice list's codes, where the codes need one. */
+async function choiceLabels(source: NonNullable<EditField['choices']>): Promise<Record<string, string> | undefined> {
+  if (source !== 'purch_orgs') return undefined;
+  const r = await query<{ code: string; description: string }>(
+    `SELECT code, description FROM core.dim_purch_org ORDER BY 1`,
+  );
+  return Object.fromEntries(r.map((x) => [x.code, x.description]));
+}
+
 /** The fields as the page is told them: choice fields carry their allowed values. */
-export async function fieldsForPage(spec: EditSpec): Promise<Array<EditField & { options?: string[] }>> {
-  return Promise.all(spec.fields.map(async (f) => (
-    f.choices ? { ...f, options: await choicesFor(f.choices) } : f
-  )));
+export async function fieldsForPage(spec: EditSpec): Promise<Array<EditField & {
+  options?: string[]; optionLabels?: Record<string, string>;
+}>> {
+  return Promise.all(spec.fields.map(async (f) => {
+    if (!f.choices) return f;
+    const optionLabels = await choiceLabels(f.choices);
+    return { ...f, options: await choicesFor(f.choices), ...(optionLabels ? { optionLabels } : {}) };
+  }));
 }
 
 async function checkChoices(spec: EditSpec, vals: Record<string, unknown>): Promise<void> {
   for (const f of spec.fields) {
     if (!f.choices || vals[f.col] === null || vals[f.col] === undefined) continue;
     const allowed = await choicesFor(f.choices);
+    if (f.kind === 'multichoice') {
+      const bad = (vals[f.col] as string[]).filter((x) => !allowed.includes(x));
+      if (bad.length > 0) throw new EditError(`${f.label}: unknown value ${bad.join(', ')}`);
+      continue;
+    }
     if (!allowed.includes(String(vals[f.col]))) {
       throw new EditError(`${f.label} must be one of: ${allowed.join(', ')}`);
     }
@@ -395,8 +438,10 @@ function splitVals(spec: EditSpec, vals: Record<string, unknown>): {
 async function writeStored(
   c: pg.PoolClient, key: Record<string, unknown>, stored: Array<[EditField, unknown]>, actor: string | null,
 ): Promise<void> {
+  const userOrg = stored.filter(([f]) => f.store === 'user_org');
+  if (userOrg.length > 0) await writeUserOrg(c, String(key['user_id']), userOrg, actor);
   for (const [f, v] of stored) {
-    if (f.store === 'material_master') continue; // written by linkedWrite()
+    if (f.store === 'material_master' || f.store === 'user_org') continue; // written above / by linkedWrite()
     if (f.store === 'material_category') {
       const code = String(key['material_code']);
       if (v === null || v === undefined || v === '') {
@@ -412,6 +457,47 @@ async function writeStored(
       }
     }
   }
+}
+
+/**
+ * A user's organisations and HO/Unit (048). One manual row per user REPLACES
+ * the business file for them, so it always holds the whole picture: a field the
+ * edit did not send keeps the user's current value (their manual row, else the
+ * file). Both fields null at once is clearStored - revert or hide - and hands
+ * the user back to the file.
+ */
+async function writeUserOrg(
+  c: pg.PoolClient, userId: string, vals: Array<[EditField, unknown]>, actor: string | null,
+): Promise<void> {
+  const given = new Map(vals.map(([f, v]) => [f.col, v]));
+  if (vals.length === 2 && given.get('purch_orgs') === null && given.get('ho_unit') === null) {
+    await c.query(`DELETE FROM core.dim_user_org_manual WHERE user_id = $1`, [userId]);
+    return;
+  }
+  const manual = await c.query<{ purch_orgs: string[]; ho_unit: string | null }>(
+    `SELECT purch_orgs, ho_unit FROM core.dim_user_org_manual WHERE user_id = $1`, [userId],
+  );
+  const cur = manual.rows[0] ?? (await c.query<{ purch_orgs: string[]; ho_unit: string | null }>(
+    `SELECT COALESCE(array_agg(purch_org ORDER BY purch_org), '{}') AS purch_orgs, min(ho_unit) AS ho_unit
+       FROM core.dim_user_purch_org_file WHERE user_id = $1`, [userId],
+  )).rows[0]!;
+  const orgs = given.has('purch_orgs') ? (given.get('purch_orgs') as string[] | null) ?? [] : cur.purch_orgs;
+  const ho = given.has('ho_unit') ? (given.get('ho_unit') as string | null) : cur.ho_unit;
+  if (ho !== null && orgs.length === 0) {
+    throw new EditError('HO/Unit needs at least one Purchasing Organization - choose one, or clear HO/Unit');
+  }
+  // Nothing actually changes (an Add that left both empty, a no-op save):
+  // writing a manual row would still detach the user from the file, silently.
+  const same = orgs.join(',') === [...cur.purch_orgs].sort().join(',') && ho === cur.ho_unit;
+  if (manual.rows.length === 0 && same) return;
+  await c.query(
+    `INSERT INTO core.dim_user_org_manual (user_id, purch_orgs, ho_unit, updated_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE
+       SET purch_orgs = EXCLUDED.purch_orgs, ho_unit = EXCLUDED.ho_unit,
+           updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    [userId, orgs, ho, actor],
+  );
 }
 
 /** Remove every out-of-relation value a row has (revert, hide). */

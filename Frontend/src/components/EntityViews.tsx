@@ -894,6 +894,8 @@ export function CategoryModal({
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [plants, setPlants] = useState<string[]>([]);
+  /** Vendor Type filter (19 Nov 2026): '' = all, else Local (LN…) / Import (IN…). */
+  const [vtype, setVtype] = useState<VendorTypeValue>('');
   const [busy, setBusy] = useState(false);
   const [mat, setMat] = useState<string | null>(null);
 
@@ -902,6 +904,7 @@ export function CategoryModal({
     const q = new URLSearchParams(filterQuery);
     q.set('name', category);
     if (plants.length > 0) q.set('popPlant', plants.join(','));
+    if (vtype !== '') q.set('popVendorType', vtype);
     setBusy(true);
     setErr(null);
     api.get<Record<string, any>>(`/api/v1/entity/category?${q.toString()}`)
@@ -909,12 +912,13 @@ export function CategoryModal({
       .catch((e: Error) => { if (!gone) setErr(e.message); })
       .finally(() => { if (!gone) setBusy(false); });
     return () => { gone = true; };
-  }, [category, plants, filterQuery]);
+  }, [category, plants, vtype, filterQuery]);
 
   const k = d?.kpis;
   const money = (usd: number | null, idr: number | null) => formatCurrency(usd, idr, currency);
   const days = (v: number | null | undefined) => (v === null || v === undefined ? DASH : `${Number(v).toFixed(1)} d`);
-  const scopeNote = plants.length > 0 ? ` · plant ${plants.join(', ')}` : '';
+  const scopeNote = (plants.length > 0 ? ` · plant ${plants.join(', ')}` : '')
+    + (vtype !== '' ? ` · ${VENDOR_TYPE_TEXT[vtype]} vendors` : '');
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -942,8 +946,9 @@ export function CategoryModal({
               selected={plants}
               onChange={setPlants}
             />
-            {plants.length > 0 && (
-              <button className="gf-btn gf-clear" onClick={() => setPlants([])}>Clear</button>
+            <VendorTypeSelect value={vtype} onChange={setVtype} />
+            {(plants.length > 0 || vtype !== '') && (
+              <button className="gf-btn gf-clear" onClick={() => { setPlants([]); setVtype(''); }}>Clear</button>
             )}
             {filterQuery !== '' && <span className="gf-note">the page's filter bar applies too</span>}
             {busy && d && <span className="gf-note">updating…</span>}
@@ -992,6 +997,8 @@ export function CategoryModal({
                   }))}
                   yTitle={`Spend (${currency})`}
                   empty="No dated spend to chart."
+                  valueLabel="Spend"
+                  formatValue={(v) => (currency === 'IDR' ? formatCurrency(null, v, 'IDR') : formatCurrency(v, null, 'USD'))}
                 />
                 <p className="note" style={{ marginBottom: 0 }}>
                   The six vendors with the most spend in this category, by PO document month.
@@ -1063,16 +1070,21 @@ export function MaterialModal({
   const [err, setErr] = useState<string | null>(null);
   /** The popup's own Plant filter (19 Oct 2026); empty = every plant. */
   const [plants, setPlants] = useState<string[]>(initialPlants);
+  /** Vendor Type filter (19 Nov 2026): '' = all, else Local (LN…) / Import (IN…). */
+  const [vtype, setVtype] = useState<VendorTypeValue>('');
 
   useEffect(() => {
     let gone = false;
-    const qs = plants.length > 0 ? `?popPlant=${encodeURIComponent(plants.join(','))}` : '';
+    const p = new URLSearchParams();
+    if (plants.length > 0) p.set('popPlant', plants.join(','));
+    if (vtype !== '') p.set('popVendorType', vtype);
+    const qs = p.toString() === '' ? '' : `?${p.toString()}`;
     setErr(null);
     api.get<Record<string, any>>(`/api/v1/entity/material/${encodeURIComponent(code)}${qs}`)
       .then((r) => { if (!gone) setD(r); })
       .catch((e: Error) => { if (!gone) setErr(e.message); });
     return () => { gone = true; };
-  }, [code, plants]);
+  }, [code, plants, vtype]);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -1092,8 +1104,9 @@ export function MaterialModal({
           <div className="gf-bar cat360-filters">
             <span className="gf-label">Filter</span>
             <FilterDropdown label="Plant" options={d?.plantOptions ?? []} selected={plants} onChange={setPlants} />
-            {plants.length > 0 && (
-              <button className="gf-btn gf-clear" onClick={() => setPlants([])}>Clear</button>
+            <VendorTypeSelect value={vtype} onChange={setVtype} />
+            {(plants.length > 0 || vtype !== '') && (
+              <button className="gf-btn gf-clear" onClick={() => { setPlants([]); setVtype(''); }}>Clear</button>
             )}
           </div>
           {err && <p className="err">{err}</p>}
@@ -1114,7 +1127,11 @@ export function MaterialModal({
                 <div className="ent-h" style={{ marginTop: 0 }}>
                   Unit price by month — top vendors (IDR{d.priceBasis?.baseUnit ? ` per ${d.priceBasis.baseUnit}` : ''})
                 </div>
-                <PriceTrend rows={d.priceByVendor ?? []} />
+                <PriceTrend
+                  rows={d.priceByVendor ?? []}
+                  valueLabel="Unit price"
+                  formatValue={(v) => `Rp ${formatNumber(v, 2)}${d.priceBasis?.baseUnit ? ` / ${d.priceBasis.baseUnit}` : ''}`}
+                />
                 <p className="note" style={{ marginBottom: 0 }}>
                   Showing top {Math.min(6, d.kpis.vendorCount)} of {d.kpis.vendorCount} vendors by amount.
                   Unit price = Spend ÷ Order Qty per PO line, monthly ratio of sums{d.priceBasis?.baseUnit ? `, quantities normalised to ${d.priceBasis.baseUnit}` : ''}.
@@ -1171,14 +1188,54 @@ function AreaDonut({ title, rows }: { title: string; rows: Record<string, any>[]
   );
 }
 
+/**
+ * The Vendor Type filter of the 360 popups (19 Nov 2026). Local = vendor code
+ * LN…, Import = IN… - the server applies the rule; this only names it.
+ */
+type VendorTypeValue = '' | 'local' | 'import';
+const VENDOR_TYPE_TEXT: Record<'local' | 'import', string> = { local: 'Local', import: 'Import' };
+
+function VendorTypeSelect({ value, onChange }: { value: VendorTypeValue; onChange: (v: VendorTypeValue) => void }) {
+  return (
+    <label className="ms-filter" title="Local = vendor code LN…, Import = vendor code IN…">
+      <span className="gf-label">Vendor Type</span>
+      <select className="dt-search" value={value} onChange={(e) => onChange(e.target.value as VendorTypeValue)} aria-label="Vendor Type">
+        <option value="">All</option>
+        <option value="local">Local</option>
+        <option value="import">Import</option>
+      </select>
+    </label>
+  );
+}
+
+/**
+ * A vendor's display name. SAP's vendor name already starts with the code
+ * ("LN11001318 SURYA BIRU…"), so prefixing the code again printed it twice.
+ */
+function vendorLabel(code: unknown, name: unknown): string {
+  const c = String(code ?? '').trim();
+  const n = String(name ?? '').trim();
+  if (n === '') return c || '(vendor)';
+  return c !== '' && !n.toUpperCase().startsWith(c.toUpperCase()) ? `${c} ${n}` : n;
+}
+
 /** v1's material-360 unit-price trend: one line per top-6 vendor (IDR). */
-function PriceTrend({ rows, yTitle = 'Unit price (IDR equivalent)', empty = 'No IDR unit-price history to chart.' }: {
+function PriceTrend({
+  rows, yTitle = 'Unit price (IDR equivalent)', empty = 'No IDR unit-price history to chart.',
+  valueLabel = 'Value', formatValue = (v: number) => formatNumber(v, 2),
+}: {
   rows: Record<string, any>[];
   yTitle?: string;
   empty?: string;
+  /** What the plotted value is, for the hover ("Spend", "Unit price"). */
+  valueLabel?: string;
+  formatValue?: (v: number) => string;
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
+  // Read at hover time, so a new formatter each render does not rebuild the chart.
+  const fmt = useRef({ valueLabel, formatValue });
+  fmt.current = { valueLabel, formatValue };
   useEffect(() => {
     if (!canvas.current || rows.length === 0) return;
     const months = [...new Set(rows.map((r) => String(r.monthKey)))].sort();
@@ -1192,7 +1249,7 @@ function PriceTrend({ rows, yTitle = 'Unit price (IDR equivalent)', empty = 'No 
         datasets: vendors.map((vc, i) => {
           const name = rows.find((r) => r.vendorCode === vc)?.vendorName ?? vc;
           return {
-            label: `${vc} ${String(name).slice(0, 26)}`,
+            label: vendorLabel(vc, name).slice(0, 34),
             data: months.map((m) => {
               const hit = rows.find((r) => r.vendorCode === vc && r.monthKey === m);
               return hit ? Number(hit.unitPrice) : null;
@@ -1211,6 +1268,33 @@ function PriceTrend({ rows, yTitle = 'Unit price (IDR equivalent)', empty = 'No 
         animation: false,
         plugins: {
           legend: { display: true, position: 'top', labels: { boxWidth: 10, font: { size: 9 } } },
+          /*
+           * Hover (19 Nov 2026): the vendor once (code and name, not the code
+           * twice), then the plotted value, the ordered quantity and the PO
+           * lines behind the point.
+           */
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const vc = vendors[ctx.datasetIndex];
+                const r = rows.find((x) => String(x.vendorCode) === vc && String(x.monthKey) === String(ctx.label));
+                const name = vendorLabel(vc, r?.vendorName ?? rows.find((x) => String(x.vendorCode) === vc)?.vendorName);
+                const out = [name, `${fmt.current.valueLabel}: ${ctx.parsed.y === null ? '—' : fmt.current.formatValue(Number(ctx.parsed.y))}`];
+                if (r) {
+                  if (Array.isArray(r.qtyByUnit) && r.qtyByUnit.length > 0) {
+                    // Bought in more than one unit that month: each, never added up.
+                    out.push(`Quantity: ${r.qtyByUnit.map((u: any) => `${formatNumber(Number(u.qty), 2)} ${u.uom ?? ''}`.trim()).join(' + ')}`);
+                  } else {
+                    out.push(r.qty === null || r.qty === undefined
+                      ? 'Quantity: —'
+                      : `Quantity: ${formatNumber(Number(r.qty), 2)}${r.uom ? ` ${r.uom}` : ''}`);
+                  }
+                  if (r.lines !== undefined) out.push(`PO lines: ${formatNumber(Number(r.lines))}`);
+                }
+                return out;
+              },
+            },
+          },
         },
         scales: { y: { title: { display: true, text: yTitle } } },
       },

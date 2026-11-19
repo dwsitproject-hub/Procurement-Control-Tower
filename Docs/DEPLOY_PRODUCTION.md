@@ -531,6 +531,26 @@ SQL
 unset DBURL
 ```
 
+### 10c. Release of 19 Nov 2026 — Local / Import, sourcing comparison, page enhancements
+
+The usual §10 BE and FE updates; nothing to copy by hand. **Migration 046** runs at API start. It adds the
+Coupa quote-line table, the paid-PO view and the vendor-type lookup, and backfills a vendor type for every
+stored supplier response (about 30 s on the staging-sized Coupa store; production's is smaller). Then:
+
+- **Admin → SAP Data Sync → Rebuild** once. The Delivery cards' Local / Import chips and the new PR-to-PO
+  price-variance basis live in the precomputed figures; until the rebuild only a filtered view shows them.
+- **Sourcing comparison** needs no backfill: each older event fetches its quote lines from Coupa the first
+  time someone opens it, then keeps them; the Coupa sync stores them for every new response. This needs
+  production's Coupa sync to be running (on 19 Nov its last run was 12 Nov - see Admin → Coupa).
+- **Open Items "PO not delivered — paid / DP"** counts POs with a payment or down payment in **Coupa**
+  (the SAP exports carry no payment field). It stays 0 until Coupa invoices for SAP POs are synced.
+
+What changed for users: Vendor Type filter (Local = vendor code LN…, Import = IN…) on the Material Group
+popups and the Sourcing page; quantity in the popup chart hover; Sourcing event pipeline and supplier
+comparison; Master → SAP Users filters; Purchasing Organization column in drill tables; the PO-not-delivered
+split; PR-to-PO price variance without token PR prices (≤ 1) or free PO lines (0); Local / Import on the five
+Delivery cards.
+
 ## 11. Rollback
 
 **On the affected server:**

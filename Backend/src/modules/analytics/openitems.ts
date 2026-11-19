@@ -45,7 +45,7 @@ import {
 import {
   AGE_BANDS, AGE_LATE_DAYS, ageBandPredicateSql, ageLatePredicateSql,
 } from '@pct/rules';
-import { MONEY_STATE_SQL } from './detail.js';
+import { MONEY_STATE_SQL, PAID_STATE_SQL } from './detail.js';
 import { OPEN_STATUSES, type GlobalFilter } from './globalfilter.js';
 
 /** The age boundary this page reads "past SLA" at. See the header. */
@@ -416,6 +416,46 @@ export async function openItemsSummary(
     };
   });
 
+  /*
+   * "PO not delivered" as two cards (19 Nov 2026): ordered and not received,
+   * split by whether the PO has a payment or down payment recorded in Coupa.
+   * The SAP exports carry no payment field, so Coupa is the source - and it
+   * knows only POs invoiced through Coupa, which the card's subtitle says.
+   * The two cards add up to the one they replace, so every total on the page
+   * (and the category table's Stage filter, which keeps the one status) is
+   * unchanged.
+   */
+  const splitRows = await query<Record<string, unknown>>(
+    `SELECT (${PAID_STATE_SQL['paid']}) AS k, ${MEASURES}, count(DISTINCT d.po_no)::int AS pos
+       FROM core.v_detail d WHERE ${w.sql} AND d.status = 'PO-No GR' GROUP BY 1`,
+    w.params,
+  );
+  const cardStages: StageRow[] = stages.flatMap((st) => {
+    if (st.detailFilter['status'] !== 'PO-No GR') return [st];
+    return [false, true].map((paid) => {
+      const r = splitRows.find((x) => Boolean(x['k']) === paid);
+      const n = (k: string): number => Number(r?.[k] ?? 0);
+      return {
+        ...st,
+        key: paid ? 'po_not_delivered_paid' : 'po_not_delivered_no_dp',
+        name: paid ? 'PO not delivered — paid / DP' : 'PO not delivered — no DP',
+        sub: `${n('pos').toLocaleString('en-GB')} POs · `
+          + (paid ? 'payment or DP recorded in Coupa, no goods receipt'
+            : 'no payment or DP in Coupa, no goods receipt'),
+        count: n('n'),
+        bands: AGE_BANDS.map((_b, i) => n(`b${i}`)),
+        pastSla: n('past_sla'),
+        overLate: n('over_late'),
+        oldest: r && r['oldest'] !== null && r['oldest'] !== undefined ? Number(r['oldest']) : null,
+        emergency: n('emergency'),
+        urgent: n('urgent'),
+        standard: n('standard'),
+        prioUnset: n('prio_unset'),
+        detailFilter: { status: 'PO-No GR', paidState: paid ? 'paid' : 'unpaid' },
+      };
+    });
+  });
+
   // ── material categories ──────────────────────────────────────────────
   //
   // Purchasing group until 22 Sep 2026, changed on request. It is what a buyer
@@ -589,7 +629,7 @@ export async function openItemsSummary(
     pastSlaDays: PAST_SLA_DAYS,
     lateDays: AGE_LATE_DAYS,
     bands: AGE_BANDS.map((b) => ({ key: b.key, label: b.label })),
-    stages,
+    stages: cardStages,
     categories: categories.map((r) => ({
       desk: String(r['desk']),
       label: String(r['label']),

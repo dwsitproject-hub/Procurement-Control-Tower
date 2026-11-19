@@ -41,6 +41,8 @@ interface MasterTable {
   marks?: RowMark[];
   /** FX: manual rates waiting for the next recompute. */
   pendingFx?: number;
+  /** Drop-down filters this table offers (SAP Users: Purchasing Organization, HO/Unit). */
+  filters?: { key: string; label: string; options: { value: string; label: string }[]; selected: string | null }[];
 }
 
 interface MasterPage {
@@ -86,6 +88,8 @@ export function MasterTab({ section, onSection }: {
   /** Page per table, by position; and the open sub-tab on a tabbed master. */
   const [pages, setPages] = useState<number[]>([]);
   const [tabIdx, setTabIdx] = useState(0);
+  /** Drop-down filter values by key; '' = all. */
+  const [mf, setMf] = useState<Record<string, string>>({});
 
   /**
    * Hide or revert, confirmed. Both are reversible, and the confirmation says
@@ -124,10 +128,10 @@ export function MasterTab({ section, onSection }: {
 
   // A new master starts with a clear search: carrying a vendor code into the
   // document-type list shows an empty table and looks like missing data.
-  useEffect(() => { setTerm(''); setApplied(''); setSort(null); setTabIdx(0); }, [active]);
+  useEffect(() => { setTerm(''); setApplied(''); setSort(null); setTabIdx(0); setMf({}); }, [active]);
   // A new search or sort starts every table from its first page: page 7 of the
   // old order is not a place in the new one.
-  useEffect(() => { setPages([]); }, [active, applied, sort]);
+  useEffect(() => { setPages([]); }, [active, applied, sort, mf]);
 
   useEffect(() => {
     const t = setTimeout(() => setApplied(term), 250);
@@ -141,6 +145,7 @@ export function MasterTab({ section, onSection }: {
     const p = new URLSearchParams();
     if (applied.trim() !== '') p.set('q', applied.trim());
     if (sort) { p.set('sort', sort.key); p.set('dir', sort.dir); }
+    Object.entries(mf).forEach(([k, val]) => { if (val !== '') p.set(`f_${k}`, val); });
     pages.forEach((n, i) => { if (n > 0) p.set(`page${i}`, String(n)); });
     const qs = p.toString() === '' ? '' : `?${p.toString()}`;
     api.get<MasterPage>(`/api/v1/master/${active}${qs}`)
@@ -148,7 +153,7 @@ export function MasterTab({ section, onSection }: {
       .catch((e: Error) => { if (!dead) setErr(e.message); })
       .finally(() => { if (!dead) setBusy(false); });
     return () => { dead = true; };
-  }, [active, applied, sort, nonce, pages]);
+  }, [active, applied, sort, nonce, pages, mf]);
 
   useEffect(() => load(), [load]);
 
@@ -212,6 +217,26 @@ export function MasterTab({ section, onSection }: {
           />
           {term !== '' && (
             <button className="dt-btn" onClick={() => setTerm('')}>Clear</button>
+          )}
+          {/* The page's drop-down filters, from the server's registry. */}
+          {(page?.tables ?? []).flatMap((t) => t.filters ?? [])
+            .filter((f, i, all) => all.findIndex((x) => x.key === f.key) === i)
+            .map((f) => (
+              <label key={f.key} className="ms-filter">
+                <span className="muted">{f.label}</span>
+                <select
+                  className="dt-search"
+                  value={mf[f.key] ?? ''}
+                  onChange={(e) => setMf((cur) => ({ ...cur, [f.key]: e.target.value }))}
+                  aria-label={f.label}
+                >
+                  <option value="">All</option>
+                  {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </label>
+            ))}
+          {Object.values(mf).some((x) => x !== '') && (
+            <button className="dt-btn" onClick={() => setMf({})}>Reset filters</button>
           )}
           {busy && <span className="muted">searching…</span>}
         </div>

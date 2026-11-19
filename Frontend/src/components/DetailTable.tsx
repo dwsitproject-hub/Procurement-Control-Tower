@@ -167,6 +167,8 @@ export function DetailTable({
    * every row in the dataset.
    */
   const [moneyState, setMoneyState] = useState(init['moneyState'] ?? '');
+  /** Open Items' split "PO not delivered" cards (19 Nov 2026): 'paid' | 'unpaid'. */
+  const [paidState, setPaidState] = useState(init['paidState'] ?? '');
   /**
    * Open Items stages, from the backlog table's Stages filter (19 Oct 2026):
    * open statuses and/or after-delivery states, OR'd by the server. Carried
@@ -242,6 +244,7 @@ export function DetailTable({
     if (debounced.trim() !== '') q.set('q', debounced.trim());
     if (ageBand) q.set('ageBand', ageBand);
     if (moneyState) q.set('moneyState', moneyState);
+    if (paidState) q.set('paidState', paidState);
     if (oiStage) q.set('oiStage', oiStage);
     if (excludeSto) q.set('excludeSto', 'true');
     if (includeDeleted) q.set('includeDeleted', 'true');
@@ -251,7 +254,7 @@ export function DetailTable({
       q.set('dir', sort.dir);
     }
     return q.toString();
-  }, [globalParams, filters, debounced, ageBand, moneyState, oiStage, excludeSto, includeDeleted, onlyOpen, sort]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, paidState, oiStage, excludeSto, includeDeleted, onlyOpen, sort]);
 
   const queryString = useMemo(
     () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
@@ -261,7 +264,7 @@ export function DetailTable({
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
     setPage(0);
-  }, [globalParams, filters, debounced, ageBand, moneyState, oiStage, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, paidState, oiStage, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -389,6 +392,7 @@ export function DetailTable({
     (debounced.trim() ? 1 : 0) +
     (ageBand ? 1 : 0) +
     (moneyState ? 1 : 0) +
+    (paidState ? 1 : 0) +
     (oiStage ? 1 : 0) +
     (excludeSto ? 1 : 0) +
     (includeDeleted ? 1 : 0) +
@@ -497,6 +501,15 @@ export function DetailTable({
                 : 'invoiced in Coupa, not paid'}
             </strong>{' '}
             <button className="dt-btn" onClick={() => setMoneyState('')}>clear</button>
+          </p>
+        )}
+
+        {paidState && (
+          <p className="note dt-agechip">
+            Payment: <strong>
+              {paidState === 'paid' ? 'paid or DP recorded in Coupa' : 'no payment or DP in Coupa'}
+            </strong>{' '}
+            <button className="dt-btn" onClick={() => setPaidState('')}>clear</button>
           </p>
         )}
 

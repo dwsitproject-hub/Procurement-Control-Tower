@@ -67,6 +67,38 @@ interface MasterTableSpec {
   searchCols: string[];
   /** True when the rows belong to one dataset version. */
   versionScoped?: boolean;
+  /**
+   * Drop-down filters (19 Nov 2026, SAP Users: Purchasing Organization and
+   * HO/Unit). Options come from `optionsSql`; a requested value is accepted only
+   * if it is one of them, so the predicate is the registry's SQL with one bound
+   * parameter and a request can never widen what it reaches.
+   */
+  filters?: MasterFilterSpec[];
+}
+
+/** Value meaning "blank" in a master filter - a user in no org, no HO/Unit. */
+export const MASTER_NONE = '__none__';
+
+interface MasterFilterSpec {
+  key: string;
+  label: string;
+  /** One text column `v`, the selectable values, already ordered. */
+  optionsSql: string;
+  /** Display text per value, where the stored code is not what a reader says. */
+  optionLabels?: Record<string, string>;
+  /** Offer "(none)" for rows with no value. */
+  allowNone?: boolean;
+  /** Predicate for one value, given its placeholder; and for "(none)". */
+  predicate: (ph: string) => string;
+  nonePredicate?: string;
+}
+
+export interface MasterFilterState {
+  key: string;
+  label: string;
+  options: { value: string; label: string }[];
+  /** The value applied, after validation; null = all. */
+  selected: string | null;
 }
 
 export interface MasterPageSpec {
@@ -357,6 +389,28 @@ export const MASTER_PAGES: MasterPageSpec[] = [
       from: 'core.dim_sap_user u',
       orderBy: 'u.client, u.user_id',
       searchCols: ['u.client', 'u.user_id', 'u.first_name', 'u.last_name', 'u.display_name'],
+      // Same definitions as the two columns: a user is "in" an org if ANY of
+      // their org rows names it (a buyer can act for four), and HO/Unit is the
+      // min() the column shows.
+      filters: [
+        {
+          key: 'purchOrg', label: 'Purchasing Organization', allowNone: true,
+          optionsSql: `SELECT DISTINCT purch_org AS v FROM core.dim_user_purch_org
+                        WHERE purch_org IS NOT NULL ORDER BY 1`,
+          predicate: (ph) => `EXISTS (SELECT 1 FROM core.dim_user_purch_org fo
+                                       WHERE fo.user_id = u.user_id AND fo.purch_org = ${ph})`,
+          nonePredicate: `NOT EXISTS (SELECT 1 FROM core.dim_user_purch_org fo WHERE fo.user_id = u.user_id)`,
+        },
+        {
+          key: 'hoUnit', label: 'HO/Unit', allowNone: true,
+          optionsSql: `SELECT DISTINCT ho_unit AS v FROM core.dim_user_purch_org
+                        WHERE ho_unit IS NOT NULL ORDER BY 1`,
+          predicate: (ph) => `(SELECT min(fo.ho_unit) FROM core.dim_user_purch_org fo
+                                WHERE fo.user_id = u.user_id) = ${ph}`,
+          nonePredicate: `(SELECT min(fo.ho_unit) FROM core.dim_user_purch_org fo
+                            WHERE fo.user_id = u.user_id) IS NULL`,
+        },
+      ],
     }],
   },
 ];
@@ -389,6 +443,8 @@ export interface MasterTableResult {
   /** Echoed so the UI marks the right header, including when a key was rejected. */
   sortKey: string | null;
   sortDir: 'asc' | 'desc';
+  /** The table's drop-down filters, with their options and what was applied. */
+  filters: MasterFilterState[];
 }
 
 /**
@@ -405,6 +461,8 @@ export async function loadMasterPage(
   sort?: { key: string; dir: 'asc' | 'desc' },
   /** Page per table, by the table's position on the page; missing = first page. */
   pages: number[] = [],
+  /** Drop-down filter values by key; validated against each table's options. */
+  filterValues: Record<string, string> = {},
 ): Promise<{ id: string; label: string; blurb: string; tabbed: boolean; tables: MasterTableResult[] } | null> {
   const page = MASTER_BY_ID.get(id);
   if (!page) return null;
@@ -429,6 +487,24 @@ export async function loadMasterPage(
       `SELECT count(*)::int AS n FROM ${t.from} ${baseWhere}`,
       [...params],
     );
+
+    // Drop-down filters. Applied with the search, after the unfiltered total,
+    // so "12 of 2,073" still says how much was narrowed away.
+    const filterStates: MasterFilterState[] = [];
+    for (const f of t.filters ?? []) {
+      const opts = await query<{ v: string }>(f.optionsSql);
+      const options = opts.map((o) => ({ value: o.v, label: f.optionLabels?.[o.v] ?? o.v }));
+      if (f.allowNone) options.push({ value: MASTER_NONE, label: '(none)' });
+      const want = filterValues[f.key];
+      const selected = want !== undefined && options.some((o) => o.value === want) ? want : null;
+      if (selected === MASTER_NONE && f.nonePredicate) {
+        clauses.push(f.nonePredicate);
+      } else if (selected !== null && selected !== MASTER_NONE) {
+        params.push(selected);
+        clauses.push(f.predicate(`$${params.length}`));
+      }
+      filterStates.push({ key: f.key, label: f.label, options, selected });
+    }
 
     if (search !== '') {
       params.push(likeArg(search));
@@ -486,6 +562,7 @@ export async function loadMasterPage(
       versionScoped: t.versionScoped === true,
       sortKey: sortable ? sort!.key : null,
       sortDir: sortable && sort!.dir === 'desc' ? 'desc' : 'asc',
+      filters: filterStates,
     });
   }
 

@@ -87,11 +87,35 @@ export function KpiCard({
       </span>
     ) : null;
 
+  /*
+   * Local / Import split (19 Nov 2026): Local = vendor code LN…, Import = IN….
+   * Values are in the card's own unit; a type with no observation shows "—".
+   */
+  const vtFmt = (v: unknown): string => {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
+    const n = Number(v);
+    if (kpi.unit === 'percent') return `${n.toFixed(1)}%`;
+    if (kpi.unit === 'days') return `${n.toFixed(1)} d`;
+    return formatNumber(n);
+  };
+  const vendorSplit = kpi.detail && kpi.detail['vt_local'] !== undefined ? (
+    <span className="kpi-chips kpi-vt">
+      <span className="chip chip-vt-local"
+        title={`Local suppliers (vendor code LN…): ${formatNumber(Number(kpi.detail['vt_local_n'] ?? 0))} observations`}>
+        Local {vtFmt(kpi.detail['vt_local'])}
+      </span>
+      <span className="chip chip-vt-import"
+        title={`Import suppliers (vendor code IN…): ${formatNumber(Number(kpi.detail['vt_import_n'] ?? 0))} observations`}>
+        Import {vtFmt(kpi.detail['vt_import'])}
+      </span>
+    </span>
+  ) : null;
+
   const body = (
     <>
       <div className="v">{headline}</div>
       <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
-      <div className="s">{basisNote ? `${basisNote} · ` : ''}{sub}{chips}</div>
+      <div className="s">{basisNote ? `${basisNote} · ` : ''}{sub}{chips}{vendorSplit}</div>
     </>
   );
 

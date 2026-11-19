@@ -113,7 +113,8 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   // would read as rupiah.
   { key: 'poValueIdr',      label: 'PO Value IDR',           sql: 'po_value_idr',        type: 'money',  currency: 'IDR', default: false, sortable: true },
   { key: 'prValueIdr',      label: 'PR Value IDR',           sql: 'pr_value_idr',        type: 'money',  currency: 'IDR', default: false, sortable: true },
-  { key: 'purchOrg',        label: 'Purch Org',              sql: 'purch_org',           type: 'string', default: false, sortable: true },
+  // Shown by default since 19 Nov 2026 (requested), labelled like the drill's.
+  { key: 'purchOrg',        label: 'Purchasing Organization', sql: 'purch_org',          type: 'string', default: true,  sortable: true },
   { key: 'purchGroup',      label: 'Purch Grp',              sql: 'purch_group',         type: 'string', default: false, sortable: true },
   { key: 'requisitioner',   label: 'Requisitioner',          sql: 'requisitioner',       type: 'string', default: false, sortable: true },
   // 028. The age of the row in the stage it is in — a PR still waiting ages on
@@ -252,6 +253,12 @@ export interface DetailFilters {
    * more.
    */
   moneyState?: string;
+  /**
+   * 'paid' | 'unpaid' (19 Nov 2026): whether the line's SAP PO has a payment or
+   * down payment recorded in Coupa (ops.v_coupa_paid_sap_po). The Open Items
+   * "PO not delivered" cards split on it. Whitelisted like moneyState.
+   */
+  paidState?: string;
   excludeSto?: boolean;
   includeDeleted?: boolean;
   onlyOpen?: boolean;
@@ -268,7 +275,7 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'oiStage', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'oiStage', 'q', 'ageBand', 'moneyState', 'paidState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
 
@@ -332,6 +339,12 @@ const INVOICED_NOT_PAID = `(d.po_no, d.po_item) IN (
      AND NOT i.paid AND i.status NOT IN ('voided', 'draft'))`;
 
 /** Exported so the Open Items cards count exactly what the table will show. */
+/** paidState's whitelist: the SAP PO has (not) a Coupa payment or DP. */
+export const PAID_STATE_SQL: Record<string, string> = {
+  paid: 'EXISTS (SELECT 1 FROM ops.v_coupa_paid_sap_po pp WHERE pp.po_no = d.po_no)',
+  unpaid: 'NOT EXISTS (SELECT 1 FROM ops.v_coupa_paid_sap_po pp WHERE pp.po_no = d.po_no)',
+};
+
 export const MONEY_STATE_SQL: Record<string, string> = {
   deliveredNotInvoiced: DELIVERED_NOT_INVOICED,
   invoicedNotPaid: INVOICED_NOT_PAID,
@@ -401,6 +414,7 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     search: q['q'] === undefined ? undefined : String(q['q']),
     ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
     moneyState: q['moneyState'] === undefined ? undefined : String(q['moneyState']),
+    paidState: q['paidState'] === undefined ? undefined : String(q['paidState']),
     excludeSto: flag('excludeSto'),
     includeDeleted: flag('includeDeleted'),
     onlyOpen: flag('onlyOpen'),
@@ -454,6 +468,8 @@ export function describeDetailFilters(
   if (filters.moneyState === 'deliveredNotInvoiced') {
     out.push(['State', 'delivered, not invoiced']);
   }
+  if (filters.paidState === 'paid') out.push(['Payment', 'paid or DP recorded in Coupa']);
+  if (filters.paidState === 'unpaid') out.push(['Payment', 'no payment or DP in Coupa']);
   if (filters.moneyState === 'invoicedNotPaid') {
     // Named as Coupa's, in the export's own filter list, because the rows came
     // from a store the dataset version does not pin.
@@ -591,6 +607,9 @@ function buildDetailWhere(
   }
   if (filters.moneyState && MONEY_STATE_SQL[filters.moneyState]) {
     where.push(`(${MONEY_STATE_SQL[filters.moneyState]})`);
+  }
+  if (filters.paidState && PAID_STATE_SQL[filters.paidState]) {
+    where.push(`(${PAID_STATE_SQL[filters.paidState]})`);
   }
 
   const search = (filters.search ?? '').trim();

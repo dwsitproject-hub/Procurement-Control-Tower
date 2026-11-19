@@ -5,6 +5,7 @@ import {
 import { api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
 import { Lbl } from '../lib/labels';
+import { FloatControls } from './FloatControls';
 
 ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
@@ -126,9 +127,20 @@ function SyncNote({ watermarks }: { watermarks: Record<string, any>[] | undefine
 export function CoupaSourcingTab() {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /** Vendor Type filter (19 Nov 2026): '' = all, else Local (LN…) / Import (IN…). */
+  const [vtype, setVtype] = useState<'' | 'local' | 'import'>('');
+  /** The event whose supplier comparison is open. */
+  const [compare, setCompare] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
-    api.get<Record<string, any>>('/api/v1/coupa/sourcing').then(setD).catch((e: Error) => setErr(e.message));
-  }, []);
+    let gone = false;
+    setBusy(true);
+    api.get<Record<string, any>>(`/api/v1/coupa/sourcing${vtype ? `?vendorType=${vtype}` : ''}`)
+      .then((r) => { if (!gone) { setD(r); setErr(null); } })
+      .catch((e: Error) => { if (!gone) setErr(e.message); })
+      .finally(() => { if (!gone) setBusy(false); });
+    return () => { gone = true; };
+  }, [vtype]);
   if (err) return <div className="panel"><h2><Lbl>Sourcing</Lbl></h2><p className="err">{err}</p></div>;
   if (!d) return <div className="center-msg"><div className="spinner" />Loading Coupa sourcing…</div>;
   if (!d.configured) {
@@ -137,11 +149,29 @@ export function CoupaSourcingTab() {
   const k = d.kpis ?? {};
   const b = d.bids ?? {};
   const awardRate = Number(b.responses ?? 0) > 0 ? ((Number(b.awarded ?? 0) / Number(b.responses)) * 100).toFixed(1) : null;
+  const cov = d.typeCoverage ?? {};
   return (
     <>
       <SyncNote watermarks={d.watermarks} />
+      <div className="gf-bar" style={{ marginBottom: '.8rem' }}>
+        <span className="gf-label">Filter</span>
+        <label className="ms-filter" title="Local = SAP vendor code LN…, Import = IN… - matched to the Coupa supplier master by name or email">
+          <span className="gf-label">Vendor Type</span>
+          <select className="dt-search" value={vtype} onChange={(e) => setVtype(e.target.value as '' | 'local' | 'import')} aria-label="Vendor Type">
+            <option value="">All</option>
+            <option value="local">Local</option>
+            <option value="import">Import</option>
+          </select>
+        </label>
+        {vtype !== '' && <button className="gf-btn gf-clear" onClick={() => setVtype('')}>Clear</button>}
+        <span className="gf-note">
+          Bids by type: {formatNumber(Number(cov.local ?? 0))} Local · {formatNumber(Number(cov.import ?? 0))} Import
+          {Number(cov.unknown ?? 0) > 0 ? ` · ${formatNumber(Number(cov.unknown))} not matched to the supplier master` : ''}
+        </span>
+        {busy && <span className="gf-note">updating…</span>}
+      </div>
       <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
-        <Kpi v={formatNumber(Number(k.events ?? 0))} label="Sourcing events" sub="excluding templates" />
+        <Kpi v={formatNumber(Number(k.events ?? 0))} label="Sourcing events" sub={vtype ? `with a ${vtype === 'local' ? 'Local' : 'Import'} bid` : 'excluding templates'} />
         <Kpi v={formatNumber(Number(k.open_events ?? 0))} label="Open events" sub="not complete or canceled" />
         <Kpi v={formatNumber(Number(k.completed ?? 0))} label="Completed events" />
         <Kpi v={k.median_cycle_days == null ? DASH : `${Number(k.median_cycle_days).toFixed(1)} d`} label="Event cycle (median)" sub="submit → end" />
@@ -194,7 +224,7 @@ export function CoupaSourcingTab() {
                 {(d.bySupplier ?? []).length === 0 && <tr><td colSpan={3} className="muted">No awarded bids yet.</td></tr>}
                 {(d.bySupplier ?? []).map((c: any, i: number) => (
                   <tr key={c.supplier_name} className={i % 2 ? '' : 're'}>
-                    <td>{c.supplier_name}</td>
+                    <td>{c.supplier_name} <VendorTypeBadge t={c.vendor_type} /></td>
                     <td className="num">{formatNumber(c.awarded_bids)}{c.other_ccy > 0 ? <span className="muted" title={`${c.other_ccy} non-IDR bids not in the amount`}> ⚠</span> : null}</td>
                     <td className="num">{M(c.amount_idr)}</td>
                   </tr>
@@ -203,37 +233,38 @@ export function CoupaSourcingTab() {
             </table>
           </div>
         </div>
-        <div className="panel">
-          <h3 className="pr-tbl-h"><Lbl>Event pipeline</Lbl></h3>
-          <p className="note">
-            {formatNumber(Number(k.events ?? 0))} events · {formatNumber(Number(k.open_events ?? 0))} still open ·{' '}
-            {formatNumber(Number(k.completed ?? 0))} complete. Bids: {formatNumber(Number(b.responses ?? 0))} submitted
-            by {formatNumber(Number(b.suppliers ?? 0))} suppliers, {formatNumber(Number(b.awarded ?? 0))} awarded.
-          </p>
-        </div>
+        <EventPipeline pipeline={d.pipeline ?? []} bids={b} events={Number(k.events ?? 0)} />
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
-        <h3 className="pr-tbl-h"><Lbl>Sourcing data table</Lbl> <span className="muted">— newest 200 supplier bids</span></h3>
+        <h3 className="pr-tbl-h"><Lbl>Sourcing data table</Lbl> <span className="muted">— newest 200 supplier bids · click an event or its bid count to compare the suppliers</span></h3>
         <div className="table-wrap dt-scroll">
           <table className="data dd-tbl">
             <thead>
               <tr>
                 <th>Event</th><th>Type</th><th>State</th><th>Commodity</th><th>Description</th>
-                <th>SAP PR</th><th>Supplier</th><th>Awarded</th><th>Submitted</th>
+                <th>SAP PR</th><th>Supplier</th><th>Vendor Type</th><th className="num">Bids</th><th>Awarded</th><th>Submitted</th>
                 <th className="num">Amount</th><th>Ccy</th>
               </tr>
             </thead>
             <tbody>
               {(d.dataTable ?? []).map((r2: any, i: number) => (
                 <tr key={`${r2.event_id}|${r2.supplier_name}|${i}`} className={i % 2 ? '' : 're'}>
-                  <td>{r2.event_id}</td>
+                  <td>
+                    <button className="cu-link" title="Compare every supplier's quote on this event" onClick={() => setCompare(Number(r2.event_id))}>
+                      {r2.event_id}
+                    </button>
+                  </td>
                   <td>{r2.event_type ?? DASH}</td>
                   <td>{r2.event_state ?? DASH}</td>
                   <td>{r2.commodity ?? DASH}</td>
                   <td className="muted">{r2.description ?? ''}</td>
                   <td>{r2.sap_pr_no ?? DASH}</td>
                   <td>{r2.supplier_name ?? DASH}</td>
+                  <td><VendorTypeBadge t={r2.vendor_type} /></td>
+                  <td className="num">
+                    <button className="cu-link" onClick={() => setCompare(Number(r2.event_id))}>{formatNumber(Number(r2.bids_on_event ?? 0))}</button>
+                  </td>
                   <td><span className={`bs ${r2.awarded ? 'sd' : 'sl'}`}>{r2.awarded ? 'Yes' : 'No'}</span></td>
                   <td>{r2.submitted_at ? String(r2.submitted_at).slice(0, 10) : DASH}</td>
                   <td className="num">{r2.total_amount === null ? DASH : formatNumber(Number(r2.total_amount))}</td>
@@ -244,7 +275,251 @@ export function CoupaSourcingTab() {
           </table>
         </div>
       </div>
+      {compare !== null && <SourcingCompareModal eventId={compare} onClose={() => setCompare(null)} />}
     </>
+  );
+}
+
+/** Local / Import, as resolved per supplier response; nothing when unmatched. */
+function VendorTypeBadge({ t }: { t: string | null | undefined }) {
+  if (!t) return <span className="muted" title="Not matched to the Coupa supplier master">—</span>;
+  return <span className={`chip ${t === 'Import' ? 'chip-vt-import' : 'chip-vt-local'}`}>{t}</span>;
+}
+
+/**
+ * The event pipeline (19 Nov 2026): every event by the stage its Coupa state
+ * puts it in, in order, each with how many drew a bid and how many were
+ * awarded; then the bid funnel. Replaces a single sentence of totals that left
+ * the panel looking empty.
+ */
+const STAGES: { key: string; label: string; hint: string; color: string }[] = [
+  { key: 'draft', label: 'Draft', hint: 'Coupa state new / draft - not yet sent to suppliers', color: '#94a3b8' },
+  { key: 'live', label: 'Live', hint: 'Coupa state prod - open for bids', color: '#2E75B6' },
+  { key: 'paused', label: 'Paused', hint: 'Coupa state pause', color: '#d4b106' },
+  { key: 'evaluation', label: 'Evaluation', hint: 'Coupa state closed_for_edit - bidding closed, award pending', color: '#ea7317' },
+  { key: 'complete', label: 'Complete', hint: 'Coupa state complete - awarded or closed', color: '#0D9488' },
+  { key: 'canceled', label: 'Canceled', hint: 'Coupa state canceled', color: '#C0392B' },
+  { key: 'other', label: 'Other', hint: 'Any other Coupa state', color: '#64748B' },
+];
+
+function EventPipeline({ pipeline, bids, events }: {
+  pipeline: { stage: string; events: number; with_bids: number; awarded: number }[];
+  bids: Record<string, any>;
+  events: number;
+}) {
+  const by = new Map(pipeline.map((p) => [p.stage, p]));
+  const rows = STAGES.filter((s2) => (by.get(s2.key)?.events ?? 0) > 0);
+  const max = Math.max(1, ...rows.map((s2) => by.get(s2.key)!.events));
+  const funnel = [
+    { label: 'Events', v: events },
+    { label: 'Events with a bid', v: Number(bids.events_with_bids ?? 0) },
+    { label: 'Bids submitted', v: Number(bids.responses ?? 0) },
+    { label: 'Bids awarded', v: Number(bids.awarded ?? 0) },
+  ];
+  return (
+    <div className="panel">
+      <h3 className="pr-tbl-h"><Lbl>Event pipeline</Lbl> <span className="muted">— events by stage</span></h3>
+      {rows.length === 0 && <p className="note">No sourcing events in this view.</p>}
+      <div className="src-pipe">
+        {rows.map((s2) => {
+          const p = by.get(s2.key)!;
+          return (
+            <div key={s2.key} className="src-pipe-row" title={s2.hint}>
+              <span className="src-pipe-label">{s2.label}</span>
+              <span className="src-pipe-track">
+                <span className="src-pipe-bar" style={{ width: `${(p.events / max) * 100}%`, background: s2.color }} />
+              </span>
+              <span className="src-pipe-num">
+                <strong>{formatNumber(p.events)}</strong>
+                <span className="muted"> · {formatNumber(p.with_bids)} with bids · {formatNumber(p.awarded)} awarded</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="src-funnel">
+        {funnel.map((f, i) => (
+          <div key={f.label} className="src-funnel-step">
+            <div className="v">{formatNumber(f.v)}</div>
+            <div className="l">{f.label}</div>
+            {i > 0 && funnel[i - 1]!.v > 0 && i !== 2 && (
+              <div className="muted src-funnel-rate">{((f.v / funnel[i - 1]!.v) * 100).toFixed(0)}% of previous</div>
+            )}
+            {i === 2 && funnel[1]!.v > 0 && (
+              <div className="muted src-funnel-rate">{(f.v / funnel[1]!.v).toFixed(1)} per event</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One event, every supplier side by side (19 Nov 2026): the lines that were
+ * asked for, and per supplier what was quoted against each - unit price and
+ * line total, lead time, the item offered, shipping term - with the award
+ * ticked and the lowest price per line marked.
+ */
+function SourcingCompareModal({ eventId, onClose }: { eventId: number; onClose: () => void }) {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let gone = false;
+    api.get<Record<string, any>>(`/api/v1/coupa/sourcing/event/${eventId}`)
+      .then((r) => { if (!gone) setD(r); })
+      .catch((e: Error) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+  }, [eventId]);
+
+  const ev = d?.event ?? {};
+  const suppliers: Record<string, any>[] = d?.suppliers ?? [];
+  const quote: Record<string, any>[] = d?.quoteLines ?? [];
+  // The rows: the event's own lines; if the raw event is missing, the lines
+  // the quotes answer.
+  const reqLines: Record<string, any>[] = (d?.requestLines ?? []).length > 0
+    ? d!.requestLines
+    : [...new Set(quote.map((q) => q.request_line_id))].map((id, i) => ({ id, line_no: i + 1, description: `Line ${i + 1}` }));
+  const cell = (supplierId: unknown, lineId: unknown) =>
+    quote.find((q) => String(q.response_id) === String(supplierId) && String(q.request_line_id) === String(lineId));
+  const num = (v: unknown, dg = 0) => (v === null || v === undefined || v === '' ? DASH : formatNumber(Number(v), dg));
+  const lowestFor = (lineId: unknown): number | null => {
+    const prices = quote.filter((q) => String(q.request_line_id) === String(lineId) && Number(q.price) > 0).map((q) => Number(q.price));
+    return prices.length > 1 ? Math.min(...prices) : null;
+  };
+  const priced = suppliers.filter((s2) => Number(s2.total_amount) > 0);
+  const lowestTotal = priced.length > 1 ? Math.min(...priced.map((s2) => Number(s2.total_amount))) : null;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={`Sourcing event ${eventId}`} onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h3>🛒 Event {eventId} <span className="muted">{ev.description ?? ''}</span></h3>
+          <span className="spacer" />
+          <FloatControls onClose={onClose} />
+          <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>Close</button>
+        </header>
+        <div className="body">
+          {err && <p className="err">{err}</p>}
+          {!d && !err && <div className="center-msg"><div className="spinner" />Loading the quotes…</div>}
+          {d && (
+            <>
+              <p className="note" style={{ marginTop: 0 }}>
+                {String(ev.event_type ?? '').toUpperCase()} · state {ev.state ?? DASH}
+                {ev.commodity ? ` · ${ev.commodity}` : ''}{ev.plant ? ` · plant ${ev.plant}` : ''}
+                {ev.purch_org ? ` · org ${ev.purch_org}` : ''}{ev.purch_group ? ` · group ${ev.purch_group}` : ''}
+                {ev.sap_pr_no ? ` · SAP PR ${ev.sap_pr_no}` : ''}
+                {ev.start_time ? ` · ${String(ev.start_time).slice(0, 10)}` : ''}{ev.end_time ? ` → ${String(ev.end_time).slice(0, 10)}` : ''}
+              </p>
+              {d.fetchNote && <p className="note"><span className="bs sl">note</span> {d.fetchNote}</p>}
+
+              <h4 className="ent-h">Suppliers <span className="muted">· {formatNumber(suppliers.length)} responses</span></h4>
+              <div className="table-wrap">
+                <table className="data dd-tbl">
+                  <thead>
+                    <tr>
+                      <th>Supplier</th><th>Vendor Type</th><th>State</th><th>Submitted</th>
+                      <th className="num">Quoted total</th><th>Ccy</th><th>Awarded</th><th>Comments</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {suppliers.length === 0 && <tr><td colSpan={8} className="muted">No supplier has responded to this event.</td></tr>}
+                    {suppliers.map((s2, i) => (
+                      <tr key={s2.id} className={i % 2 ? '' : 're'}>
+                        <td>{s2.supplier_name ?? DASH}{s2.supplier_email ? <div className="muted" style={{ fontSize: '.7rem' }}>{s2.supplier_email}</div> : null}</td>
+                        <td><VendorTypeBadge t={s2.vendor_type} /></td>
+                        <td>{s2.state ?? DASH}</td>
+                        <td>{s2.submitted_at ? String(s2.submitted_at).slice(0, 10) : DASH}</td>
+                        <td className="num">
+                          {num(s2.total_amount, 2)}
+                          {lowestTotal !== null && Number(s2.total_amount) === lowestTotal && <span className="chip chip-ok src-low">lowest</span>}
+                        </td>
+                        <td><span className="dd-ccy">{s2.currency ?? DASH}</span></td>
+                        <td><span className={`bs ${s2.awarded ? 'sd' : 'sl'}`}>{s2.awarded ? 'Yes' : 'No'}</span></td>
+                        <td className="muted" style={{ whiteSpace: 'normal', minWidth: '10rem' }}>{s2.comments ?? ''}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <h4 className="ent-h">Line-by-line comparison</h4>
+              {quote.length === 0 ? (
+                <p className="note">No line detail stored for this event{suppliers.length > 0 ? ' - only the supplier totals above' : ''}.</p>
+              ) : (
+                <div className="table-wrap dt-scroll">
+                  <table className="data dd-tbl src-cmp">
+                    <thead>
+                      <tr>
+                        <th className="src-cmp-line">Requested</th>
+                        {suppliers.map((s2) => (
+                          <th key={s2.id} className={s2.awarded ? 'src-cmp-awarded' : ''}>
+                            {s2.supplier_name ?? DASH} {s2.awarded ? '✔' : ''}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reqLines.map((l, i) => {
+                        const low = lowestFor(l.id);
+                        return (
+                          <tr key={String(l.id)} className={i % 2 ? '' : 're'}>
+                            <td className="src-cmp-line">
+                              <strong>{l.line_no}. {l.description ?? DASH}</strong>
+                              {l.spec && l.spec !== l.description && <div className="muted">{l.spec}</div>}
+                              <div className="muted">
+                                Qty {num(l.quantity, 2)}{l.need_by ? ` · need by ${l.need_by}` : ''}
+                                {l.manufacturer ? ` · ${l.manufacturer}` : ''}{l.part_number ? ` · P/N ${l.part_number}` : ''}
+                              </div>
+                            </td>
+                            {suppliers.map((s2) => {
+                              const q = cell(s2.id, l.id);
+                              if (!q) return <td key={s2.id} className="muted">no quote</td>;
+                              const price = Number(q.price);
+                              // A zero price is a supplier who answered without pricing the line.
+                              if (!(price > 0)) {
+                                return <td key={s2.id} className="muted">no price quoted{q.shipping_term ? ` · ${q.shipping_term}` : ''}</td>;
+                              }
+                              return (
+                                <td key={s2.id} className={q.awarded ? 'src-cmp-awarded' : ''}>
+                                  <div>
+                                    <strong>{num(q.price, 2)}</strong> <span className="dd-ccy">{q.currency ?? ''}</span>
+                                    {low !== null && price === low && <span className="chip chip-ok src-low">lowest</span>}
+                                    {q.awarded && <span className="chip chip-vt-local src-low">awarded{q.awarded_quantity ? ` ${num(q.awarded_quantity, 2)}` : ''}</span>}
+                                  </div>
+                                  <div className="muted">
+                                    Qty {num(q.quantity, 2)} · total {q.price !== null && q.quantity !== null ? num(Number(q.price) * Number(q.quantity), 2) : DASH}
+                                  </div>
+                                  <div className="muted">
+                                    {q.lead_time_days !== null && q.lead_time_days !== undefined ? `Lead time ${q.lead_time_days} d` : 'Lead time —'}
+                                    {q.shipping_term ? ` · ${q.shipping_term}` : ''}
+                                    {Number(q.attachment_count) > 0 ? ` · 📎 ${q.attachment_count}` : ''}
+                                  </div>
+                                  {(q.supplier_item_name || q.item_description || q.part_number) && (
+                                    <div className="muted">
+                                      {[q.supplier_item_name, q.item_description, q.part_number ? `P/N ${q.part_number}` : null].filter(Boolean).join(' · ')}
+                                    </div>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="note" style={{ marginBottom: 0 }}>
+                Unit prices as each supplier quoted them, in the quote's currency; "lowest" marks the
+                lowest unit price on a line (and the lowest total above) when more than one supplier priced it.
+                Vendor Type comes from matching the supplier to Coupa's supplier master (LN… Local, IN… Import).
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

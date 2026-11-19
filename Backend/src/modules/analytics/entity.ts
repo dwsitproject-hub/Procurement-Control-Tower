@@ -9,6 +9,7 @@
  */
 
 import { buildFilterClause, type GlobalFilter } from './globalfilter.js';
+import { vendorTypePredicate, type VendorType } from './vendortype.js';
 import { query, queryOne } from '../../db/client.js';
 import { spendCategoryWithPlantSql } from '@pct/rules';
 import { mintScopedQuery, scopeSql, type ScopeEntry } from '../authz/scope.js';
@@ -674,6 +675,8 @@ export async function materialDetail(
    * offered does not, so a second plant can be added.
    */
   plants: readonly string[] = [],
+  /** The popup's Vendor Type filter (19 Nov 2026): Local = LN…, Import = IN…. */
+  vendorType: VendorType | null = null,
 ): Promise<Record<string, unknown> | null> {
   const s0 = scoped(versionId, scope, 'pol');
   const params = s0.params;
@@ -693,6 +696,7 @@ export async function materialDetail(
     params.push([...plants]);
     where += ` AND pol.plant = ANY($${params.length})`;
   }
+  if (vendorType !== null) where += ` AND ${vendorTypePredicate('pol.vendor_code', vendorType)}`;
 
   const head = await queryOne<{
     descr: string; grp: string | null; cat: string | null; lines: number; vendors: number;
@@ -707,7 +711,9 @@ export async function materialDetail(
       WHERE ${where} AND pol.material_code = ${mp}`,
     params,
   );
-  if (!head || head.lines === 0) return null;
+  // 404 only when the material has no lines in scope at all; a popup filter
+  // (plant, vendor type) that empties it shows an empty popup, not "not found".
+  if (!head || (head.lines === 0 && plantOptions.length === 0)) return null;
 
   // Monthly average unit price (v1's ch-mx-price). Document currency mix would
   // corrupt an average, so this is computed on IDR lines only and says so.
@@ -731,7 +737,7 @@ export async function materialDetail(
   // excluded and counted. Monthly point = sum(value)/sum(qty), v1's ratio.
   const priceByVendor = await query<{
     code: string | null; name: string | null; mk: string; price: number | null;
-    n: number; base: string;
+    n: number; base: string; qty: number | null;
   }>(
     `WITH l AS (
        SELECT pol.vendor_code, pol.vendor_name, pol.document_date,
@@ -758,7 +764,8 @@ export async function materialDetail(
      SELECT c2.vendor_code AS code, max(v6.vendor_name) AS name,
             to_char(c2.document_date,'YYYY-MM') AS mk,
             sum(c2.val) / NULLIF(sum(c2.q * c2.f), 0) AS price,
-            count(*)::int AS n, max(c2.base) AS base
+            count(*)::int AS n, max(c2.base) AS base,
+            sum(c2.q * c2.f) AS qty
        FROM c2 JOIN v6 ON v6.vendor_code = c2.vendor_code
       GROUP BY c2.vendor_code, 3 ORDER BY 3`,
     [...params],
@@ -815,7 +822,10 @@ export async function materialDetail(
     priceHistory: priceHistory.map((x) => ({ monthKey: x.mk, avgUnitPrice: x.avg_price, lines: x.n })),
     priceByVendor: priceByVendor.map((x) => ({
       vendorCode: x.code, vendorName: x.name, monthKey: x.mk, unitPrice: x.price, lines: x.n,
+      // In the base unit the price is per (KG, L, ...), so quantity and price agree.
+      qty: x.qty === null ? null : Number(x.qty), uom: x.base,
     })),
+    vendorType,
     priceBasis: {
       baseUnit: priceByVendor[0]?.base ?? null,
       // Lines whose unit cannot be converted to the dominant base (or without
@@ -852,11 +862,14 @@ export async function categoryDetail(
   category: string,
   filter: GlobalFilter = {},
   optionsFilter: GlobalFilter = filter,
+  /** The popup's Vendor Type filter (19 Nov 2026): Local = LN…, Import = IN…. */
+  vendorType: VendorType | null = null,
 ): Promise<Record<string, unknown> | null> {
   const lineWhere = (f: GlobalFilter): { where: string; params: unknown[] } => {
     const s0 = scoped(versionId, scope, 'pol');
     s0.params.push(category);
     let where = `${s0.where} AND ${POL_SPEND_CAT} = $${s0.params.length} AND NOT pol.is_sto AND NOT pol.is_deleted`;
+    if (vendorType !== null) where += ` AND ${vendorTypePredicate('pol.vendor_code', vendorType)}`;
     const gf = buildFilterClause(f, 'po_line', 'pol.', s0.params.length + 1);
     s0.params.push(...gf.params);
     where += gf.sql;
@@ -924,16 +937,30 @@ export async function categoryDetail(
   // Monthly spend of the top six vendors (by rupiah, which needs no rate).
   const spendByVendor = await query<{
     code: string | null; name: string | null; mk: string; usd: number | null; idr: number | null; n: number;
+    qty: number | null; uom: string | null; units: number;
+    by_unit: { u: string | null; q: number }[] | null;
   }>(
     `WITH v6 AS (
        SELECT pol.vendor_code FROM core.fact_po_line pol
-        WHERE ${where} GROUP BY 1 ORDER BY sum(pol.net_order_value_idr) DESC NULLS LAST LIMIT 6)
-     SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
-            to_char(pol.document_date,'YYYY-MM') AS mk,
-            sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
-       FROM core.fact_po_line pol JOIN v6 ON v6.vendor_code IS NOT DISTINCT FROM pol.vendor_code
-      WHERE ${where} AND pol.document_date IS NOT NULL
-      GROUP BY 1, 3 ORDER BY 3`,
+        WHERE ${where} GROUP BY 1 ORDER BY sum(pol.net_order_value_idr) DESC NULLS LAST LIMIT 6),
+     b AS (
+       SELECT pol.vendor_code AS code, pol.vendor_name AS name,
+              to_char(pol.document_date,'YYYY-MM') AS mk,
+              pol.net_order_value_usd AS usd, pol.net_order_value_idr AS idr,
+              pol.order_qty AS q, upper(pol.order_unit) AS u
+         FROM core.fact_po_line pol JOIN v6 ON v6.vendor_code IS NOT DISTINCT FROM pol.vendor_code
+        WHERE ${where} AND pol.document_date IS NOT NULL),
+     -- Per unit, for a vendor-month bought in more than one ("12 PC + 3 SET").
+     bu AS (SELECT code, mk, u, sum(q) AS q FROM b GROUP BY 1, 2, 3)
+     SELECT b.code, max(b.name) AS name, b.mk,
+            sum(b.usd) AS usd, sum(b.idr) AS idr, count(*)::int AS n,
+            -- Ordered quantity for the hover (19 Nov 2026). Summed as ordered; a
+            -- vendor-month in more than one unit is listed per unit, never added.
+            sum(b.q) AS qty, min(b.u) AS uom, count(DISTINCT b.u)::int AS units,
+            (SELECT jsonb_agg(jsonb_build_object('u', bu.u, 'q', bu.q) ORDER BY bu.q DESC)
+               FROM bu WHERE bu.code IS NOT DISTINCT FROM b.code AND bu.mk = b.mk) AS by_unit
+       FROM b
+      GROUP BY b.code, b.mk ORDER BY b.mk`,
     params,
   );
 
@@ -1023,7 +1050,11 @@ export async function categoryDetail(
     },
     spendByVendor: spendByVendor.map((x) => ({
       vendorCode: x.code, vendorName: x.name, monthKey: x.mk, usd: x.usd, idr: x.idr, lines: x.n,
+      qty: x.units > 1 || x.qty === null ? null : Number(x.qty),
+      uom: x.units > 1 ? 'mixed units' : x.uom,
+      qtyByUnit: x.units > 1 ? (x.by_unit ?? []).map((b) => ({ uom: b.u, qty: Number(b.q) })) : null,
     })),
+    vendorType,
     vendorShare: vendorShare.map((x) => ({ vendorCode: x.code, vendorName: x.name, usd: x.usd, idr: x.idr, lines: x.n })),
     areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, idr: x.idr, lines: x.n })),
     topMaterials: topMaterials.map((m) => ({

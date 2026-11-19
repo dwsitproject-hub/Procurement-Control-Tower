@@ -33,8 +33,8 @@ import {
   type CustomChartSpec, type CustomKpiSpec,
 } from '../modules/analytics/custom.js';
 import type { Feed } from '@pct/contracts';
-import { coupaConfigured, coupaHost } from '../modules/coupa/client.js';
-import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync } from '../modules/coupa/sync.js';
+import { coupaConfigured, coupaGet, coupaHost } from '../modules/coupa/client.js';
+import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync, storeQuoteResponses } from '../modules/coupa/sync.js';
 import { dhmFxStatus, dhmFxSyncInFlight, runDhmFxSync } from '../modules/dhm/fx.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
 import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
@@ -47,6 +47,7 @@ import {
 } from '../modules/ingest/share_poller.js';
 import { loadEnv } from '../config/env.js';
 import { mergeIntoPredicate, parseGlobalFilter, type GlobalFilter } from '../modules/analytics/globalfilter.js';
+import { parseVendorType } from '../modules/analytics/vendortype.js';
 
 /** `?sort=<key>&dir=asc|desc` from a table header; the callee whitelists the key. */
 function sortOf(q: Record<string, unknown>): { key: string; dir: 'asc' | 'desc' } | null {
@@ -121,7 +122,13 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // checked against the page's own columns for the same reason.
     // One page number per table on the master page: page0, page1, ...
     const pages = [0, 1, 2, 3, 4, 5].map((i) => qint(query[`page${i}`], 0, 0, 100_000));
-    const page = await loadMasterPage(String(req.params.id), v.id, q, sort, pages);
+    // Drop-down filters arrive as f_<key>; the loader accepts only keys and
+    // values the registry offers, so anything else is simply ignored.
+    const filterValues: Record<string, string> = {};
+    for (const [k, val] of Object.entries(query)) {
+      if (k.startsWith('f_') && typeof val === 'string' && val !== '') filterValues[k.slice(2)] = val;
+    }
+    const page = await loadMasterPage(String(req.params.id), v.id, q, sort, pages, filterValues);
     if (!page) throw new HttpProblem(404, 'not-found', `No master data called "${String(req.params.id)}"`);
 
     // Only an Admin is told what is editable, and the marks on overridden rows.
@@ -284,7 +291,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const v = await version();
     // The popup's own Plant filter (19 Oct 2026).
     const plants = popupPlants(req.query as Record<string, unknown>);
-    const detail = await materialDetail(v.id, ctx.scope, String(req.params.code), plants);
+    // And its Vendor Type filter (19 Nov 2026).
+    const vt = parseVendorType((req.query as Record<string, unknown>)['popVendorType']);
+    const detail = await materialDetail(v.id, ctx.scope, String(req.params.code), plants, vt);
     if (!detail) throw new HttpProblem(404, 'not-found', 'Material not found or outside your data scope');
 
     const fp = sessionFingerprint(ctx.sid);
@@ -295,7 +304,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       drill: {
         allLines: issueDrillToken(
           mergeIntoPredicate(
-            { grain: 'po_line', filters: { materialCode: req.params.code }, label: `Material ${req.params.code} — all PO lines` },
+            { grain: 'po_line', filters: { materialCode: req.params.code, ...(vt ? { vendorType: vt } : {}) }, label: `Material ${req.params.code} — all PO lines` },
             plants.length > 0 ? { plant: plants } : {},
           ) as unknown as DrillPredicate,
           v.id, ctx.scope, fp,
@@ -323,12 +332,14 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       plant: gf.plant?.length ? (plants.filter((p2) => gf.plant!.includes(p2)).length > 0
         ? plants.filter((p2) => gf.plant!.includes(p2)) : ['(no plant in both)']) : plants,
     };
-    const detail = await categoryDetail(v.id, ctx.scope, category, eff, gf);
+    const vt = parseVendorType(q['popVendorType']);
+    const detail = await categoryDetail(v.id, ctx.scope, category, eff, gf, vt);
     if (!detail) throw new HttpProblem(404, 'not-found', 'Category not found or outside your data scope');
 
     const fp = sessionFingerprint(ctx.sid);
     const mk = (grain: 'po_line' | 'pr_item', filters: Record<string, unknown>, label: string) => issueDrillToken(
-      mergeIntoPredicate({ grain, filters, label }, eff) as unknown as DrillPredicate, v.id, ctx.scope, fp,
+      mergeIntoPredicate({ grain, filters: vt ? { ...filters, vendorType: vt } : filters, label }, eff) as unknown as DrillPredicate,
+      v.id, ctx.scope, fp,
     );
     res.json({
       datasetVersionId: v.id,
@@ -1194,32 +1205,81 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   // behind them in one payload. Figures and their rows travel together until
   // Coupa grains join the drill-token machinery (C4b).
   // ── Coupa Sourcing page (modelled on Coupa Analytics 1013/1012) ──────────
-  r.get('/api/v1/coupa/sourcing', role('analyst', async (_req, res) => {
+  /*
+   * Coupa sourcing. Vendor Type filter (19 Nov 2026): Local / Import, resolved
+   * per supplier response (046 - Coupa's quote supplier has no supplier number,
+   * so it is matched to the supplier master by name or email). With a type
+   * chosen, bids are that type's and events are those that drew at least one
+   * bid of that type.
+   */
+  r.get('/api/v1/coupa/sourcing', role('analyst', async (req, res) => {
+    const vt = parseVendorType((req.query as Record<string, unknown>)['vendorType']);
+    const vtLabel = vt === null ? null : vt === 'local' ? 'Local' : 'Import';
+    const p: unknown[] = vtLabel === null ? [] : [vtLabel];
+    const evType = vtLabel === null ? ''
+      : ` AND EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response vr
+                       WHERE vr.quote_request_id = e.id AND vr.vendor_type = $1)`;
+    const rType = vtLabel === null ? '' : ' AND r.vendor_type = $1';
+
     const [kpis] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS events,
-              count(*) FILTER (WHERE state NOT IN ('complete','canceled','template'))::int AS open_events,
-              count(*) FILTER (WHERE state = 'complete')::int AS completed,
-              percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (end_time - submit_time))/86400.0)
-                FILTER (WHERE submit_time IS NOT NULL AND end_time IS NOT NULL) AS median_cycle_days,
-              sum(planned_savings) FILTER (WHERE currency = 'IDR') AS planned_savings_idr,
-              count(*) FILTER (WHERE planned_savings IS NOT NULL AND currency <> 'IDR')::int AS savings_other_ccy
-         FROM ops.v_coupa_sourcing_event WHERE state <> 'template'`,
+              count(*) FILTER (WHERE e.state NOT IN ('complete','canceled','template','test_complete'))::int AS open_events,
+              count(*) FILTER (WHERE e.state = 'complete')::int AS completed,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (e.end_time - e.submit_time))/86400.0)
+                FILTER (WHERE e.submit_time IS NOT NULL AND e.end_time IS NOT NULL) AS median_cycle_days,
+              sum(e.planned_savings) FILTER (WHERE e.currency = 'IDR') AS planned_savings_idr,
+              count(*) FILTER (WHERE e.planned_savings IS NOT NULL AND e.currency <> 'IDR')::int AS savings_other_ccy
+         FROM ops.v_coupa_sourcing_event e WHERE e.state <> 'template'${evType}`,
+      p,
     );
     const [bids] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS responses,
-              count(DISTINCT quote_request_id)::int AS events_with_bids,
-              count(DISTINCT supplier_name)::int AS suppliers,
-              round(count(*)::numeric / NULLIF(count(DISTINCT quote_request_id), 0), 1) AS avg_bids_per_event,
-              count(*) FILTER (WHERE awarded)::int AS awarded
-         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
+              count(DISTINCT r.quote_request_id)::int AS events_with_bids,
+              count(DISTINCT r.supplier_name)::int AS suppliers,
+              round(count(*)::numeric / NULLIF(count(DISTINCT r.quote_request_id), 0), 1) AS avg_bids_per_event,
+              count(*) FILTER (WHERE r.awarded)::int AS awarded
+         FROM ops.v_coupa_supplier_response r WHERE r.state = 'submitted'${rType}`,
+      p,
+    );
+    /*
+     * The event pipeline (19 Nov 2026). It used to be one sentence of totals in
+     * an otherwise empty panel. Now: every event by the stage its Coupa state
+     * puts it in, in pipeline order, then the bid funnel. Templates and test
+     * events are not events anyone is running and stay out.
+     */
+    const pipeline = await query<{ stage: string; events: number; with_bids: number; awarded: number }>(
+      `WITH ev AS (
+         SELECT e.id,
+                CASE WHEN e.state IN ('new','draft') THEN 'draft'
+                     WHEN e.state = 'prod' THEN 'live'
+                     WHEN e.state = 'pause' THEN 'paused'
+                     WHEN e.state = 'closed_for_edit' THEN 'evaluation'
+                     WHEN e.state = 'complete' THEN 'complete'
+                     WHEN e.state = 'canceled' THEN 'canceled'
+                     ELSE 'other' END AS stage
+           FROM ops.v_coupa_sourcing_event e
+          WHERE e.state NOT IN ('template','test_complete')${evType}
+       )
+       SELECT ev.stage, count(*)::int AS events,
+              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
+                                              WHERE r.quote_request_id = ev.id AND r.state = 'submitted'${rType}))::int AS with_bids,
+              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
+                                              WHERE r.quote_request_id = ev.id AND r.awarded${rType}))::int AS awarded
+         FROM ev GROUP BY 1`,
+      p,
     );
     const eventsByMonth = await query(
-      `SELECT to_char(created_at,'YYYY-MM') AS mk, count(*)::int AS events,
-              count(*) FILTER (WHERE state = 'complete')::int AS completed
-         FROM ops.v_coupa_sourcing_event
-        WHERE state <> 'template' AND created_at IS NOT NULL
+      `SELECT to_char(e.created_at,'YYYY-MM') AS mk, count(*)::int AS events,
+              count(*) FILTER (WHERE e.state = 'complete')::int AS completed
+         FROM ops.v_coupa_sourcing_event e
+        WHERE e.state <> 'template' AND e.created_at IS NOT NULL${evType}
         GROUP BY 1 ORDER BY 1`,
+      p,
     );
+    // The response VIEW already keeps only bids whose event passes the exclusions,
+    // so the joins below use the event TABLE: joining the event view as well made
+    // Postgres re-check the exclusions per row - 20-26 s per query on 44k bids,
+    // 0.2 s this way, same rows (19 Nov 2026).
     // Coupa's 'Spend by Commodity / Supplier and Event Type': awarded bid
     // amounts, IDR documents only (strict - other currencies are counted, not
     // converted, because the ops store has no per-line FX equivalents).
@@ -1229,36 +1289,125 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
               sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
               count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
          FROM ops.v_coupa_supplier_response r
-         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
-        WHERE r.awarded
+         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+        WHERE r.awarded${rType}
         GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+      p,
     );
     const bySupplier = await query(
-      `SELECT r.supplier_name,
+      `SELECT r.supplier_name, max(r.vendor_type) AS vendor_type,
               count(*)::int AS awarded_bids,
               sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
               count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
          FROM ops.v_coupa_supplier_response r
-         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
-        WHERE r.awarded AND r.supplier_name IS NOT NULL
-        GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+        WHERE r.awarded AND r.supplier_name IS NOT NULL${rType}
+        GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 12`,
+      p,
     );
     // Coupa's Sourcing Data Table (1012), response grain.
     const dataTable = await query(
       `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
               e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
-              r.supplier_name, r.awarded, r.submitted_at, r.total_amount,
-              COALESCE(NULLIF(r.currency,''), e.currency) AS currency
+              r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
+              COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
+              (SELECT count(*) FROM ops.v_coupa_supplier_response r2
+                WHERE r2.quote_request_id = r.quote_request_id AND r2.state = 'submitted')::int AS bids_on_event
          FROM ops.v_coupa_supplier_response r
-         JOIN ops.v_coupa_sourcing_event e ON e.id = r.quote_request_id
+         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+        WHERE TRUE${rType}
         ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
         LIMIT 200`,
+      p,
+    );
+    const [typeCoverage] = await query<Record<string, unknown>>(
+      `SELECT count(*) FILTER (WHERE vendor_type = 'Local')::int AS local,
+              count(*) FILTER (WHERE vendor_type = 'Import')::int AS import,
+              count(*) FILTER (WHERE vendor_type IS NULL)::int AS unknown
+         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
     );
     const wm = await query(
       `SELECT object, last_updated_at, last_run_at, last_status FROM ops.coupa_watermark
         WHERE object IN ('quote_requests') ORDER BY object`,
     );
-    res.json({ configured: coupaConfigured(), kpis, bids, eventsByMonth, byCommodity, bySupplier, dataTable, watermarks: wm });
+    res.json({
+      configured: coupaConfigured(), vendorType: vt, kpis, bids, pipeline, eventsByMonth,
+      byCommodity, bySupplier, dataTable, typeCoverage, watermarks: wm,
+    });
+  }));
+
+  /*
+   * One sourcing event, side by side (19 Nov 2026): what was asked for, line by
+   * line, and what each supplier quoted against each line - price, quantity,
+   * lead time, the item offered, shipping term - with the award marked.
+   *
+   * Lines arrive with the sync since 046. An event whose responses were stored
+   * before that has none; the first time someone opens it the responses are
+   * fetched from Coupa once and stored, so later opens are local. When Coupa is
+   * unreachable the comparison still shows the per-supplier totals it has.
+   */
+  r.get('/api/v1/coupa/sourcing/event/:id', role('analyst', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new HttpProblem(400, 'bad-request', 'event id must be a positive integer');
+    const event = await queryOne<Record<string, unknown>>(
+      `SELECT e.id, e.event_type, e.state, e.description, e.commodity,
+              e.plant, e.purch_org, e.purch_group, e.sap_pr_no, e.currency,
+              e.created_at, e.submit_time, e.start_time, e.end_time, e.supplier_count, e.line_count
+         FROM ops.v_coupa_sourcing_event e WHERE e.id = $1`,
+      [id],
+    );
+    if (!event) throw new HttpProblem(404, 'not-found', 'Sourcing event not found or excluded');
+
+    let fetchNote: string | null = null;
+    const missing = await queryOne<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.coupa_supplier_response
+        WHERE quote_request_id = $1 AND lines_fetched_at IS NULL`,
+      [id],
+    );
+    if ((missing?.n ?? 0) > 0) {
+      if (coupaConfigured()) {
+        try {
+          const resp = await coupaGet(`/api/quote_requests/${id}/quote_responses`);
+          await storeQuoteResponses(id, Array.isArray(resp) ? (resp as Record<string, unknown>[]) : []);
+        } catch (e) {
+          fetchNote = `Line detail could not be fetched from Coupa just now (${e instanceof Error ? e.message : String(e)}); `
+            + 'showing the supplier totals stored at the last sync.';
+        }
+      } else {
+        fetchNote = 'Coupa is not configured here, so line detail for this older event is not available.';
+      }
+    }
+
+    const requestLines = await query<Record<string, unknown>>(
+      `SELECT (l->>'id')::bigint AS id, ord::int AS line_no,
+              l->>'description' AS description, l->>'extended-description' AS spec,
+              NULLIF(l->>'quantity','')::numeric AS quantity,
+              left(l->>'need-by-date', 10) AS need_by,
+              l->>'manufacturer-name' AS manufacturer, l->>'manufacturer-part-number' AS part_number,
+              NULLIF(l->>'price-amount','')::numeric AS base_price
+         FROM ops.coupa_raw r, jsonb_array_elements(r.payload->'lines') WITH ORDINALITY AS t(l, ord)
+        WHERE r.object = 'quote_requests' AND r.coupa_id = $1
+        ORDER BY ord`,
+      [id],
+    );
+    const suppliers = await query<Record<string, unknown>>(
+      `SELECT r.id, r.supplier_name, r.supplier_email, r.vendor_type, r.state, r.awarded,
+              r.submitted_at, r.total_amount, COALESCE(NULLIF(r.currency,''), $2) AS currency,
+              r.line_count, r.comments, r.lines_fetched_at IS NOT NULL AS has_lines
+         FROM ops.v_coupa_supplier_response r
+        WHERE r.quote_request_id = $1
+        ORDER BY r.awarded DESC NULLS LAST, r.total_amount ASC NULLS LAST, r.supplier_name`,
+      [id, event['currency'] ?? null],
+    );
+    const quoteLines = await query<Record<string, unknown>>(
+      `SELECT ql.response_id, ql.request_line_id, ql.price, ql.adjusted_price, ql.currency, ql.quantity,
+              ql.awarded, ql.awarded_quantity, ql.lead_time_days, ql.supplier_item_name,
+              ql.item_description, ql.part_number, ql.shipping_term, ql.attachment_count
+         FROM ops.coupa_quote_response_line ql
+        WHERE ql.quote_request_id = $1`,
+      [id],
+    );
+    res.json({ event, requestLines, suppliers, quoteLines, fetchNote });
   }));
 
   // ── Coupa Invoices & Payment page (modelled on Coupa Analytics 3148) ─────

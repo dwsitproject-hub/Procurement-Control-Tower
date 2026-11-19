@@ -16,6 +16,7 @@ import { insertMany } from '../../db/client.js';
 import { CHART_META } from './charts.js';
 import { wbsLabel, type RuleSnapshot } from '../admin/rules.js';
 import { buildParityMart } from './mart_parity.js';
+import { vendorTypeSql, vendorTypePredicate } from './vendortype.js';
 import {
   buildFilterClause, isEmptyFilter, mergeIntoPredicate, type FactKind, type GlobalFilter,
 } from './globalfilter.js';
@@ -239,9 +240,13 @@ export async function inlineKpis(
 
   await block([['otd_vs_requested', 'percent']], async () => {
     const c = fc('po_line', '');
-    const [row] = await q<{ ok: number; tot: number }>(
+    const [row] = await q<{ ok: number; tot: number; okl: number; totl: number; oki: number; toti: number }>(
       `SELECT count(*) FILTER (WHERE receipt_date <= delivery_date)::int AS ok,
-              count(*)::int AS tot
+              count(*)::int AS tot,
+              count(*) FILTER (WHERE receipt_date <= delivery_date AND ${vendorTypePredicate('vendor_code', 'local')})::int AS okl,
+              count(*) FILTER (WHERE ${vendorTypePredicate('vendor_code', 'local')})::int AS totl,
+              count(*) FILTER (WHERE receipt_date <= delivery_date AND ${vendorTypePredicate('vendor_code', 'import')})::int AS oki,
+              count(*) FILTER (WHERE ${vendorTypePredicate('vendor_code', 'import')})::int AS toti
          FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND NOT is_deleted AND NOT is_sto
           AND receipt_date IS NOT NULL AND delivery_date IS NOT NULL${c.sql}`,
@@ -262,7 +267,10 @@ export async function inlineKpis(
             currencyBasis: null,
             severity: (row?.ok ?? 0) / tot < 0.5 ? 'critical' : (row?.ok ?? 0) / tot < 0.8 ? 'warning' : 'good',
             statusReason: null,
-            detail: null,
+            detail: vendorTypeDetail(
+              row && row.totl > 0 ? (row.okl / row.totl) * 100 : null, row?.totl ?? 0,
+              row && row.toti > 0 ? (row.oki / row.toti) * 100 : null, row?.toti ?? 0,
+            ),
             drillPredicate: drillOf({
               grain: 'po_line',
               filters: { notDeleted: true, notSto: true, otdrEvaluable: true },
@@ -459,13 +467,21 @@ export async function inlineKpis(
     const c = fc('gr_posting', '');
     const rev = await q<{ receipts: number; reversals: number }>(
       `SELECT count(*) FILTER (WHERE movement_type = '101')::int AS receipts,
-              count(*) FILTER (WHERE posting_class = 'reversal')::int AS reversals
+              count(*) FILTER (WHERE posting_class = 'reversal')::int AS reversals,
+              count(*) FILTER (WHERE movement_type = '101' AND ${vendorTypePredicate('vendor_code', 'local')})::int AS rl,
+              count(*) FILTER (WHERE posting_class = 'reversal' AND ${vendorTypePredicate('vendor_code', 'local')})::int AS vl,
+              count(*) FILTER (WHERE movement_type = '101' AND ${vendorTypePredicate('vendor_code', 'import')})::int AS ri,
+              count(*) FILTER (WHERE posting_class = 'reversal' AND ${vendorTypePredicate('vendor_code', 'import')})::int AS vi
          FROM core.fact_gr_posting WHERE dataset_version_id = $1${c.sql}`,
       [versionId, ...c.params],
     );
-    const rv = rev[0]!;
+    const rv = rev[0] as { receipts: number; reversals: number; rl: number; vl: number; ri: number; vi: number };
+    const pctOf = (n: number, d: number): number | null => (d > 0 ? (n / d) * 100 : null);
     kpis.push(simpleCount('reversal_rate', rv.receipts > 0 ? (rv.reversals / rv.receipts) * 100 : 0, 'percent',
-      rv.receipts, { receipts: rv.receipts, reversals: rv.reversals },
+      rv.receipts, {
+        receipts: rv.receipts, reversals: rv.reversals,
+        ...vendorTypeDetail(pctOf(rv.vl, rv.rl), rv.rl, pctOf(rv.vi, rv.ri), rv.ri),
+      },
       drillOf({ grain: 'gr_posting', filters: { postingClass: 'reversal' } })));
   });
 
@@ -577,21 +593,25 @@ export async function cycleKpis(
   for (const [kpiId, expr, kind, drill, keepNegative] of cycles) {
     const table = kind === 'pr_item' ? 'core.fact_pr_item' : 'core.fact_po_line';
     const clause = buildFilterClause(filter, kind, '', 2);
-    const rows = await q<{ d: number | null }>(
-      `SELECT (${expr}) AS d FROM ${table}
+    // The Delivery page's card also splits Local / Import (19 Nov 2026).
+    const split = kpiId === 'cycle_delivery';
+    const rows = await q<{ d: number | null; vt: string | null }>(
+      `SELECT (${expr}) AS d${split ? `, ${vendorTypeSql('vendor_code')} AS vt` : ', NULL AS vt'} FROM ${table}
         WHERE dataset_version_id = $1 AND (${expr}) IS NOT NULL${clause.sql}`,
       [versionId, ...clause.params],
     );
-    const vals = rows.map((x) => x.d!).filter((d) => d !== null && (keepNegative === true || d >= 0));
+    const kept = rows.filter((x) => x.d !== null && (keepNegative === true || x.d >= 0));
+    const vals = kept.map((x) => x.d!);
     // Average headline (decision 3 Aug 2026, v1 parity); median in the subtitle.
-    out.push(cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg', drillOf(drill)));
+    const k = cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg', drillOf(drill));
+    out.push(split ? withVendorTypeSplit(k, kept, 'avg') : k);
   }
 
   {
     // Filtered on the order line, which is the grain the drill opens.
     const clause = buildFilterClause(filter, 'po_line', 'pol.', 2);
-    const rows = await q<{ d: number | null }>(
-      `SELECT (pol.receipt_date - pri.requisition_date) AS d
+    const rows = await q<{ d: number | null; vt: string | null }>(
+      `SELECT (pol.receipt_date - pri.requisition_date) AS d, ${vendorTypeSql('pol.vendor_code')} AS vt
          FROM core.fact_po_line pol
          JOIN core.fact_pr_item pri
            ON pri.dataset_version_id = pol.dataset_version_id
@@ -599,11 +619,40 @@ export async function cycleKpis(
         WHERE pol.dataset_version_id = $1 AND pol.receipt_date IS NOT NULL${clause.sql}`,
       [versionId, ...clause.params],
     );
-    out.push(cycleKpi('cycle_e2e', rows.map((x) => x.d!).filter((d) => d !== null && d >= 0),
+    const kept = rows.filter((x) => x.d !== null && x.d >= 0);
+    out.push(withVendorTypeSplit(cycleKpi('cycle_e2e', kept.map((x) => x.d!),
       minSample, disabledKpis, 'median',
-      drillOf({ grain: 'po_line', filters: { e2eEvaluable: true } })));
+      drillOf({ grain: 'po_line', filters: { e2eEvaluable: true } })), kept, 'median'));
   }
   return out;
+}
+
+/**
+ * Local / Import split of a KPI, in `detail` (19 Nov 2026). One shape for every
+ * card that carries it, so the card renders one chip row whatever the unit:
+ * vt_local / vt_import are values in the KPI's own unit, the _n keys the
+ * observations behind each. null = no observation of that type.
+ */
+export function vendorTypeDetail(
+  local: number | null, localN: number, imp: number | null, importN: number,
+): Record<string, unknown> {
+  return { vt_local: local, vt_local_n: localN, vt_import: imp, vt_import_n: importN };
+}
+
+/** A cycle KPI plus its Local / Import split, on the same basis as the headline. */
+function withVendorTypeSplit(
+  k: KpiRow, rows: Array<{ d: number | null; vt: string | null }>, basis: 'avg' | 'median',
+): KpiRow {
+  if (k.status !== 'ok') return k;
+  const of = (t: string): number[] => rows.filter((x) => x.vt === t).map((x) => x.d!);
+  const stat = (v: number[]): number | null => {
+    if (v.length === 0) return null;
+    if (basis === 'median') return median(v);
+    const m = mean(v);
+    return m === null ? null : Math.round(m * 10) / 10;
+  };
+  const l = of('local'); const i = of('import');
+  return { ...k, detail: { ...(k.detail ?? {}), ...vendorTypeDetail(stat(l), l.length, stat(i), i.length) } };
 }
 
 function cycleKpi(

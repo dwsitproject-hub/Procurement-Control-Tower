@@ -23,6 +23,7 @@ import {
 } from '@pct/rules';
 import { compileCustomFilter } from './custom.js';
 import { datePredicate, dimPredicate, managedBySql } from './globalfilter.js';
+import { parseVendorType, vendorTypePredicate } from './vendortype.js';
 
 const env = loadEnv();
 
@@ -287,6 +288,12 @@ const FILTERS: Record<string, Compiler> = {
   hasPr: (_v, a) => `EXISTS (SELECT 1 FROM core.fact_pr_item _hp
                               WHERE _hp.dataset_version_id = ${a}.dataset_version_id
                                 AND _hp.pr_no = ${a}.pr_no AND _hp.pr_item = ${a}.pr_item)`,
+  /** pr_po_price_variance's population: PR price above 1, PO price above 0. */
+  priceVarianceEvaluable: (_v, a) => `${a}.unit_price > 0 AND EXISTS (
+                              SELECT 1 FROM core.fact_pr_item _pv
+                               WHERE _pv.dataset_version_id = ${a}.dataset_version_id
+                                 AND _pv.pr_no = ${a}.pr_no AND _pv.pr_item = ${a}.pr_item
+                                 AND _pv.valuation_price > 1)`,
   unreleased: (_v, a) => `${a}.release_final_date IS NULL`,
   released: (_v, a) => `${a}.release_final_date IS NOT NULL`,
   purchOrg: (v, a, ps) => `${a}.purch_org = ${p(ps, String(v))}`,
@@ -419,6 +426,12 @@ const FILTERS: Record<string, Compiler> = {
   purchGroup: (v, a, ps) =>
     v === null ? `${a}.purch_group IS NULL` : `${a}.purch_group = ${p(ps, String(v))}`,
   vendorCode: (v, a, ps) => `${a}.vendor_code = ${p(ps, String(v))}`,
+  /** Local (LN…) / Import (IN…) - vendortype.ts. A PR reaches it through its PO lines. */
+  vendorType: (v, a, _ps, grain) => {
+    const vt = parseVendorType(v);
+    if (vt === null) return 'FALSE';
+    return poLineScoped(grain, a, vendorTypePredicate('vendor_code', vt));
+  },
   materialCode: (v, a, ps) => `${a}.material_code = ${p(ps, String(v))}`,
   materialGroup: (v, a, ps) => `${a}.material_group = ${p(ps, String(v))}`,
   monthKey: (v, a, ps, grain) => `${monthExpr(a, grain)} = ${p(ps, String(v))}`,
@@ -860,6 +873,7 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'spendCategory', label: 'Category', type: 'string' },
     { key: 'materialCategory', label: 'Category (legacy)', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
+    { key: 'purchOrg', label: 'Purchasing Organization', type: 'string' },
     { key: 'vendorName', label: 'Supplier', type: 'string' },
     { key: 'poNo', label: 'PO No', type: 'string' },
     { key: 'status', label: 'Status', type: 'enum' },
@@ -876,6 +890,7 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'shortText', label: 'Description', type: 'string' },
     { key: 'vendorName', label: 'Vendor', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
+    { key: 'purchOrg', label: 'Purchasing Organization', type: 'string' },
     { key: 'spendCategory', label: 'Category', type: 'string' },
     { key: 'netOrderValue', label: 'Value (doc ccy)', type: 'money' },
     { key: 'netOrderValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
@@ -902,6 +917,7 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'status', label: 'Status', type: 'enum' },
     { key: 'approveDate', label: 'Approved', type: 'date' },
     { key: 'wasContinuation', label: 'Filled', type: 'string' },
+    { key: 'purchOrg', label: 'Purchasing Organization', type: 'string' },
   ],
   po_release: [
     { key: 'poNo', label: 'PO No', type: 'string' },
@@ -910,20 +926,22 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'amount', label: 'Amount', type: 'money' },
     { key: 'currencyCode', label: 'Ccy', type: 'string' },
     { key: 'approveDate', label: 'Approved', type: 'date' },
+    { key: 'purchOrg', label: 'Purchasing Organization', type: 'string' },
   ],
 };
 
 const SELECTS: Record<Grain, string> = {
   pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText",
             f.material_code AS "materialCode", f.material_category AS "materialCategory",
-            f.spend_category AS "spendCategory", f.plant,
+            f.spend_category AS "spendCategory", f.plant, f.purch_org AS "purchOrg",
             fp.vendor_name AS "vendorName", fp.po_no AS "poNo", f.status,
             fp.document_date AS "documentDate", fp.receipt_date AS "receiptDate",
             f.aging_days AS "agingDays", f.total_value_idr AS "totalValueIdr",
             f.total_value_usd AS "totalValueUsd",
             f.requisition_date AS "requisitionDate", f.wbs_status AS "_wbs"`,
   po_line: `f.po_no AS "poNo", f.po_item AS "poItem", f.pr_no AS "prNo", f.short_text AS "shortText",
-            f.vendor_name AS "vendorName", f.plant, f.spend_category AS "spendCategory",
+            f.vendor_name AS "vendorName", f.plant, f.purch_org AS "purchOrg",
+            f.spend_category AS "spendCategory",
             f.net_order_value AS "netOrderValue",
             f.currency_code AS "currencyCode", f.net_order_value_usd AS "netOrderValueUsd",
             f.status, f.document_date AS "documentDate", f.receipt_date AS "receiptDate",
@@ -935,9 +953,10 @@ const SELECTS: Record<Grain, string> = {
                f.material_desc AS "materialDesc"`,
   pr_release: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.rel_seq AS "relSeq",
                f.pic_release AS "picRelease", f.status, f.approve_date AS "approveDate",
-               f.was_continuation AS "wasContinuation"`,
+               f.was_continuation AS "wasContinuation", f.purch_org AS "purchOrg"`,
   po_release: `f.po_no AS "poNo", f.rel_seq AS "relSeq", f.pic_release AS "picRelease",
-               f.amount, f.currency_code AS "currencyCode", f.approve_date AS "approveDate"`,
+               f.amount, f.currency_code AS "currencyCode", f.approve_date AS "approveDate",
+               f.purch_org AS "purchOrg"`,
 };
 
 /**

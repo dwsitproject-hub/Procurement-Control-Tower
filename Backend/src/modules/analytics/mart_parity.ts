@@ -483,12 +483,16 @@ export const PARITY_KPIS: KpiSpec[] = [
   // disagree about what "committed value" counts.
   {
     id: 'active_purch_groups',
-    entityUnit: 'desks',
     unit: 'count',
     sql: `SELECT count(DISTINCT purch_group)::int AS value FROM ${POL}
            WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
              AND purch_group IS NOT NULL AND btrim(purch_group) <> ''`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    // One row per desk (20 Nov 2026): the drill IS the count, so the card's old
+    // "distinct desks - drill opens the lines" caveat (entityUnit) is gone.
+    drill: {
+      grain: 'po_line', view: 'by_purch_group',
+      filters: { notSto: true, notDeleted: true, hasPurchGroup: true },
+    },
   },
   {
     // How few desks hold most of the value. This replaces the reference design's
@@ -498,7 +502,6 @@ export const PARITY_KPIS: KpiSpec[] = [
     // truth. Desk concentration carries the same strategic point — a few desks
     // control the money, many run the paperwork — and is measurable.
     id: 'desks_for_80pct_value',
-    entityUnit: 'desks',
     unit: 'count',
     sql: `WITH d AS (
             SELECT purch_group, sum(net_order_value_idr) AS v FROM ${POL}
@@ -513,7 +516,12 @@ export const PARITY_KPIS: KpiSpec[] = [
           )
           SELECT (count(*) FILTER (WHERE cum < 0.8) + 1)::int AS value,
                  count(*)::int AS sample FROM c`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    // Exactly the desks counted: ranked by IDR value, those before the 80% line
+    // plus the one that crosses it (drill.ts topShare).
+    drill: {
+      grain: 'po_line', view: 'by_purch_group', topShare: 0.8,
+      filters: { notSto: true, notDeleted: true, hasPurchGroup: true },
+    },
   },
   {
     id: 'vendors_for_80pct_value',
@@ -601,7 +609,12 @@ export const PARITY_KPIS: KpiSpec[] = [
             FROM ${POL} f
             LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
            WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    // The Head Office part, per desk (20 Nov 2026): the lines raised under an HQ
+    // purchasing organisation, summed per purchasing group.
+    drill: {
+      grain: 'po_line', view: 'by_purch_group',
+      filters: { notSto: true, notDeleted: true, purchOrgIsHo: true },
+    },
   },
   {
     id: 'ho_share_lines_pct',
@@ -611,7 +624,10 @@ export const PARITY_KPIS: KpiSpec[] = [
             FROM ${POL} f
             LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
            WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    drill: {
+      grain: 'po_line', view: 'by_purch_group',
+      filters: { notSto: true, notDeleted: true, purchOrgIsHo: true },
+    },
   },
 
   // ── G6.3: the v1-only registry KPIs, promoted (decision 3 Aug 2026) ──

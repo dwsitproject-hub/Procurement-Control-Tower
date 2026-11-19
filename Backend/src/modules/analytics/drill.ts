@@ -34,10 +34,28 @@ const TOKEN_TTL_SECONDS = 900; // 15 minutes
 
 export type Grain = 'pr_item' | 'po_line' | 'gr_posting' | 'pr_release' | 'po_release';
 
+/**
+ * How the drill presents its rows. Absent = one row per record of the grain.
+ *
+ * 'by_purch_group' (20 Nov 2026, Executive Summary "purchasing desks"): the
+ * SAME population, one row per purchasing group with its name, PO count and
+ * PO amount. The desk figures count desks, so a list of thousands of PO lines
+ * answered a question nobody asked; a list of desks is the figure itself.
+ */
+export type DrillView = 'by_purch_group';
+
 export interface DrillPredicate {
   grain: Grain;
   filters: Record<string, unknown>;
   label?: string;
+  view?: DrillView;
+  /**
+   * With view 'by_purch_group': keep only the desks that, ranked by IDR value,
+   * reach this share of the total (0.8 = "desks holding 80% of value"). The
+   * same rule as desks_for_80pct_value: every desk whose PRECEDING cumulative
+   * share is below the cut, i.e. the desks before 80% plus the one crossing it.
+   */
+  topShare?: number;
 }
 
 interface TokenPayload extends DrillPredicate {
@@ -425,6 +443,15 @@ const FILTERS: Record<string, Compiler> = {
   companyCode: (v, a, ps) => `${a}.company_code = ${p(ps, String(v))}`,
   purchGroup: (v, a, ps) =>
     v === null ? `${a}.purch_group IS NULL` : `${a}.purch_group = ${p(ps, String(v))}`,
+  /** A purchasing group is present - the desk KPIs count only these. */
+  hasPurchGroup: (_v, a) => `(${a}.purch_group IS NOT NULL AND btrim(${a}.purch_group) <> '')`,
+  /**
+   * Raised by a Head Office purchasing ORGANISATION (dim_purch_org.is_ho) -
+   * the numerator of ho_share_value_pct / ho_share_lines_pct. An organisation
+   * missing from the master is non-HQ, as in those KPIs.
+   */
+  purchOrgIsHo: (_v, a) =>
+    `EXISTS (SELECT 1 FROM core.dim_purch_org _ho WHERE _ho.code = ${a}.purch_org AND _ho.is_ho)`,
   vendorCode: (v, a, ps) => `${a}.vendor_code = ${p(ps, String(v))}`,
   /** Local (LN…) / Import (IN…) - vendortype.ts. A PR reaches it through its PO lines. */
   vendorType: (v, a, _ps, grain) => {
@@ -799,6 +826,8 @@ const FILTERS: Record<string, Compiler> = {
 export interface DrillPage {
   label: string;
   grain: Grain;
+  /** Set when the rows are a summary of the grain (see DrillView). */
+  view?: DrillView;
   datasetVersionId: number;
   totalCount: number;
   note: string | null;
@@ -891,6 +920,10 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
     { key: 'vendorName', label: 'Vendor', type: 'string' },
     { key: 'plant', label: 'Plant', type: 'string' },
     { key: 'purchOrg', label: 'Purchasing Organization', type: 'string' },
+    // The desk and the person behind it (20 Nov 2026) - the purchasing-group
+    // charts drill here, and a code alone ("P04") is not reviewable.
+    { key: 'purchGroup', label: 'Purchasing Group', type: 'string' },
+    { key: 'purchGroupName', label: 'Purchasing Group Name', type: 'string' },
     { key: 'spendCategory', label: 'Category', type: 'string' },
     { key: 'netOrderValue', label: 'Value (doc ccy)', type: 'money' },
     { key: 'netOrderValueUsd', label: 'Value (USD)', type: 'money', currency: 'USD' },
@@ -941,6 +974,7 @@ const SELECTS: Record<Grain, string> = {
             f.requisition_date AS "requisitionDate", f.wbs_status AS "_wbs"`,
   po_line: `f.po_no AS "poNo", f.po_item AS "poItem", f.pr_no AS "prNo", f.short_text AS "shortText",
             f.vendor_name AS "vendorName", f.plant, f.purch_org AS "purchOrg",
+            f.purch_group AS "purchGroup", pg.description AS "purchGroupName",
             f.spend_category AS "spendCategory",
             f.net_order_value AS "netOrderValue",
             f.currency_code AS "currencyCode", f.net_order_value_usd AS "netOrderValueUsd",
@@ -972,6 +1006,8 @@ const PAGE_JOINS: Partial<Record<Grain, string>> = {
                WHERE _p.dataset_version_id = f.dataset_version_id
                  AND _p.pr_no = f.pr_no AND _p.pr_item = f.pr_item
                ORDER BY _p.po_no, _p.po_item LIMIT 1) fp ON true`,
+  // dim_purch_group is keyed on code, so this cannot multiply rows.
+  po_line: `LEFT JOIN core.dim_purch_group pg ON pg.code = f.purch_group`,
 };
 
 export async function executeDrill(
@@ -1007,6 +1043,10 @@ export async function executeDrill(
   }
 
   const whereSql = where.join(' AND ');
+
+  if (payload.view === 'by_purch_group') {
+    return executePurchGroupView(payload, whereSql, params, limit, offset, sort);
+  }
 
   // Count and value totals in one pass. IDR sum is exact (document currency);
   // the USD sum follows the strict no-silent-conversion rule.
@@ -1081,6 +1121,114 @@ export async function executeDrill(
       payload.grain === 'po_line' || payload.grain === 'pr_item'
         ? detailHandoffFor(payload.filters ?? {})
         : null,
+  };
+}
+
+const PURCH_GROUP_VIEW_COLUMNS: DrillPage['columns'] = [
+  { key: 'purchGroup', label: 'Purchasing Group', type: 'string' },
+  { key: 'purchGroupName', label: 'Name', type: 'string' },
+  { key: 'poCount', label: 'No. of PO', type: 'int' },
+  { key: 'poLines', label: 'PO lines', type: 'int' },
+  { key: 'valueIdr', label: 'PO Amount (IDR)', type: 'money', currency: 'IDR' },
+  { key: 'valueUsd', label: 'PO Amount (USD)', type: 'money', currency: 'USD' },
+  { key: 'sharePct', label: 'Share of amount', type: 'pct' },
+  { key: 'cumPct', label: 'Cumulative share', type: 'pct' },
+];
+
+/**
+ * The drill population summarised per purchasing group (DrillView).
+ *
+ * Same WHERE as the line drill, so the desks listed are exactly the desks the
+ * figure counted. Amounts are net_order_value_idr - every line in rupiah at the
+ * dataset's rate - because that is what the desk KPIs rank by; USD follows the
+ * strict rule (blank for a desk with an unrated line). Share and cumulative
+ * share are of the rows listed, ranked by IDR amount, so "Cumulative share"
+ * reads directly against the 80% cut.
+ */
+async function executePurchGroupView(
+  payload: TokenPayload,
+  whereSql: string,
+  params: unknown[],
+  limit: number,
+  offset: number,
+  sort: { key: string; dir: 'asc' | 'desc' } | null,
+): Promise<DrillPage> {
+  if (payload.grain !== 'po_line') throw new Error('by_purch_group needs the po_line grain');
+  const ps = [...params];
+  const top = typeof payload.topShare === 'number' && payload.topShare > 0 && payload.topShare < 1
+    ? payload.topShare : null;
+  let topSql = '';
+  if (top !== null) {
+    ps.push(top * 100);
+    topSql = `WHERE r.cum_prev < $${ps.length}`;
+  }
+  const base = `
+    WITH g AS (
+      SELECT COALESCE(NULLIF(btrim(f.purch_group), ''), '(none)') AS grp,
+             count(DISTINCT f.po_no)::int AS po_count,
+             count(*)::int AS po_lines,
+             sum(f.net_order_value_idr) AS value_idr,
+             sum(f.net_order_value_usd) AS value_usd,
+             count(*) FILTER (WHERE f.net_order_value IS NOT NULL
+                                AND f.net_order_value_usd IS NULL)::int AS unrated
+        FROM core.fact_po_line f WHERE ${whereSql}
+       GROUP BY 1
+    ), r AS (
+      SELECT g.*,
+             100.0 * g.value_idr / NULLIF(sum(g.value_idr) OVER (), 0) AS share,
+             100.0 * sum(g.value_idr) OVER (ORDER BY g.value_idr DESC NULLS LAST, g.grp
+                                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                   / NULLIF(sum(g.value_idr) OVER (), 0) AS cum,
+             COALESCE(100.0 * sum(g.value_idr) OVER (ORDER BY g.value_idr DESC NULLS LAST, g.grp
+                                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+                   / NULLIF(sum(g.value_idr) OVER (), 0), 0) AS cum_prev
+        FROM g
+    ), k AS (SELECT r.* FROM r ${topSql})`;
+
+  const tot = await queryOne<{ n: number; idr: number | null; usd: number | null; unrated: number }>(
+    `${base} SELECT count(*)::int AS n, sum(value_idr) AS idr, sum(value_usd) AS usd,
+                    COALESCE(sum(unrated), 0)::int AS unrated FROM k`,
+    ps,
+  );
+  const total = tot?.n ?? 0;
+
+  const sortCol = sort ? PURCH_GROUP_VIEW_COLUMNS.find((c) => c.key === sort.key) : undefined;
+  const orderBy = sortCol
+    ? `"${sortCol.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, "purchGroup"`
+    : `"valueIdr" DESC NULLS LAST, "purchGroup"`;
+  const pageParams = [...ps, limit, offset];
+  const rows = await query<Record<string, unknown>>(
+    `${base}
+     SELECT k.grp AS "purchGroup",
+            pg.description AS "purchGroupName",
+            k.po_count AS "poCount", k.po_lines AS "poLines",
+            k.value_idr AS "valueIdr",
+            CASE WHEN k.unrated = 0 THEN k.value_usd END AS "valueUsd",
+            k.share AS "sharePct", k.cum AS "cumPct"
+       FROM k LEFT JOIN core.dim_purch_group pg ON pg.code = k.grp
+      ORDER BY ${orderBy}
+      LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+    pageParams,
+  );
+
+  return {
+    label: payload.label ?? describeFilters(payload),
+    grain: payload.grain,
+    view: 'by_purch_group',
+    datasetVersionId: payload.v,
+    totalCount: total,
+    note: payload.scope.length === 0 ? 'no rows are within your data scope' : null,
+    columns: PURCH_GROUP_VIEW_COLUMNS,
+    rows: rows.map((r) => ({ ...r, flags: [] })),
+    nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
+    totals: tot
+      ? {
+          idrSum: tot.idr === null ? null : Number(tot.idr),
+          usdSum: tot.unrated > 0 || tot.usd === null ? null : Number(tot.usd),
+          usdComplete: tot.unrated === 0,
+        }
+      : null,
+    detailHandoff: detailHandoffFor(payload.filters ?? {}),
   };
 }
 

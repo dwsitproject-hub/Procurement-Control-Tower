@@ -198,6 +198,8 @@ export interface ChartResponse {
 export interface DrillPage {
   label: string;
   grain: string;
+  /** Set when the rows summarise the grain, e.g. one row per purchasing group. */
+  view?: string;
   totalCount: number;
   note: string | null;
   columns: { key: string; label: string; type: string; currency?: string; coupa?: boolean }[];

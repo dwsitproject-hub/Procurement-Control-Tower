@@ -566,6 +566,18 @@ PT WW, CR JJ TH, CM PD SA SU, JN). The seed is skipped where an admin has alread
 - Expect the Coupa figures to drop to the in-scope sites: on the 19 Nov store, sourcing events 23,041 →
   8,003, Coupa PO lines 52,733 → 15,188, invoices 236 → 51.
 
+### 10e. Release of 20 Nov 2026 — purchasing-desk drills
+
+The usual §10 BE and FE updates; no migration. Then **Admin → SAP Data Sync → Rebuild** once: the four desk
+figures store their drill in the precomputed KPIs, so until the rebuild an unfiltered page still opens the
+old PO-line list (a filtered page shows the new one at once).
+
+What changed for users: on the Executive Summary's "purchasing desks" page, Active purchasing desks, Desks
+holding 80% of value and the two Head Office shares open one row per purchasing group - code, name, number
+of POs, PO lines, PO amount (IDR and USD), share and cumulative share. The 80% drill lists exactly the desks
+counted; the Head Office drills list the desks behind the HQ part. Every PO-line drill (including the three
+purchasing-group / purchasing-org charts) gains Purchasing Group and Purchasing Group Name columns.
+
 ## 11. Rollback
 
 **On the affected server:**

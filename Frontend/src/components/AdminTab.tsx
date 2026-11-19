@@ -35,6 +35,8 @@ interface Exclusions {
   purchOrgs: string[];
   /** Coupa-only (019). Enforced by views, so it needs no recompute. */
   coupaPurchGroups: string[];
+  /** Coupa plant-code prefixes (047), e.g. 'TH'. Views too, so live on save. */
+  coupaPlants: string[];
   /** Drop lines whose derived status is HOLD PO. Needs a recompute. */
   holdPos: boolean;
   /** Vendor CODE prefixes treated as intercompany. Needs a recompute. */
@@ -48,6 +50,17 @@ interface CoupaOpt {
   sourcingEvents: number;
   receipts: number;
   count: number;
+  excluded: boolean;
+}
+
+interface CoupaPlantOpt {
+  value: string;
+  plants: string;
+  poLines: number;
+  sourcingEvents: number;
+  count: number;
+  /** The group has a plant in the SAP files - excluding it is unusual. */
+  inSap: boolean;
   excluded: boolean;
 }
 
@@ -163,6 +176,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [coupaOptions, setCoupaOptions] = useState<CoupaOpt[]>([]);
+  const [coupaPlantOptions, setCoupaPlantOptions] = useState<CoupaPlantOpt[]>([]);
   /**
    * No dataset yet (a new installation): there are no values in the data to
    * tick, so the three SAP lists become typed, comma-separated codes - the same
@@ -173,15 +187,19 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [freeText, setFreeText] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.get<{ current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[]; hasDataset?: boolean }>(
+    api.get<{
+      current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[];
+      coupaPlantOptions?: CoupaPlantOpt[]; hasDataset?: boolean;
+    }>(
       '/api/v1/admin/exclusions',
     )
       .then((d) => {
-        setCurrent(d.current);
+        setCurrent({ ...d.current, coupaPlants: d.current.coupaPlants ?? [] });
         setPrefixText(null);
         setFreeText({});
         setOptions(d.options as never);
         setCoupaOptions(d.coupaOptions ?? []);
+        setCoupaPlantOptions(d.coupaPlantOptions ?? []);
         setHasDataset(d.hasDataset !== false);
       })
       .catch((e: Error) => setMsg(e instanceof ApiError && e.status === 403 ? 'Steward role required.' : e.message));
@@ -198,7 +216,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
    * caught the mismatch the moment the flag was added.
    */
   type ListKey = 'docTypes' | 'purchGroups' | 'purchOrgs' | 'coupaPurchGroups'
-    | 'intercoVendorPrefixes';
+    | 'coupaPlants' | 'intercoVendorPrefixes';
 
   const toggle = (key: ListKey, v: string) => {
     setCurrent((c) => {
@@ -383,6 +401,49 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   );
 
   /**
+   * The Coupa plant facet (047).
+   *
+   * Coupa is shared with business units outside this dashboard - Upstream's
+   * 11…/12… POs among them. A value is a plant-code prefix; the options are the
+   * two-character sites found in Coupa. Each says whether the site has a plant
+   * in the SAP files, because that is the scoping question: a site the SAP files
+   * never mention belongs to another business unit.
+   */
+  const coupaPlantGroup = () => (
+    <details className="dt-facet" open={current.coupaPlants.length > 0}>
+      <summary>
+        Coupa plants (business units out of scope)
+        {current.coupaPlants.length > 0 && (
+          <span className="dt-badge">{current.coupaPlants.length}</span>
+        )}
+      </summary>
+      <div className="dt-facet-list">
+        {[...coupaPlantOptions].sort((a, b) => Number(b.excluded) - Number(a.excluded)
+          || Number(a.inSap) - Number(b.inSap) || b.count - a.count)
+          .map((o) => (
+            <label
+              key={o.value}
+              className={`dt-chip${o.excluded ? ' dt-chip-off' : ''}`}
+              title={o.plants ? `Plants: ${o.plants}` : undefined}
+            >
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={current.coupaPlants.includes(o.value)}
+                onChange={() => toggle('coupaPlants', o.value)}
+              />
+              <strong>{o.value}</strong>{' '}
+              <span className="muted">
+                ({formatNumber(o.poLines)} PO lines · {formatNumber(o.sourcingEvents)} quote requests
+                {o.inSap ? ' · in SAP files' : ' · not in SAP files'})
+              </span>
+            </label>
+          ))}
+      </div>
+    </details>
+  );
+
+  /**
    * Held POs and intercompany vendors.
    *
    * Not a facet list like the three above: HOLD PO is one value of a derived
@@ -482,13 +543,16 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         {group('Purchasing orgs', 'purchOrgs', options.purchOrgs)}
         {holdAndInterco()}
         {coupaGroup()}
+        {coupaPlantGroup()}
       </div>
       <p className="note" style={{ marginTop: '.5rem' }}>
-        <span className="bs sl">Coupa only</span> The last group above applies to the{' '}
+        <span className="bs sl">Coupa only</span> The last two groups above apply to the{' '}
         <strong>Coupa store alone</strong> — its purchase orders, quote requests, receipts and the
         invoices drawn from them. It is separate from the SAP lists because the desks in Coupa are
         largely not the ones in the SAP facts, and because it is enforced by database views rather
-        than by the transform: <strong>it takes effect the moment you save, with no rebuild</strong>.
+        than by the transform: <strong>they take effect the moment you save, with no rebuild</strong>.
+        A plant value is a code prefix: <code>TH</code> drops every TH plant. Sites that never
+        appear in the SAP files (Upstream and other business units) are excluded by default.
         A partially relevant invoice is kept, not dropped — an invoice disappears only when every
         one of its linked lines is excluded.
       </p>

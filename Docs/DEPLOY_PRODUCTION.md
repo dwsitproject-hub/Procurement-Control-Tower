@@ -543,13 +543,28 @@ stored supplier response (about 30 s on the staging-sized Coupa store; productio
   time someone opens it, then keeps them; the Coupa sync stores them for every new response. This needs
   production's Coupa sync to be running (on 19 Nov its last run was 12 Nov - see Admin → Coupa).
 - **Open Items "PO not delivered — paid / DP"** counts POs with a payment or down payment in **Coupa**
-  (the SAP exports carry no payment field). It stays 0 until Coupa invoices for SAP POs are synced.
+  (the SAP exports carry no payment field). Expect it near 0 even with the sync running: Coupa invoices
+  follow goods receipt, and SAP down payments are not in Coupa (checked 19 Nov against the full Coupa store).
 
 What changed for users: Vendor Type filter (Local = vendor code LN…, Import = IN…) on the Material Group
 popups and the Sourcing page; quantity in the popup chart hover; Sourcing event pipeline and supplier
 comparison; Master → SAP Users filters; Purchasing Organization column in drill tables; the PO-not-delivered
 split; PR-to-PO price variance without token PR prices (≤ 1) or free PO lines (0); Local / Import on the five
 Delivery cards.
+
+### 10d. Release of 19 Nov 2026 (later the same day) — Coupa scoped to this dashboard's business units
+
+The usual §10 BE and FE updates. **Migration 047** runs at API start (seconds). Coupa is shared with
+business units outside the Procurement Control Tower — Upstream's 11…/12…-series POs and their sourcing
+events, plus other sites the SAP files never mention. 047 adds a **Coupa plant** exclusion and seeds it with
+the 27 plant groups that have no plant in the SAP files (AC AM BU HS IU KB SI SN TS WS, AJ BS GN IP KU NJ PN
+PT WW, CR JJ TH, CM PD SA SU, JN). The seed is skipped where an admin has already saved a list.
+
+- No Rebuild needed: the rule is applied by the Coupa views and is live at once. SAP figures do not move.
+- Check **Admin → Data Exclusions → Coupa plants**: 27 ticked, each marked *not in SAP files*. Tick or
+  untick a site and Save to change the scope; it applies immediately.
+- Expect the Coupa figures to drop to the in-scope sites: on the 19 Nov store, sourcing events 23,041 →
+  8,003, Coupa PO lines 52,733 → 15,188, invoices 236 → 51.
 
 ## 11. Rollback
 

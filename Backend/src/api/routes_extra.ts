@@ -25,7 +25,7 @@ import {
   topMaterialsSpend, vendorDetail, vendorList, vendorPivot, vendorPivotMaterials, vendorOtdChart,
 } from '../modules/analytics/entity.js';
 import {
-  coupaExclusionOptions, exclusionOptions, fxTable, loadExclusions, mappingStatus,
+  coupaExclusionOptions, coupaPlantOptions, exclusionOptions, normalisePlantPrefixes, fxTable, loadExclusions, mappingStatus,
   saveExclusions, saveMapping,
 } from '../modules/admin/steward.js';
 import {
@@ -1024,18 +1024,19 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       current: await loadExclusions(),
       options: v ? await exclusionOptions(v.id) : { docTypes: [], purchGroups: [], purchOrgs: [] },
       coupaOptions: await coupaExclusionOptions(),
+      coupaPlantOptions: await coupaPlantOptions(),
       note: 'Changes apply on the next recompute (Admin > Recompute), not instantly.',
       // The Coupa list is the exception and the UI says so: it is enforced by
       // views over a continuously-polled store, not by the transform, so it
       // needs no rebuild.
-      coupaNote: 'Coupa purchasing-group exclusions apply immediately on save — no recompute needed.',
+      coupaNote: 'Coupa purchasing-group and plant exclusions apply immediately on save — no recompute needed.',
     });
   }));
 
   r.put('/api/v1/admin/exclusions', role('admin', async (req, res, ctx) => {
     const b = (req.body ?? {}) as {
       docTypes?: unknown; purchGroups?: unknown; purchOrgs?: unknown; coupaPurchGroups?: unknown;
-      holdPos?: unknown; intercoVendorPrefixes?: unknown;
+      coupaPlants?: unknown; holdPos?: unknown; intercoVendorPrefixes?: unknown;
     };
     const list = (x: unknown, cap = 50): string[] =>
       Array.isArray(x) ? x.map(String).map((v2) => v2.trim()).filter((v2) => v2 !== '').slice(0, cap) : [];
@@ -1046,12 +1047,19 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       // A larger cap: Coupa carries far more purchasing groups than the SAP
       // facts do, and the first real request named 16 at once.
       coupaPurchGroups: list(b.coupaPurchGroups, 300),
+      coupaPlants: normalisePlantPrefixes(list(b.coupaPlants, 300)),
       holdPos: b.holdPos === true || b.holdPos === 'true',
       intercoVendorPrefixes: list(b.intercoVendorPrefixes),
     };
 
     const before = await loadExclusions();
+    // An older client that does not know the plant list must not wipe it.
+    if (b.coupaPlants === undefined) next.coupaPlants = before.coupaPlants;
     await saveExclusions(next, ctx.principal.userId);
+    // The Coupa lists are live in the views, but memoised pages (Open Items'
+    // Coupa invoice note) hold the old answer until the next publish - drop them.
+    if (JSON.stringify([before.coupaPurchGroups, before.coupaPlants])
+        !== JSON.stringify([next.coupaPurchGroups, next.coupaPlants])) clearResultCache();
     await recordAudit({
       action: 'admin.exclusions.update', actorUserId: ctx.principal.userId,
       actorEmail: ctx.principal.email, outcome: 'success',

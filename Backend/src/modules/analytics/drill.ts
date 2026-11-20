@@ -839,7 +839,15 @@ export interface DrillPage {
    * header. Only for money-bearing grains. usdSum obeys the strict-FX rule:
    * null when any line's currency is unrated, with usdComplete saying so.
    */
-  totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;
+  totals: {
+    idrSum: number | null; usdSum: number | null; usdComplete: boolean;
+    /**
+     * What the sums add up (20 Nov 2026). 'value' = net order value; the two
+     * others are the open-commitment and GR/IR measures, so the header of a
+     * "still to deliver" figure adds up what is still to deliver.
+     */
+    basis?: 'value' | 'still_to_deliver' | 'still_to_invoice';
+  } | null;
   /**
    * "Open in Detail tab" (v1's dd-modal button): the drill filters translated
    * into Detail-table query params, with any untranslatable keys named so the
@@ -1048,16 +1056,36 @@ export async function executeDrill(
     return executePurchGroupView(payload, whereSql, params, limit, offset, sort);
   }
 
-  // Count and value totals in one pass. IDR sum is exact (document currency);
-  // the USD sum follows the strict no-silent-conversion rule.
+  /*
+   * The PO-line measure the figure behind this drill adds up (20 Nov 2026).
+   * Open-commitment figures (Open PO Commitment, commitment aging) measure what
+   * is STILL TO DELIVER and GR/IR figures what is STILL TO INVOICE; their
+   * drills summed the full line value instead, so the header disagreed with
+   * the card (USD 28.1 M card, 37.2 M header).
+   */
+  const f0 = payload.filters ?? {};
+  const measure: 'value' | 'still_to_deliver' | 'still_to_invoice' = payload.grain !== 'po_line' ? 'value'
+    : f0['hasOpenCommitment'] ? 'still_to_deliver' : f0['grirOpen'] ? 'still_to_invoice' : 'value';
+  const mIdr = measure === 'still_to_deliver' ? 'still_deliver_val_idr'
+    : measure === 'still_to_invoice' ? 'still_invoice_val_idr' : 'net_order_value_idr';
+  const mUsd = measure === 'still_to_deliver' ? 'still_deliver_val_usd'
+    : measure === 'still_to_invoice' ? 'still_invoice_val_usd' : 'net_order_value_usd';
+
+  // Count and value totals in one pass. The IDR sum is every line in rupiah at
+  // the dataset's rate (net_order_value_idr and its twins) - the basis of every
+  // IDR card and chart. Until 20 Nov 2026 it counted IDR-currency lines only,
+  // so any figure with MYR / USD / CNY orders opened a smaller total than it
+  // showed (PO value Jan 2026: chart IDR 209 B, popup 131 B), and an import
+  // vendor's drill showed none. The USD sum keeps the strict no-silent-
+  // conversion rule.
   const TOTAL_EXPR: Partial<Record<Grain, string>> = {
     pr_item: `sum(${t.alias}.total_value_idr) AS idr_sum,
               sum(${t.alias}.total_value_usd) AS usd_sum,
               count(*) FILTER (WHERE ${t.alias}.total_value_idr IS NOT NULL AND ${t.alias}.total_value_idr <> 0
                                  AND ${t.alias}.total_value_usd IS NULL)::int AS unrated`,
-    po_line: `sum(${t.alias}.net_order_value) FILTER (WHERE ${t.alias}.currency_code = 'IDR') AS idr_sum,
-              sum(${t.alias}.net_order_value_usd) AS usd_sum,
-              count(*) FILTER (WHERE ${t.alias}.net_order_value IS NOT NULL AND ${t.alias}.net_order_value_usd IS NULL)::int AS unrated`,
+    po_line: `sum(${t.alias}.${mIdr}) AS idr_sum,
+              sum(${t.alias}.${mUsd}) AS usd_sum,
+              count(*) FILTER (WHERE ${t.alias}.net_order_value IS NOT NULL AND ${t.alias}.${mUsd} IS NULL)::int AS unrated`,
   };
   const totalExpr = TOTAL_EXPR[payload.grain];
   const countRow = await queryOne<{ n: number; idr_sum: number | null; usd_sum: number | null; unrated: number }>(
@@ -1071,16 +1099,27 @@ export async function executeDrill(
         idrSum: countRow.idr_sum === null ? null : Number(countRow.idr_sum),
         usdSum: countRow.unrated > 0 || countRow.usd_sum === null ? null : Number(countRow.usd_sum),
         usdComplete: countRow.unrated === 0,
+        basis: measure,
       }
     : null;
 
-  const sortCol = sort ? COLUMNS[payload.grain].find((c) => c.key === sort.key) : undefined;
+  // A measure drill also SHOWS the measure per row, so the rows add up to the
+  // header rather than to a value column that is not what was clicked.
+  const measureCols: DrillPage['columns'] = measure === 'value' ? [] : [
+    { key: 'measureIdr', label: measure === 'still_to_deliver' ? 'Still to deliver (IDR)' : 'Still to invoice (IDR)', type: 'money', currency: 'IDR' },
+    { key: 'measureUsd', label: measure === 'still_to_deliver' ? 'Still to deliver (USD)' : 'Still to invoice (USD)', type: 'money', currency: 'USD' },
+  ];
+  const columns = [...COLUMNS[payload.grain], ...measureCols];
+  const measureSelect = measure === 'value' ? ''
+    : `, ${t.alias}.${mIdr} AS "measureIdr", ${t.alias}.${mUsd} AS "measureUsd"`;
+
+  const sortCol = sort ? columns.find((c) => c.key === sort.key) : undefined;
   const orderBy = sortCol
     ? `"${sortCol.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, ${t.order}`
     : t.order;
   const pageParams = [...params, limit, offset];
   const rows = await query<Record<string, unknown>>(
-    `SELECT ${SELECTS[payload.grain]} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
+    `SELECT ${SELECTS[payload.grain]}${measureSelect} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
       WHERE ${whereSql} ORDER BY ${orderBy}
       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
     pageParams,
@@ -1112,7 +1151,7 @@ export async function executeDrill(
     datasetVersionId: payload.v,
     totalCount: total,
     note,
-    columns: COLUMNS[payload.grain],
+    columns,
     rows: decorated,
     nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
     totals,

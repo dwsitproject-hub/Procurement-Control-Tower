@@ -677,11 +677,20 @@ export async function materialDetail(
   plants: readonly string[] = [],
   /** The popup's Vendor Type filter (19 Nov 2026): Local = LN…, Import = IN…. */
   vendorType: VendorType | null = null,
+  /**
+   * The opening page's filter bar (20 Nov 2026), as vendorDetail took it for
+   * FT-25: a material clicked in a 2026 Vendor 360 or Category 360 row opened on
+   * all-time figures, so the popup disagreed with the row it came from.
+   */
+  filter: GlobalFilter = {},
 ): Promise<Record<string, unknown> | null> {
   const s0 = scoped(versionId, scope, 'pol');
   const params = s0.params;
   params.push(materialCode);
   const mp = `$${params.length}`;
+  const gfc = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gfc.params);
+  s0.where = `${s0.where}${gfc.sql}`;
 
   const plantOptions = await query<{ plant: string; plant_name: string; n: number }>(
     `SELECT pol.plant, COALESCE(max(dp.plant_name), pol.plant) AS plant_name, count(*)::int AS n

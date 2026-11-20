@@ -902,22 +902,31 @@ const PR_BANDS = [
   { key: '<7', label: '< 7', color: '#4CAF50' },
 ] as const;
 
-function PrOutstandingBars({ data, onFocus }: {
+function PrOutstandingBars({ data, onFocus, onDrill }: {
   data: ChartResponse;
   onFocus: (title: string, subtitle: string, slice: string) => void;
+  /**
+   * 20 Nov 2026: a segment opens ITS OWN requisitions. It opened the whole
+   * Overview (no slice at all), so the count just clicked appeared nowhere in
+   * the panel. Each point carries the drill of exactly the items it counts.
+   */
+  onDrill: (token: string, label: string) => void;
 }) {
   const series = data.series.find((x) => x.key === 'items') ?? data.series[0];
   if (!series) return <p className="muted">No data.</p>;
 
   const labelFor = new Map(data.buckets.map((b) => [b.key, b.label] as const));
-  const byDay = new Map<string, { label: string; bands: Map<string, number>; total: number }>();
+  const byDay = new Map<string, {
+    label: string; bands: Map<string, number>; tokens: Map<string, string>; total: number;
+  }>();
   for (const pt of series.points) {
     const day = pt.bucketKey.slice(0, 10);
     const band = pt.bucketKey.slice(11);
     const dayLabel = (labelFor.get(pt.bucketKey) ?? day).split('|')[0] ?? day;
     let d = byDay.get(day);
-    if (!d) { d = { label: dayLabel, bands: new Map(), total: 0 }; byDay.set(day, d); }
+    if (!d) { d = { label: dayLabel, bands: new Map(), tokens: new Map(), total: 0 }; byDay.set(day, d); }
     d.bands.set(band, (d.bands.get(band) ?? 0) + (pt.value ?? 0));
+    if (pt.drillToken) d.tokens.set(band, pt.drillToken);
     d.total += pt.value ?? 0;
   }
 
@@ -972,11 +981,11 @@ function PrOutstandingBars({ data, onFocus }: {
                     className="xs-pr-seg"
                     style={{ height: `${(n / max) * 100}%`, background: b.color }}
                     title={`${d.label} — ${b.label} days: ${formatNumber(n)} outstanding PR items`}
-                    onClick={() => onFocus(
-                      `Outstanding ${b.label} days — ${d.label}`,
-                      `${formatNumber(n)} PR items`,
-                      '',
-                    )}
+                    onClick={() => {
+                      const token = d.tokens.get(b.key);
+                      if (token) onDrill(token, `Outstanding ${b.label} days — ${d.label} (${formatNumber(n)} PR items)`);
+                      else onFocus(`Outstanding ${b.label} days — ${d.label}`, `${formatNumber(n)} PR items`, '');
+                    }}
                   />
                 );
               })}
@@ -1010,6 +1019,7 @@ export function ExecSummaryTab({
    */
   const [focus, setFocus] = useState<{
     title: string; subtitle: string; slice: string; clicked?: string;
+    initialLifecycle?: '' | 'open' | 'closed';
     /** What to show inside. Absent means the Overview's own lists. */
     kpiIds?: string[]; chartIds?: string[];
     /** Offer All / Open / Closed inside the panel. */
@@ -1043,14 +1053,17 @@ export function ExecSummaryTab({
   ]), []);
 
   /**
-   * A spend-category bar opens the category, not the segment.
+   * A spend-category bar opens the category, ON the clicked segment's state.
    *
-   * The clicked segment (Open or Closed) names the panel, but the slice itself
-   * carries no lifecycle — the panel's own toggle starts at All and the reader
-   * moves between states without reopening it.
+   * The slice keeps the category (or month, or band) and the lifecycle becomes
+   * the panel toggle's STARTING position rather than a fixed filter, so the
+   * reader can still widen to All without reopening. Until 20 Nov 2026 the
+   * toggle always started at All: a Monthly Spend cell of Rp 9 Bio delivered
+   * opened on IDR 12.16 B, and the first card contradicted the figure clicked.
    */
   const openAlignedFocus = useCallback(
     (title: string, subtitle: string, slice: string, clicked?: string) => {
+      const lc = (/(?:^|&)lifecycle=(open|closed)(?:&|$)/.exec(slice)?.[1] ?? '') as '' | 'open' | 'closed';
       setFocus({
         // The clicked segment named the click; it must not name the PANEL,
         // which opens on every lifecycle state. Leaving "METHANOL — Closed"
@@ -1062,8 +1075,11 @@ export function ExecSummaryTab({
         title: title
           .replace(/\s+—\s+(Not yet delivered|Delivered)$/, '')
           .replace(/\s+—\s+delivered in\s+/, ' — '),
-        subtitle: 'Delivered and not yet delivered together — use the toggle to narrow',
-        slice: slice.replace(/&?lifecycle=(open|closed)/g, ''),
+        subtitle: lc === ''
+          ? 'Delivered and not yet delivered together — use the toggle to narrow'
+          : `Opened on ${lc === 'closed' ? 'Delivered' : 'Not yet delivered'}, as clicked — the toggle switches state`,
+        slice: slice.replace(/&?lifecycle=(open|closed)/g, '').replace(/^&/, ''),
+        initialLifecycle: lc,
         /*
          * Committed value and line count FIRST, before the Overview's own list.
          *
@@ -1079,7 +1095,10 @@ export function ExecSummaryTab({
           ...overviewKpis.filter((id) => !SLICE_HIDDEN_KPIS.has(id)
             && id !== 'total_po_amount' && id !== 'po_line_items')],
         lifecycleToggle: true,
-        ...(clicked ? { clicked } : {}),
+        // The clicked figure as clicked: with the panel opening on the clicked
+        // state, that is what the first card measures. Without a state the
+        // caller's own caption (the whole bar) still describes the panel.
+        ...(lc !== '' ? { clicked: `${title}: ${subtitle}` } : clicked ? { clicked } : {}),
       });
     },
     [overviewKpis, SLICE_HIDDEN_KPIS],
@@ -1614,7 +1633,7 @@ export function ExecSummaryTab({
                   <span className="muted">— this month and last, by aging on the day</span>
                 </h3>
                 {prOutstanding
-                  ? <PrOutstandingBars data={prOutstanding} onFocus={openFocus} />
+                  ? <PrOutstandingBars data={prOutstanding} onFocus={openFocus} onDrill={onDrill} />
                   : <div className="spinner" />}
               </div>
       ),
@@ -1742,6 +1761,7 @@ export function ExecSummaryTab({
             subtitle={focus.subtitle}
             {...(focus.clicked ? { clicked: focus.clicked } : {})}
             lifecycleToggle={focus.lifecycleToggle ?? false}
+            initialLifecycle={focus.initialLifecycle ?? ''}
             // The clicked slice on top of the page's own filter, so the panel can
             // never show a wider population than the page it was opened from.
             filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}

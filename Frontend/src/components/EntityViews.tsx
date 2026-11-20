@@ -243,7 +243,7 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
     </div>
 
     {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} filterQuery={filterQuery} />}
-    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} currency={currency} />}
+    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} currency={currency} filterQuery={filterQuery} />}
     </>
   );
 }
@@ -863,7 +863,7 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
         </div>
       </div>
 
-      {open && <MaterialModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} />}
+      {open && <MaterialModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} filterQuery={filterQuery} />}
       {cat360 && (
         <CategoryModal
           category={cat360}
@@ -1051,6 +1051,7 @@ export function CategoryModal({
           onDrill={onDrill}
           currency={currency}
           initialPlants={plants}
+          filterQuery={filterQuery}
         />
       )}
     </div>
@@ -1058,13 +1059,19 @@ export function CategoryModal({
 }
 
 export function MaterialModal({
-  code, onClose, onDrill, currency = 'USD', initialPlants = [],
+  code, onClose, onDrill, currency = 'USD', initialPlants = [], filterQuery = '',
 }: {
   code: string; onClose: () => void; onDrill: (t: string, l: string) => void;
   /** Topbar display currency — every money cell below reads it. */
   currency?: 'USD' | 'IDR';
   /** Plants to start filtered to - a Category 360's choice, carried in. */
   initialPlants?: string[];
+  /**
+   * The opening page's filter bar (20 Nov 2026). Without it a material clicked
+   * in a 2026 row opened on all-time figures. Pages whose own list is unfiltered
+   * (the PO page's top materials) pass none, so the popup still matches them.
+   */
+  filterQuery?: string;
 }) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1075,7 +1082,7 @@ export function MaterialModal({
 
   useEffect(() => {
     let gone = false;
-    const p = new URLSearchParams();
+    const p = new URLSearchParams(filterQuery);
     if (plants.length > 0) p.set('popPlant', plants.join(','));
     if (vtype !== '') p.set('popVendorType', vtype);
     const qs = p.toString() === '' ? '' : `?${p.toString()}`;
@@ -1084,7 +1091,7 @@ export function MaterialModal({
       .then((r) => { if (!gone) setD(r); })
       .catch((e: Error) => { if (!gone) setErr(e.message); });
     return () => { gone = true; };
-  }, [code, plants, vtype]);
+  }, [code, plants, vtype, filterQuery]);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>

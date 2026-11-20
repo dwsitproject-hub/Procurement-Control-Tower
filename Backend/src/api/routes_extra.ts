@@ -293,8 +293,17 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const plants = popupPlants(req.query as Record<string, unknown>);
     // And its Vendor Type filter (19 Nov 2026).
     const vt = parseVendorType((req.query as Record<string, unknown>)['popVendorType']);
-    const detail = await materialDetail(v.id, ctx.scope, String(req.params.code), plants, vt);
+    // The opening page's filter bar (20 Nov 2026), like the vendor and category
+    // popups: the figures must describe the row that was clicked.
+    const gf = parseGlobalFilter(req.query as Record<string, unknown>);
+    const detail = await materialDetail(v.id, ctx.scope, String(req.params.code), plants, vt, gf);
     if (!detail) throw new HttpProblem(404, 'not-found', 'Material not found or outside your data scope');
+    // The popup's plants within the bar's, as Category 360 combines them.
+    const eff: GlobalFilter = plants.length === 0 ? gf : {
+      ...gf,
+      plant: gf.plant?.length ? (plants.filter((p2) => gf.plant!.includes(p2)).length > 0
+        ? plants.filter((p2) => gf.plant!.includes(p2)) : ['(no plant in both)']) : plants,
+    };
 
     const fp = sessionFingerprint(ctx.sid);
     res.json({
@@ -305,7 +314,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         allLines: issueDrillToken(
           mergeIntoPredicate(
             { grain: 'po_line', filters: { materialCode: req.params.code, ...(vt ? { vendorType: vt } : {}) }, label: `Material ${req.params.code} — all PO lines` },
-            plants.length > 0 ? { plant: plants } : {},
+            eff,
           ) as unknown as DrillPredicate,
           v.id, ctx.scope, fp,
         ),

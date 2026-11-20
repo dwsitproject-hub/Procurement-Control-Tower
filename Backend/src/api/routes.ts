@@ -1001,8 +1001,10 @@ export function buildRouter(): Router {
       filters.unshift(['Figure', page.label]);
       if (page.note) filters.push(['Note', page.note]);
       if (page.totals?.idrSum !== null && page.totals?.idrSum !== undefined) {
-        filters.push([page.view ? 'Total (IDR, every currency at the dataset rate)' : 'Total (document IDR)',
-          String(page.totals.idrSum)]);
+        const what = page.totals.basis === 'still_to_deliver' ? ', still to deliver'
+          : page.totals.basis === 'still_to_invoice' ? ', still to invoice' : '';
+        filters.push([page.grain === 'po_line' ? `Total (IDR, every currency at the dataset rate${what})`
+          : 'Total (IDR)', String(page.totals.idrSum)]);
       }
       // Stated rather than omitted: a USD total the panel refused to show
       // because some lines have no rate must not look like a zero here.

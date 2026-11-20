@@ -225,6 +225,11 @@ export function DrillModal({
                 {page.totals?.idrSum !== null && page.totals?.idrSum !== undefined && (
                   <> · Σ {(page.totals.idrSum / 1e9).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} B IDR</>
                 )}
+                {/* Say what the sums are when they are not order value, so a
+                    "still to deliver" header is not read as the PO amount. */}
+                {page.totals?.basis && page.totals.basis !== 'value' && (
+                  <> {page.totals.basis === 'still_to_deliver' ? 'still to deliver' : 'still to invoice'}</>
+                )}
                 {page.totals && page.totals.usdSum !== null && (
                   <> · ≈ ${formatNumber(Math.round(page.totals.usdSum))} USD</>
                 )}

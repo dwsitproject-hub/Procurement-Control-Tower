@@ -205,7 +205,11 @@ export interface DrillPage {
   columns: { key: string; label: string; type: string; currency?: string; coupa?: boolean }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
-  totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;
+  totals: {
+    idrSum: number | null; usdSum: number | null; usdComplete: boolean;
+    /** What the sums add up: order value, or what is still to deliver / invoice. */
+    basis?: 'value' | 'still_to_deliver' | 'still_to_invoice';
+  } | null;
   detailHandoff: { params: Record<string, string>; unmapped: string[] } | null;
 }
 

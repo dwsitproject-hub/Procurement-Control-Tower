@@ -578,6 +578,29 @@ of POs, PO lines, PO amount (IDR and USD), share and cumulative share. The 80% d
 counted; the Head Office drills list the desks behind the HQ part. Every PO-line drill (including the three
 purchasing-group / purchasing-org charts) gains Purchasing Group and Purchasing Group Name columns.
 
+### 10f. Release of 20 Nov 2026 (later) — SAP user organisations editable; click-through fixes
+
+The usual §10 BE and FE updates. **Migration 048** runs at API start (instant): the business file's
+user → organisation rows move to `core.dim_user_purch_org_file`, admin edits go to
+`core.dim_user_org_manual`, and `core.dim_user_purch_org` becomes a view of the two (same columns, so
+nothing that reads it changes). No Rebuild is needed for this release; an HO/Unit edit reaches the
+precomputed "Manage by HO or Site" figures at the next Rebuild, filtered pages at once.
+
+What changed for users:
+- **Master → SAP Users → Edit**: Purchasing Organization (several, searchable) and HO/Unit are editable.
+  HO/Unit needs at least one organisation. Revert hands the user back to the business file.
+- **Executive Summary**: a Delivered / Not-yet-delivered figure (category bars, size bands, every Monthly
+  Spend cell and total) opens its Overview on THAT state instead of All, so the first card equals the
+  figure clicked (it was wrong for 190 of 254 figures on the 2026 page). The toggle still widens it.
+  PR Outstanding segments open their own requisitions instead of the unsliced Overview.
+- **Material 360** opened from Vendor 360, Material Group or Category 360 follows the page's filter bar,
+  as the vendor and category popups already did.
+- **Every PO-line drill popup**: the "Σ … B IDR" header now adds up every line in rupiah at the dataset
+  rate, the basis of every IDR card and chart. It counted IDR-currency lines only, so 72 of 195 money
+  figures on the 2026 pages opened a smaller total (Total PO Amount IDR 2,432 B, header 1,442 B). Drills
+  behind Open PO Commitment, commitment aging and GR/IR add up what is still to deliver / still to
+  invoice, with those two columns added, instead of the full line value.
+
 ## 11. Rollback
 
 **On the affected server:**

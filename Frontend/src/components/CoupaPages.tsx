@@ -21,23 +21,36 @@ ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip,
 const M = (v: unknown) =>
   v === null || v === undefined ? DASH : `${(Number(v) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })} M`;
 
-function Kpi({ v, label, sub }: { v: unknown; label: string; sub?: string }) {
-  return (
-    <div className="kpi" data-sev="neutral">
+function Kpi({ v, label, sub, onClick }: { v: unknown; label: string; sub?: string; onClick?: () => void }) {
+  const body = (
+    <>
       <div className="v">{v === null || v === undefined ? DASH : String(v)}</div>
       <div className="l">{label}</div>
       {sub && <div className="s">{sub}</div>}
-    </div>
+    </>
+  );
+  // Clickable figures open the rows they count (21 Nov 2026, Sourcing).
+  return onClick ? (
+    <button className="kpi" data-sev="neutral" onClick={onClick} title="Click to see the rows behind this figure">
+      {body}
+    </button>
+  ) : (
+    <div className="kpi" data-sev="neutral">{body}</div>
   );
 }
 
+/** Which rows a Sourcing figure opens - the keys of /api/v1/coupa/sourcing/rows. */
+interface SourcingRowsReq { what: string; title: string; extra?: Record<string, string> }
+
 /** Small month bar chart in the house style (value labels, PALETTE hue). */
 function OpsBars({
-  title, rows, series,
+  title, rows, series, onBar,
 }: {
   title: string;
   rows: Record<string, any>[];
   series: { key: string; label: string; color: string; money?: boolean }[];
+  /** A bar was clicked: its row and its series key. */
+  onBar?: (row: Record<string, any>, seriesKey: string) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const chart = useRef<ChartJS | null>(null);
@@ -85,6 +98,16 @@ function OpsBars({
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
+        onClick: (_e: unknown, els: { index: number; datasetIndex: number }[]) => {
+          const el = els[0];
+          if (!el || !onBar) return;
+          const row = rows[el.index];
+          const sp = series[el.datasetIndex];
+          if (row && sp) onBar(row, sp.key);
+        },
+        onHover: (e: any, els: unknown[]) => {
+          if (onBar && e?.native?.target) e.native.target.style.cursor = els.length > 0 ? 'pointer' : 'default';
+        },
         plugins: {
           legend: { display: series.length > 1, position: 'bottom', labels: { boxWidth: 12 } },
           tooltip: {
@@ -99,7 +122,7 @@ function OpsBars({
       },
     }) as unknown as ChartJS;
     return () => { chart.current?.destroy(); chart.current = null; };
-  }, [rows, series]);
+  }, [rows, series, onBar]);
   return (
     <div className="panel">
       <h3 className="pr-tbl-h">{title}</h3>
@@ -131,6 +154,10 @@ export function CoupaSourcingTab() {
   const [vtype, setVtype] = useState<'' | 'local' | 'import'>('');
   /** The event whose supplier comparison is open. */
   const [compare, setCompare] = useState<number | null>(null);
+  /** The figure whose rows are open. */
+  const [rowsOf, setRowsOf] = useState<SourcingRowsReq | null>(null);
+  const open = (what: string, title: string, extra?: Record<string, string>) =>
+    setRowsOf({ what, title, ...(extra ? { extra } : {}) });
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let gone = false;
@@ -148,6 +175,11 @@ export function CoupaSourcingTab() {
   }
   const k = d.kpis ?? {};
   const b = d.bids ?? {};
+  function onMonthBar(row: Record<string, any>, key: string) {
+    const mk = String(row.mk);
+    if (key === 'completed') open('month_completed', `Events created in ${mk}, completed`, { month: mk });
+    else open('month_events', `Events created in ${mk}`, { month: mk });
+  }
   const awardRate = Number(b.responses ?? 0) > 0 ? ((Number(b.awarded ?? 0) / Number(b.responses)) * 100).toFixed(1) : null;
   const cov = d.typeCoverage ?? {};
   return (
@@ -170,29 +202,58 @@ export function CoupaSourcingTab() {
         </span>
         {busy && <span className="gf-note">updating…</span>}
       </div>
+      {/* 21 Nov 2026: Planned savings left the page; the event cycle and the
+          bids per event are one card; every other figure opens its rows. */}
       <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
-        <Kpi v={formatNumber(Number(k.events ?? 0))} label="Sourcing events" sub={vtype ? `with a ${vtype === 'local' ? 'Local' : 'Import'} bid` : 'excluding templates'} />
-        <Kpi v={formatNumber(Number(k.open_events ?? 0))} label="Open events" sub="not complete or canceled" />
-        <Kpi v={formatNumber(Number(k.completed ?? 0))} label="Completed events" />
-        <Kpi v={k.median_cycle_days == null ? DASH : `${Number(k.median_cycle_days).toFixed(1)} d`} label="Event cycle (median)" sub="submit → end" />
-        <Kpi v={formatNumber(Number(b.suppliers ?? 0))} label="Participating suppliers" sub={`${formatNumber(Number(b.responses ?? 0))} submitted bids`} />
-        <Kpi v={b.avg_bids_per_event ?? DASH} label="Avg bids per event" sub={`${formatNumber(Number(b.events_with_bids ?? 0))} events with bids`} />
-        <Kpi v={awardRate === null ? DASH : `${awardRate}%`} label="Bid award rate" sub={`${formatNumber(Number(b.awarded ?? 0))} awarded bids`} />
-        <Kpi
-          v={k.planned_savings_idr == null ? DASH : `${M(k.planned_savings_idr)} IDR`}
-          label="Planned savings (IDR)"
-          sub={Number(k.savings_other_ccy ?? 0) > 0 ? `${k.savings_other_ccy} non-IDR events not converted` : 'from event headers'}
-        />
+        <Kpi v={formatNumber(Number(k.events ?? 0))} label="Sourcing events" sub={vtype ? `with a ${vtype === 'local' ? 'Local' : 'Import'} bid` : 'excluding templates'}
+          onClick={() => open('events', 'Sourcing events')} />
+        <Kpi v={formatNumber(Number(k.open_events ?? 0))} label="Open events" sub="not complete or canceled"
+          onClick={() => open('open', 'Open events')} />
+        <Kpi v={formatNumber(Number(k.completed ?? 0))} label="Completed events"
+          onClick={() => open('completed', 'Completed events')} />
+        <div className="kpi kpi-multi" style={{ ['--c' as string]: 'var(--heading)' }}>
+          <div className="l kpi-multi-h">Event cycle &amp; bids</div>
+          <dl className="kpi-multi-list">
+            <div className="kpi-multi-row">
+              <dt>Event cycle (median, submit → end)</dt>
+              <dd>
+                <button className="cu-link" title="Events with a submit and an end time"
+                  onClick={() => open('cycle', 'Event cycle — events with a submit and end time')}>
+                  {cycleText(k.median_cycle_days)}
+                </button>
+              </dd>
+            </div>
+            <div className="kpi-multi-row">
+              <dt>Avg bids per event</dt>
+              <dd>
+                <button className="cu-link" title="Events that drew a bid, with their bid count"
+                  onClick={() => open('with_bids', 'Events with a bid')}>
+                  {b.avg_bids_per_event ?? DASH}
+                </button>
+              </dd>
+            </div>
+            <div className="kpi-multi-row">
+              <dt>Events with bids</dt>
+              <dd>
+                <button className="cu-link" onClick={() => open('with_bids', 'Events with a bid')}>
+                  {formatNumber(Number(b.events_with_bids ?? 0))}
+                </button>
+              </dd>
+            </div>
+          </dl>
+        </div>
+        <Kpi v={formatNumber(Number(b.suppliers ?? 0))} label="Participating suppliers" sub={`${formatNumber(Number(b.responses ?? 0))} submitted bids`}
+          onClick={() => open('bids', 'Participating suppliers — their submitted bids')} />
+        <Kpi v={awardRate === null ? DASH : `${awardRate}%`} label="Bid award rate" sub={`${formatNumber(Number(b.awarded ?? 0))} awarded bids`}
+          onClick={() => open('awarded_bids', 'Awarded bids')} />
       </div>
 
       <div className="chart-grid">
         <OpsBars
           title="Sourcing events by month"
           rows={d.eventsByMonth ?? []}
-          series={[
-            { key: 'events', label: 'Events created', color: '#2E75B6' },
-            { key: 'completed', label: 'Completed', color: '#0D9488' },
-          ]}
+          series={MONTH_SERIES}
+          onBar={onMonthBar}
         />
         <div className="panel">
           <h3 className="pr-tbl-h"><Lbl>Awarded spend by commodity — IDR documents</Lbl></h3>
@@ -202,7 +263,8 @@ export function CoupaSourcingTab() {
               <tbody>
                 {(d.byCommodity ?? []).length === 0 && <tr><td colSpan={3} className="muted">No awarded bids yet.</td></tr>}
                 {(d.byCommodity ?? []).map((c: any, i: number) => (
-                  <tr key={c.commodity} className={i % 2 ? '' : 're'}>
+                  <tr key={c.commodity} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for the awarded bids"
+                    onClick={() => open('commodity', `Awarded bids — ${c.commodity}`, { commodity: String(c.commodity) })}>
                     <td>{c.commodity}</td>
                     <td className="num">{formatNumber(c.awarded_bids)}{c.other_ccy > 0 ? <span className="muted" title={`${c.other_ccy} non-IDR bids not in the amount`}> ⚠</span> : null}</td>
                     <td className="num">{M(c.amount_idr)}</td>
@@ -223,7 +285,8 @@ export function CoupaSourcingTab() {
               <tbody>
                 {(d.bySupplier ?? []).length === 0 && <tr><td colSpan={3} className="muted">No awarded bids yet.</td></tr>}
                 {(d.bySupplier ?? []).map((c: any, i: number) => (
-                  <tr key={c.supplier_name} className={i % 2 ? '' : 're'}>
+                  <tr key={c.supplier_name} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for the awarded bids"
+                    onClick={() => open('supplier', `Awarded bids — ${c.supplier_name}`, { supplier: String(c.supplier_name) })}>
                     <td>{c.supplier_name} <VendorTypeBadge t={c.vendor_type} /></td>
                     <td className="num">{formatNumber(c.awarded_bids)}{c.other_ccy > 0 ? <span className="muted" title={`${c.other_ccy} non-IDR bids not in the amount`}> ⚠</span> : null}</td>
                     <td className="num">{M(c.amount_idr)}</td>
@@ -233,7 +296,7 @@ export function CoupaSourcingTab() {
             </table>
           </div>
         </div>
-        <EventPipeline pipeline={d.pipeline ?? []} bids={b} events={Number(k.events ?? 0)} />
+        <EventPipeline pipeline={d.pipeline ?? []} bids={b} events={Number(k.events ?? 0)} onOpen={open} />
       </div>
 
       <div className="panel" style={{ marginTop: '1rem' }}>
@@ -275,8 +338,144 @@ export function CoupaSourcingTab() {
           </table>
         </div>
       </div>
+      {rowsOf !== null && (
+        <SourcingRowsModal req={rowsOf} vendorType={vtype} onClose={() => setRowsOf(null)} onCompare={setCompare} />
+      )}
       {compare !== null && <SourcingCompareModal eventId={compare} onClose={() => setCompare(null)} />}
     </>
+  );
+}
+
+/**
+ * An event cycle in days, or in hours / minutes below a day (21 Nov 2026): the
+ * median in this Coupa store is minutes, and "0.0 d" read as no data.
+ */
+function cycleText(v: unknown): string {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return DASH;
+  const d = Number(v);
+  if (d >= 1) return `${d.toFixed(1)} d`;
+  const h = d * 24;
+  return h >= 1 ? `${h.toFixed(1)} h` : `${Math.max(0, Math.round(h * 60))} min`;
+}
+
+const MONTH_SERIES = [
+  { key: 'events', label: 'Events created', color: '#2E75B6' },
+  { key: 'completed', label: 'Completed', color: '#0D9488' },
+];
+
+/**
+ * The rows behind one Sourcing figure (21 Nov 2026), in the Sourcing data
+ * table's columns. Event figures list events (the supplier and amount are the
+ * AWARDED ones); bid figures list bids. The count in the header is the
+ * figure's count - the server uses the figure's own predicate.
+ */
+function SourcingRowsModal({ req, vendorType, onClose, onCompare }: {
+  req: SourcingRowsReq;
+  vendorType: '' | 'local' | 'import';
+  onClose: () => void;
+  onCompare: (eventId: number) => void;
+}) {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [rows, setRows] = useState<Record<string, any>[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const qs = (offset: number) => {
+    const p = new URLSearchParams({ what: req.what, limit: '200', offset: String(offset) });
+    if (vendorType) p.set('vendorType', vendorType);
+    for (const [k2, v2] of Object.entries(req.extra ?? {})) p.set(k2, v2);
+    return p.toString();
+  };
+  useEffect(() => {
+    let gone = false;
+    api.get<Record<string, any>>(`/api/v1/coupa/sourcing/rows?${qs(0)}`)
+      .then((r) => { if (!gone) { setD(r); setRows(r.rows ?? []); } })
+      .catch((e: Error) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req, vendorType]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const loadMore = async () => {
+    setMore(true);
+    try {
+      const r = await api.get<Record<string, any>>(`/api/v1/coupa/sourcing/rows?${qs(rows.length)}`);
+      setRows((cur) => [...cur, ...(r.rows ?? [])]);
+    } finally { setMore(false); }
+  };
+  const isEvent = d?.grain === 'event';
+  const showCycle = req.what === 'cycle';
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={req.title} onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h3>🔍 {req.title}</h3>
+          <span className="spacer" />
+          <FloatControls onClose={onClose} />
+          <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>Close</button>
+        </header>
+        <div className="body">
+          {err && <p className="err">{err}</p>}
+          {!d && !err && <div className="center-msg"><div className="spinner" />Loading…</div>}
+          {d && (
+            <>
+              <p className="count">
+                <strong>{formatNumber(Number(d.total ?? 0))}</strong> {isEvent ? 'events' : 'bids'}
+                {!isEvent && <> · {formatNumber(Number(d.suppliers ?? 0))} suppliers · {formatNumber(Number(d.events ?? 0))} events</>}
+                {vendorType && <> · {vendorType === 'local' ? 'Local' : 'Import'} only</>}
+                {rows.length < Number(d.total ?? 0) && <> · showing {formatNumber(rows.length)}</>}
+                {isEvent && <span className="muted"> · supplier and amount are the awarded bid(s)</span>}
+              </p>
+              <div className="table-wrap dt-scroll">
+                <table className="data dd-tbl">
+                  <thead>
+                    <tr>
+                      <th>Event</th><th>Type</th><th>State</th><th>Commodity</th><th>Description</th>
+                      <th>SAP PR</th><th>{isEvent ? 'Awarded supplier' : 'Supplier'}</th><th>Vendor Type</th>
+                      <th className="num">Bids</th><th>Awarded</th><th>Submitted</th>
+                      {showCycle && <th className="num">Cycle</th>}
+                      <th className="num">{isEvent ? 'Awarded amount' : 'Amount'}</th><th>Ccy</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.length === 0 && <tr><td colSpan={14} className="muted">No rows.</td></tr>}
+                    {rows.map((r2, i) => (
+                      <tr key={`${r2.event_id}|${r2.supplier_name ?? ''}|${i}`} className={i % 2 ? '' : 're'}>
+                        <td>
+                          <button className="cu-link" title="Compare every supplier's quote on this event" onClick={() => onCompare(Number(r2.event_id))}>
+                            {r2.event_id}
+                          </button>
+                        </td>
+                        <td>{r2.event_type ?? DASH}</td>
+                        <td>{r2.event_state ?? DASH}</td>
+                        <td>{r2.commodity ?? DASH}</td>
+                        <td className="muted">{r2.description ?? ''}</td>
+                        <td>{r2.sap_pr_no ?? DASH}</td>
+                        <td>{r2.supplier_name ?? DASH}</td>
+                        <td>{r2.vendor_type ? r2.vendor_type : <span className="muted">—</span>}</td>
+                        <td className="num">{formatNumber(Number(r2.bids_on_event ?? 0))}</td>
+                        <td><span className={`bs ${r2.awarded ? 'sd' : 'sl'}`}>{r2.awarded ? 'Yes' : 'No'}</span></td>
+                        <td>{r2.submitted_at ? String(r2.submitted_at).slice(0, 10) : DASH}</td>
+                        {showCycle && <td className="num">{cycleText(r2.cycle_days)}</td>}
+                        <td className="num">{r2.total_amount == null ? DASH : formatNumber(Number(r2.total_amount))}</td>
+                        <td><span className="dd-ccy">{r2.currency ?? DASH}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {rows.length < Number(d.total ?? 0) && (
+                <button className="btn secondary" style={{ marginTop: '.75rem', width: 'auto' }} disabled={more} onClick={() => void loadMore()}>
+                  {more ? 'Loading…' : 'Load more'}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -302,19 +501,20 @@ const STAGES: { key: string; label: string; hint: string; color: string }[] = [
   { key: 'other', label: 'Other', hint: 'Any other Coupa state', color: '#64748B' },
 ];
 
-function EventPipeline({ pipeline, bids, events }: {
+function EventPipeline({ pipeline, bids, events, onOpen }: {
   pipeline: { stage: string; events: number; with_bids: number; awarded: number }[];
   bids: Record<string, any>;
   events: number;
+  onOpen: (what: string, title: string, extra?: Record<string, string>) => void;
 }) {
   const by = new Map(pipeline.map((p) => [p.stage, p]));
   const rows = STAGES.filter((s2) => (by.get(s2.key)?.events ?? 0) > 0);
   const max = Math.max(1, ...rows.map((s2) => by.get(s2.key)!.events));
   const funnel = [
-    { label: 'Events', v: events },
-    { label: 'Events with a bid', v: Number(bids.events_with_bids ?? 0) },
-    { label: 'Bids submitted', v: Number(bids.responses ?? 0) },
-    { label: 'Bids awarded', v: Number(bids.awarded ?? 0) },
+    { label: 'Events', v: events, what: 'events' },
+    { label: 'Events with a bid', v: Number(bids.events_with_bids ?? 0), what: 'with_bids' },
+    { label: 'Bids submitted', v: Number(bids.responses ?? 0), what: 'bids' },
+    { label: 'Bids awarded', v: Number(bids.awarded ?? 0), what: 'awarded_bids' },
   ];
   return (
     <div className="panel">
@@ -324,7 +524,10 @@ function EventPipeline({ pipeline, bids, events }: {
         {rows.map((s2) => {
           const p = by.get(s2.key)!;
           return (
-            <div key={s2.key} className="src-pipe-row" title={s2.hint}>
+            <div key={s2.key} className="src-pipe-row src-click" title={`${s2.hint} - click for these events`}
+              role="button" tabIndex={0}
+              onClick={() => onOpen('stage', `Events at stage ${s2.label}`, { stage: s2.key })}
+              onKeyDown={(e) => { if (e.key === 'Enter') onOpen('stage', `Events at stage ${s2.label}`, { stage: s2.key }); }}>
               <span className="src-pipe-label">{s2.label}</span>
               <span className="src-pipe-track">
                 <span className="src-pipe-bar" style={{ width: `${(p.events / max) * 100}%`, background: s2.color }} />
@@ -339,7 +542,10 @@ function EventPipeline({ pipeline, bids, events }: {
       </div>
       <div className="src-funnel">
         {funnel.map((f, i) => (
-          <div key={f.label} className="src-funnel-step">
+          <div key={f.label} className="src-funnel-step src-click" role="button" tabIndex={0}
+            title={`Click for the ${f.label.toLowerCase()}`}
+            onClick={() => onOpen(f.what, f.label)}
+            onKeyDown={(e) => { if (e.key === 'Enter') onOpen(f.what, f.label); }}>
             <div className="v">{formatNumber(f.v)}</div>
             <div className="l">{f.label}</div>
             {i > 0 && funnel[i - 1]!.v > 0 && i !== 2 && (

@@ -1354,6 +1354,164 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   }));
 
   /*
+   * The rows behind a Sourcing figure (21 Nov 2026): every card, chart bar,
+   * table row, pipeline stage and funnel step opens the events or bids it
+   * counts, in the Sourcing data table's columns.
+   *
+   * `what` names the figure; each entry is the SAME predicate the figure is
+   * computed with in /api/v1/coupa/sourcing above, so the popup's count is the
+   * figure's count. Only these keys exist - nothing from the request reaches
+   * SQL except bound values (stage, month, commodity, supplier).
+   */
+  r.get('/api/v1/coupa/sourcing/rows', role('analyst', async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const what = String(q['what'] ?? '');
+    const vt = parseVendorType(q['vendorType']);
+    const vtLabel = vt === null ? null : vt === 'local' ? 'Local' : 'Import';
+    const limit = qint(q['limit'], 200, 1, 1000);
+    const offset = qint(q['offset'], 0, 0, 1_000_000);
+    const params: unknown[] = [];
+    const bind = (v: unknown): string => { params.push(v); return `$${params.length}`; };
+    const evType = (): string => (vtLabel === null ? '' : ` AND EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response vr
+                       WHERE vr.quote_request_id = e.id AND vr.vendor_type = ${bind(vtLabel)})`);
+    const rType = (): string => (vtLabel === null ? '' : ` AND r.vendor_type = ${bind(vtLabel)}`);
+    const STAGE_SQL = `CASE WHEN e.state IN ('new','draft') THEN 'draft'
+                            WHEN e.state = 'prod' THEN 'live'
+                            WHEN e.state = 'pause' THEN 'paused'
+                            WHEN e.state = 'closed_for_edit' THEN 'evaluation'
+                            WHEN e.state = 'complete' THEN 'complete'
+                            WHEN e.state = 'canceled' THEN 'canceled'
+                            ELSE 'other' END`;
+    const str = (k: string): string => {
+      const v = String(q[k] ?? '').trim();
+      if (v === '') throw new HttpProblem(400, 'bad-request', `${k} is required for ${what}`);
+      return v;
+    };
+
+    // Event-grain figures: the WHERE over ops.v_coupa_sourcing_event e.
+    const EVENT: Record<string, () => { where: string; label: string }> = {
+      events: () => ({ where: `e.state <> 'template'${evType()}`, label: 'Sourcing events' }),
+      open: () => ({
+        where: `e.state NOT IN ('complete','canceled','template','test_complete')${evType()}`,
+        label: 'Open events',
+      }),
+      completed: () => ({ where: `e.state = 'complete'${evType()}`, label: 'Completed events' }),
+      cycle: () => ({
+        where: `e.state <> 'template' AND e.submit_time IS NOT NULL AND e.end_time IS NOT NULL${evType()}`,
+        label: 'Events with a cycle (submit → end)',
+      }),
+      with_bids: () => ({
+        where: `e.state <> 'template' AND EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
+                  WHERE r.quote_request_id = e.id AND r.state = 'submitted'${rType()})${evType()}`,
+        label: 'Events with a bid',
+      }),
+      stage: () => {
+        const st = str('stage');
+        return {
+          where: `e.state NOT IN ('template','test_complete') AND ${STAGE_SQL} = ${bind(st)}${evType()}`,
+          label: `Events at stage ${st}`,
+        };
+      },
+      month_events: () => {
+        const mk = str('month');
+        return {
+          where: `e.state <> 'template' AND to_char(e.created_at,'YYYY-MM') = ${bind(mk)}${evType()}`,
+          label: `Events created in ${mk}`,
+        };
+      },
+      month_completed: () => {
+        const mk = str('month');
+        return {
+          where: `e.state = 'complete' AND to_char(e.created_at,'YYYY-MM') = ${bind(mk)}${evType()}`,
+          label: `Events created in ${mk}, completed`,
+        };
+      },
+    };
+    // Bid-grain figures: the WHERE over v_coupa_supplier_response r JOIN the event table e.
+    const BID: Record<string, () => { where: string; label: string }> = {
+      bids: () => ({ where: `r.state = 'submitted'${rType()}`, label: 'Submitted bids' }),
+      awarded_bids: () => ({ where: `r.state = 'submitted' AND r.awarded${rType()}`, label: 'Awarded bids' }),
+      commodity: () => {
+        const c = str('commodity');
+        return {
+          where: `r.awarded AND COALESCE(e.commodity,'(none)') = ${bind(c)}${rType()}`,
+          label: `Awarded bids — ${c}`,
+        };
+      },
+      supplier: () => {
+        const sp = str('supplier');
+        return { where: `r.awarded AND r.supplier_name = ${bind(sp)}${rType()}`, label: `Awarded bids — ${sp}` };
+      },
+    };
+
+    if (EVENT[what]) {
+      const { where, label } = EVENT[what]!();
+      const [tot] = await query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ops.v_coupa_sourcing_event e WHERE ${where}`, params,
+      );
+      const pp = [...params, limit, offset];
+      // Per-event detail reads the response TABLE: the event already passed the
+      // exclusions, and the view would re-check them per row (see /sourcing).
+      const rows = await query(
+        `SELECT e.id AS event_id, e.event_type, e.state AS event_state, e.commodity,
+                left(e.description, 60) AS description, e.sap_pr_no,
+                (SELECT string_agg(DISTINCT r.supplier_name, ', ') FROM ops.coupa_supplier_response r
+                  WHERE r.quote_request_id = e.id AND r.awarded) AS supplier_name,
+                (SELECT string_agg(DISTINCT r.vendor_type, ', ') FROM ops.coupa_supplier_response r
+                  WHERE r.quote_request_id = e.id AND r.awarded) AS vendor_type,
+                (SELECT count(*) FROM ops.coupa_supplier_response r
+                  WHERE r.quote_request_id = e.id AND r.state = 'submitted')::int AS bids_on_event,
+                EXISTS (SELECT 1 FROM ops.coupa_supplier_response r
+                         WHERE r.quote_request_id = e.id AND r.awarded) AS awarded,
+                e.submit_time AS submitted_at,
+                (SELECT sum(r.total_amount) FROM ops.coupa_supplier_response r
+                  WHERE r.quote_request_id = e.id AND r.awarded) AS total_amount,
+                e.currency,
+                round((EXTRACT(EPOCH FROM (e.end_time - e.submit_time)) / 86400.0)::numeric, 4) AS cycle_days
+           FROM ops.v_coupa_sourcing_event e
+          WHERE ${where}
+          ORDER BY e.created_at DESC NULLS LAST, e.id DESC
+          LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
+        pp,
+      );
+      res.json({ what, grain: 'event', label, total: tot?.n ?? 0, rows });
+      return;
+    }
+    if (BID[what]) {
+      const { where, label } = BID[what]!();
+      const [tot] = await query<{ n: number; suppliers: number; events: number }>(
+        `SELECT count(*)::int AS n, count(DISTINCT r.supplier_name)::int AS suppliers,
+                count(DISTINCT r.quote_request_id)::int AS events
+           FROM ops.v_coupa_supplier_response r
+           JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+          WHERE ${where}`,
+        params,
+      );
+      const pp = [...params, limit, offset];
+      const rows = await query(
+        `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
+                e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
+                r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
+                COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
+                (SELECT count(*) FROM ops.coupa_supplier_response r2
+                  WHERE r2.quote_request_id = r.quote_request_id AND r2.state = 'submitted')::int AS bids_on_event
+           FROM ops.v_coupa_supplier_response r
+           JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+          WHERE ${where}
+          ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
+          LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
+        pp,
+      );
+      res.json({
+        what, grain: 'bid', label, total: tot?.n ?? 0,
+        suppliers: tot?.suppliers ?? 0, events: tot?.events ?? 0, rows,
+      });
+      return;
+    }
+    throw new HttpProblem(400, 'bad-request', `unknown sourcing figure: ${what}`);
+  }));
+
+  /*
    * One sourcing event, side by side (19 Nov 2026): what was asked for, line by
    * line, and what each supplier quoted against each line - price, quantity,
    * lead time, the item offered, shipping term - with the award marked.

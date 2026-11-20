@@ -1376,3 +1376,8 @@ table.data.src-cmp .src-cmp-line { min-width: 16rem; max-width: 24rem; }
 .kpi-multi-row { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; line-height: 1.2; }
 .kpi-multi-row dt { font-size: .68rem; color: var(--muted, #64748b); }
 .kpi-multi-row dd { margin: 0; font-weight: 800; font-size: .86rem; color: var(--heading); white-space: nowrap; }
+
+/* Sourcing (21 Nov 2026): pipeline stages and funnel steps open their rows. */
+.src-click { cursor: pointer; }
+.src-click:hover { background: var(--panel-2, rgba(46, 117, 182, .06)); }
+.kpi-multi-row dd .cu-link { font: inherit; color: inherit; }

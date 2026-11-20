@@ -632,6 +632,18 @@ What changed for users (PR Analysis):
 - **Max PR Approval** and **Oldest Unreleased (d)** no longer show "n = …"; a click lists only the PR items
   AT that maximum (computed inside the same filters), with the days as the first column.
 
+### 10i. Release of 21 Nov 2026 — Sourcing page click-through
+
+The usual §10 BE and FE updates; no migration, no Rebuild (the Sourcing page reads the live Coupa store).
+
+What changed for users (Sourcing):
+- Planned savings (IDR) is gone. Event cycle (median) and Avg bids per event are one card, "Event cycle &
+  bids", with events-with-bids as a third line; a cycle under a day shows in hours or minutes.
+- Every other figure opens its rows in the Sourcing data table's columns: the cards, each month bar, each
+  commodity and supplier row, each pipeline stage and each funnel step. Event figures list events (with the
+  awarded supplier and amount); bid figures list bids. The popup's count is the figure's count, Vendor Type
+  filter included (76 figures checked on 21 Nov, 0 mismatches).
+
 ## 11. Rollback
 
 **On the affected server:**

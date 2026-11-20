@@ -104,6 +104,15 @@ const SUMMARY_CARDS: Record<string, { title: string; items: { id: string; label:
       { id: 'avg_pr_line_value_idr', label: 'Avg PR line value' },
     ],
   },
+  // Delivery (21 Nov 2026): the two lead-time cards in one, each line keeping
+  // its Local / Import split.
+  delivery_lt_summary: {
+    title: 'Delivery Lead Time',
+    items: [
+      { id: 'cycle_delivery', label: 'Avg delivery LT (GR vs plan)' },
+      { id: 'cycle_e2e', label: 'End to end (median, PR → GR)' },
+    ],
+  },
   // PO Analysis (21 Nov 2026): three "how long / how much on average" cards in one.
   po_cycle_value_summary: {
     title: 'Sourcing, Approval & PO Value',
@@ -174,7 +183,8 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'tail_spend_po_pct', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
   ],
   delivery: [
-    'cycle_delivery', 'cycle_e2e', 'delivered_gr', 'reversal_rate',
+    // delivery_lt_summary = cycle_delivery + cycle_e2e (21 Nov 2026).
+    'delivery_lt_summary', 'delivered_gr', 'reversal_rate',
     'otd_vs_requested',
   ],
   approvals: [
@@ -420,7 +430,14 @@ export default function App() {
       .catch(() => setFindings([]));
   }, [me, dataset]);
 
-  const gfQuery = globalFilterQuery(gf);
+  /**
+   * The Delivery page's own Vendor Type filter (21 Nov 2026): Local = vendor
+   * code LN..., Import = IN.... Page-local on purpose - kept in the global bar it
+   * would silently narrow every other page, none of which shows the control.
+   */
+  const [deliveryVt, setDeliveryVt] = useState<'' | 'local' | 'import'>('');
+  const gfQuery = [globalFilterQuery(gf), tab === 'delivery' && deliveryVt ? `vendorType=${deliveryVt}` : '']
+    .filter((x) => x !== '').join('&');
 
   /**
    * KPIs are fetched PER PAGE, and again on every page change.
@@ -819,6 +836,23 @@ export default function App() {
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (
           <>
+            {tab === 'delivery' && (
+              <div className="gf-bar" style={{ marginBottom: '.6rem' }}>
+                <span className="gf-label">Filter</span>
+                <label className="ms-filter" title="Local = SAP vendor code LN…, Import = IN… - applies to every card, chart and drill on this page">
+                  <span className="gf-label">Vendor Type</span>
+                  <select className="dt-search" value={deliveryVt} aria-label="Vendor Type"
+                    onChange={(e) => setDeliveryVt(e.target.value as '' | 'local' | 'import')}>
+                    <option value="">All</option>
+                    <option value="local">Local</option>
+                    <option value="import">Import</option>
+                  </select>
+                </label>
+                {deliveryVt !== '' && (
+                  <button className="gf-btn gf-clear" onClick={() => setDeliveryVt('')}>Clear</button>
+                )}
+              </div>
+            )}
             {/* Admin only, and shared by every user (049). Custom items stay out
                 of the adders: they belong to whoever saved them, so a shared
                 layout could not show them to anyone else. */}

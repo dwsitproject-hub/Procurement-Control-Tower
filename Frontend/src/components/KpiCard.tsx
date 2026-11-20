@@ -115,7 +115,10 @@ export function KpiCard({
     <>
       <div className="v">{headline}</div>
       <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
-      <div className="s">{basisNote ? `${basisNote} · ` : ''}{sub}{chips}{vendorSplit}</div>
+      <div className={vendorSplit ? 's s1' : 's'}>{basisNote ? `${basisNote} · ` : ''}{sub}{chips}</div>
+      {/* Its own line (21 Nov 2026): inside the two-line subtitle the Local /
+          Import row was clamped away on Delivered (GR). */}
+      {vendorSplit && <div className="kpi-vt-row">{vendorSplit}</div>}
     </>
   );
 
@@ -226,6 +229,15 @@ function subtitle(kpi: Kpi): string {
 
 const NO_SAMPLE_KPIS = new Set(['max_pr_approval', 'oldest_unreleased']);
 
+/** A Local / Import value in the card's own unit. */
+function splitText(k: Kpi, v: unknown): string {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return DASH;
+  const n = Number(v);
+  if (k.unit === 'days') return `${n.toLocaleString('en-GB', { maximumFractionDigits: 1 })} d`;
+  if (k.unit === 'percent') return `${n.toFixed(1)}%`;
+  return formatNumber(n);
+}
+
 /**
  * Several related figures on ONE card, not clickable (21 Nov 2026, PR
  * Analysis): four cards that each answered "how long / how much on average"
@@ -258,9 +270,16 @@ export function KpiSummaryCard({
       <div className="l kpi-multi-h"><Lbl k={`kpi:${id}`}>{title}</Lbl></div>
       <dl className="kpi-multi-list">
         {items.map(({ kpi, label }) => (
-          <div key={label} className="kpi-multi-row" title={kpi?.statusReason ?? undefined}>
-            <dt>{label}</dt>
-            <dd>{line(kpi)}</dd>
+          <div key={label} className="kpi-multi-item">
+            <div className="kpi-multi-row" title={kpi?.statusReason ?? undefined}>
+              <dt>{label}</dt>
+              <dd>{line(kpi)}</dd>
+            </div>
+            {kpi?.detail && kpi.detail['vt_local'] !== undefined && (
+              <div className="kpi-multi-vt">
+                Local {splitText(kpi, kpi.detail['vt_local'])} · Import {splitText(kpi, kpi.detail['vt_import'])}
+              </div>
+            )}
           </div>
         ))}
       </dl>

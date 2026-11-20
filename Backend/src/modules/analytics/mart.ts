@@ -272,7 +272,7 @@ export async function inlineKpis(
               row && row.toti > 0 ? (row.oki / row.toti) * 100 : null, row?.toti ?? 0,
             ),
             drillPredicate: drillOf({
-              grain: 'po_line',
+              grain: 'po_line', columns: 'delivery',
               filters: { notDeleted: true, notSto: true, otdrEvaluable: true },
             }),
           },
@@ -588,7 +588,7 @@ export async function cycleKpis(
      * call it the average (25.3 days vs 11.6 on the reference data).
      */
     ['cycle_delivery', 'delivery_vs_promise_days', 'po_line',
-      { grain: 'po_line', filters: { deliveryVsPlanEvaluable: true } }, true],
+      { grain: 'po_line', columns: 'delivery', filters: { deliveryVsPlanEvaluable: true } }, true],
   ];
   for (const [kpiId, expr, kind, drill, keepNegative] of cycles) {
     const table = kind === 'pr_item' ? 'core.fact_pr_item' : 'core.fact_po_line';
@@ -622,7 +622,7 @@ export async function cycleKpis(
     const kept = rows.filter((x) => x.d !== null && x.d >= 0);
     out.push(withVendorTypeSplit(cycleKpi('cycle_e2e', kept.map((x) => x.d!),
       minSample, disabledKpis, 'median',
-      drillOf({ grain: 'po_line', filters: { e2eEvaluable: true } })), kept, 'median'));
+      drillOf({ grain: 'po_line', columns: 'delivery', filters: { e2eEvaluable: true } })), kept, 'median'));
   }
   return out;
 }

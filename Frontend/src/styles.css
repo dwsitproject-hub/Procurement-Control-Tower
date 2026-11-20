@@ -1386,3 +1386,10 @@ table.data.src-cmp .src-cmp-line { min-width: 16rem; max-width: 24rem; }
 .chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; }
 .chart-head h2 { margin-bottom: 0; }
 .chart-num-toggle { display: inline-flex; align-items: center; gap: .3rem; font-size: .75rem; color: var(--muted); white-space: nowrap; cursor: pointer; }
+
+/* Delivery (21 Nov 2026): Local / Import on its own line, and per line on a combined card. */
+.kpi .s.s1 { -webkit-line-clamp: 1; }
+.kpi-vt-row { margin-top: .1rem; }
+.kpi-vt-row .kpi-vt { margin-left: 0; }
+.kpi-multi-item { display: grid; gap: 0; }
+.kpi-multi-vt { font-size: .62rem; color: var(--muted, #64748b); text-align: right; line-height: 1.2; }

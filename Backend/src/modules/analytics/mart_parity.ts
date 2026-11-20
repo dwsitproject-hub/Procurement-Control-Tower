@@ -169,7 +169,7 @@ export const PARITY_KPIS: KpiSpec[] = [
                    WHERE dataset_version_id = $1 AND NOT is_deleted) AS qty_pr
             FROM ${POL}
            WHERE dataset_version_id = $1/*F*/ AND receipt_date IS NOT NULL`,
-    drill: { grain: 'po_line', filters: { hasReceipt: true } },
+    drill: { grain: 'po_line', columns: 'delivery', filters: { hasReceipt: true } },
   },
 
   // ── Open Items ──
@@ -2040,7 +2040,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  spend_category AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY delivery_days)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('spendCategory', min(spend_category),'hasReceipt',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND delivery_days IS NOT NULL
               AND spend_category IS NOT NULL
@@ -2052,7 +2052,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  COALESCE(priority_label,'(unlabelled)') AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY delivery_days)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('priorityLabel', min(priority_label),'hasReceipt',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND delivery_days IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
@@ -2061,7 +2061,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
     chartId: 'delivery_distribution', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
     sql: `SELECT ${DIST_BUCKETS} AS bucket_key, ${DIST_BUCKETS} || ' days' AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('hasReceipt',true,'distBucket',
                      jsonb_build_object('measure','delivery','bucket', ${DIST_BUCKETS}))) AS drill
             FROM (SELECT delivery_days AS d FROM ${POL}
@@ -2074,7 +2074,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  to_char(pol.document_date,'Mon YYYY') AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('monthKey', to_char(pol.document_date,'YYYY-MM'),
                                       'hasReceipt',true,'hasPr',true)) AS drill
             FROM ${POL} pol JOIN ${PRI} pri
@@ -2290,7 +2290,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  COALESCE(pol.spend_category,'(unmapped)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('ownSpendCategory', min(COALESCE(pol.spend_category,'(unmapped)')),
                                       'hasReceipt',true,'hasPr',true)) AS drill
             FROM ${POL} pol JOIN ${PRI} pri
@@ -2653,7 +2653,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
     sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
                  to_char(document_date,'Mon YYYY') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
@@ -2664,7 +2664,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  to_char(document_date,'Mon YYYY') AS bucket_label,
                  count(*) FILTER (WHERE receipt_date IS NOT NULL)::numeric AS value,
                  count(*) FILTER (WHERE receipt_date IS NOT NULL)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
                                       'hasReceipt',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL

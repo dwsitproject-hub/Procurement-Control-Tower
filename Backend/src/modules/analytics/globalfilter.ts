@@ -11,6 +11,7 @@
  */
 
 import { prSpendCategoryMatchSql } from '@pct/rules';
+import { parseVendorType, vendorTypePredicate, type VendorType } from './vendortype.js';
 
 export interface GlobalFilter {
   companyCode?: string[];
@@ -57,6 +58,12 @@ export interface GlobalFilter {
    * titled "HO - Jan 2026" showed HO and Site together.
    */
   managedBy?: string[];
+  /**
+   * Local (vendor code LN...) or Import (IN...) - vendortype.ts. Added 21 Nov
+   * 2026 for the Delivery page. A property of the ORDER's vendor: a requisition
+   * matches through its PO lines, a goods receipt through its PO line.
+   */
+  vendorType?: VendorType;
 }
 
 /** The status set v1 (and the drill `open` filter) treat as open. */
@@ -75,6 +82,7 @@ export function isEmptyFilter(f: GlobalFilter): boolean {
     (f.sizeBand?.length ?? 0) === 0 &&
     f.delivered === undefined &&
     (f.managedBy?.length ?? 0) === 0 &&
+    f.vendorType === undefined &&
     f.scope === undefined
   );
 }
@@ -296,6 +304,24 @@ export function buildFilterClause(
     n += 1;
   }
 
+  if (f.vendorType !== undefined) {
+    // The vendor lives on the PO line. Unlike the Executive Summary dimensions a
+    // goods receipt DOES have one - through the line it was posted against - so
+    // the GR grain is resolved rather than refused; the release tables are not.
+    const pred = (t: string) => vendorTypePredicate(`${t}vendor_code`, f.vendorType!);
+    if (kind === 'gr_posting') {
+      const outer = alias !== '' ? alias : 'core.fact_gr_posting.';
+      parts.push(
+        `EXISTS (SELECT 1 FROM core.fact_po_line _vt
+                  WHERE _vt.dataset_version_id = ${outer}dataset_version_id
+                    AND _vt.po_no = ${outer}po_no AND _vt.po_item = ${outer}po_item
+                    AND ${pred('_vt.')})`,
+      );
+    } else {
+      poScoped(pred);
+    }
+  }
+
   if (f.delivered !== undefined) {
     // Written as an explicit comparison rather than parameterised: the value is a
     // boolean the parser already validated, so there is nothing user-supplied to
@@ -434,6 +460,9 @@ export function mergeIntoPredicate(
   if (f.managedBy?.length) {
     filters['createdByHoUnitIn'] = f.managedBy;
   }
+  if (f.vendorType !== undefined) {
+    filters['vendorType'] = f.vendorType;
+  }
   if (f.delivered !== undefined) {
     // A DISTINCT key from the `delivered` a chart series sets for itself:
     // `filters` is an object, so reusing the key would overwrite the spec's
@@ -470,6 +499,7 @@ export function parseGlobalFilter(q: Record<string, unknown>): GlobalFilter {
     sizeBand: list('sizeBand'),
     delivered: rawLifecycle === 'closed' ? true : rawLifecycle === 'open' ? false : undefined,
     managedBy: list('managedBy'),
+    vendorType: parseVendorType(q['vendorType']) ?? undefined,
   };
 }
 
@@ -486,5 +516,6 @@ export function describeFilter(f: GlobalFilter): Record<string, unknown> {
   if (f.sizeBand?.length) out['sizeBand'] = f.sizeBand;
   if (f.delivered !== undefined) out['lifecycle'] = f.delivered ? 'closed' : 'open';
   if (f.managedBy?.length) out['managedBy'] = f.managedBy;
+  if (f.vendorType) out['vendorType'] = f.vendorType;
   return out;
 }

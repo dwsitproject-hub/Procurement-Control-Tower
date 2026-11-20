@@ -64,6 +64,13 @@ export interface DrillPredicate {
    * filter bar - see AT_MAX.
    */
   atMax?: AtMaxMeasure;
+  /**
+   * Extra columns for the figure's subject (21 Nov 2026). 'delivery': the
+   * Delivery page's drills show the vendor type and the lead times the figures
+   * are made of - GR against the planned date, PO release to GR, PR to GR - so
+   * a "9.3 d" card opens rows that show their days, not a generic order list.
+   */
+  columns?: 'delivery';
 }
 
 /** Measures a drill can be narrowed to the maximum of, with their grain. */
@@ -203,6 +210,14 @@ function poLineScoped(grain: Grain | undefined, a: string, predicate: string): s
     return `EXISTS (SELECT 1 FROM core.fact_po_line _xs
                      WHERE _xs.dataset_version_id = ${a}.dataset_version_id
                        AND _xs.pr_no = ${a}.pr_no AND _xs.pr_item = ${a}.pr_item
+                       AND _xs.${predicate})`;
+  }
+  // A goods receipt reaches its PO line (21 Nov 2026: Vendor Type on the
+  // Delivery page's GR figures - reversal rate, movement mix).
+  if (grain === 'gr_posting') {
+    return `EXISTS (SELECT 1 FROM core.fact_po_line _xs
+                     WHERE _xs.dataset_version_id = ${a}.dataset_version_id
+                       AND _xs.po_no = ${a}.po_no AND _xs.po_item = ${a}.po_item
                        AND _xs.${predicate})`;
   }
   return `${a}.${predicate}`;
@@ -1147,10 +1162,32 @@ export async function executeDrill(
   // An at-max drill shows the measure itself, so each row visibly equals the card.
   const atMaxCols: DrillPage['columns'] = payload.atMax
     ? [{ key: 'atMaxValue', label: AT_MAX[payload.atMax].label, type: 'int' }] : [];
-  const columns = [...atMaxCols, ...COLUMNS[payload.grain], ...measureCols];
+  const delivery = payload.columns === 'delivery' && payload.grain === 'po_line';
+  const base = delivery
+    ? COLUMNS.po_line.flatMap((c) => (
+      c.key === 'vendorName' ? [c, { key: 'vendorType', label: 'Vendor Type', type: 'string' }]
+        : c.key === 'receiptDate' ? [
+          { key: 'plannedDelivery', label: 'Planned delivery', type: 'date' }, c,
+          { key: 'grVsPlanDays', label: 'GR vs plan (d)', type: 'int' },
+          { key: 'releaseToGrDays', label: 'PO release → GR (d)', type: 'int' },
+          { key: 'prToGrDays', label: 'PR → GR (d)', type: 'int' },
+        ]
+          : [c]))
+    : COLUMNS[payload.grain];
+  const columns = [...atMaxCols, ...base, ...measureCols];
   const measureSelect = (measure === 'value' ? ''
     : `, ${t.alias}.${mIdr} AS "measureIdr", ${t.alias}.${mUsd} AS "measureUsd"`)
-    + (payload.atMax ? `, ${AT_MAX[payload.atMax].expr(t.alias)} AS "atMaxValue"` : '');
+    + (payload.atMax ? `, ${AT_MAX[payload.atMax].expr(t.alias)} AS "atMaxValue"` : '')
+    + (delivery
+      ? `, CASE WHEN ${t.alias}.vendor_code LIKE 'LN%' THEN 'Local'
+                WHEN ${t.alias}.vendor_code LIKE 'IN%' THEN 'Import' END AS "vendorType",
+         ${t.alias}.delivery_date AS "plannedDelivery",
+         ${t.alias}.delivery_vs_promise_days AS "grVsPlanDays",
+         ${t.alias}.delivery_days AS "releaseToGrDays",
+         (${t.alias}.receipt_date - (SELECT _pr.requisition_date FROM core.fact_pr_item _pr
+            WHERE _pr.dataset_version_id = ${t.alias}.dataset_version_id
+              AND _pr.pr_no = ${t.alias}.pr_no AND _pr.pr_item = ${t.alias}.pr_item)) AS "prToGrDays"`
+      : '');
 
   const sortCol = sort ? columns.find((c) => c.key === sort.key) : undefined;
   const orderBy = sortCol

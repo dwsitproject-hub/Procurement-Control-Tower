@@ -678,6 +678,22 @@ What changed for users:
   does not, inside the bar when there is no room above, and skipped (tooltip only) when it would still
   touch another. Doughnut slices show the value where it fits the slice, else the percentage.
 
+### 10l. Release of 21 Nov 2026 — Delivery page
+
+The usual §10 BE and FE updates; no migration. Then **Rebuild** once: the Delivery cards store their drill
+(now with the delivery columns) in the precomputed KPIs.
+
+What changed for users (Delivery):
+- Avg Delivery LT and End to end (median) are one card, "Delivery Lead Time", not clickable, each line
+  with its Local / Import value.
+- Delivered (GR) shows its Local / Import split on its own line (it was clamped out of the subtitle).
+- A **Vendor Type** filter (Local = LN…, Import = IN…) on the page: every card, chart and drill follows it;
+  it applies to this page only. Vendor Type is a filter dimension server-side (orders directly, requisitions
+  through their orders, goods receipts through their order line); the sweep under vendorType=local found 0
+  mismatches over 79 KPIs and 1,554 chart points.
+- Every Delivery drill shows Vendor Type, Planned delivery, GR vs plan (d), PO release → GR (d) and
+  PR → GR (d) beside the usual columns.
+
 ## 11. Rollback
 
 **On the affected server:**

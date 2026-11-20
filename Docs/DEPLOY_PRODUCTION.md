@@ -620,6 +620,18 @@ rollback brings the old image back either way).
 
 After the update: **Rebuild** once (10c, 10e), and the Coupa sync must be running (10c).
 
+### 10h. Release of 21 Nov 2026 — PR Analysis cards
+
+The usual §10 BE and FE updates; no migration. Then **Rebuild** once: Max PR Approval and Oldest Unreleased
+store their drill in the precomputed KPIs, so until then an unfiltered page still opens the old lists.
+
+What changed for users (PR Analysis):
+- Avg PR Approval, Median PR Approval, PR Approval Lead Time (median) and Avg PR Line Value are one card,
+  "PR Approval & Value", which is not clickable. The same figures elsewhere (Approvals, Executive Summary)
+  are unchanged.
+- **Max PR Approval** and **Oldest Unreleased (d)** no longer show "n = …"; a click lists only the PR items
+  AT that maximum (computed inside the same filters), with the days as the first column.
+
 ## 11. Rollback
 
 **On the affected server:**

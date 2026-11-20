@@ -253,7 +253,8 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'days',
     sql: `SELECT max(aging_days) AS value, count(*)::int AS sample FROM ${PRI}
            WHERE dataset_version_id = $1 AND release_final_date IS NULL AND NOT is_deleted`,
-    drill: { grain: 'pr_item', filters: { unreleased: true, notDeleted: true } },
+    // The item(s) AT the oldest age, not every unreleased item (21 Nov 2026).
+    drill: { grain: 'pr_item', atMax: 'pr_unreleased_age', filters: { unreleased: true, notDeleted: true } },
     worseWhenHigh: { warn: 90, crit: 180 },
   },
   {
@@ -295,7 +296,8 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'days',
     sql: `SELECT max(release_final_date - requisition_date) AS value, count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1 AND release_final_date IS NOT NULL`,
-    drill: { grain: 'pr_item', filters: { released: true } },
+    // The item(s) that took exactly that long, not every released item (21 Nov 2026).
+    drill: { grain: 'pr_item', atMax: 'pr_approval_days', filters: { released: true } },
   },
   {
     id: 'pr_to_po_conversion',

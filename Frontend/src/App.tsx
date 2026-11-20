@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { ApiError, api, type DatasetCurrent, type Finding, type Kpi, type Me } from './lib/api';
 import { formatNumber } from './lib/format';
 import { FreshnessBanner } from './components/FreshnessBanner';
-import { KpiCard } from './components/KpiCard';
+import { KpiCard, KpiSummaryCard } from './components/KpiCard';
 import { ChartPanel } from './components/Chart';
 import { DrillModal } from './components/DrillModal';
 import { DetailTable } from './components/DetailTable';
@@ -91,6 +91,22 @@ const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: stri
 /** Tabs that own their own second path segment (/admin/exclusions, /master/vendors). */
 const SUBPATH_TABS = new Set<Tab>(['admin', 'master']);
 
+/**
+ * Combined cards: one slot, several figures, not clickable (21 Nov 2026).
+ * The slot id is not a server KPI; the page asks for the parts instead.
+ */
+const SUMMARY_CARDS: Record<string, { title: string; items: { id: string; label: string }[] }> = {
+  pr_approval_summary: {
+    title: 'PR Approval & Value',
+    items: [
+      { id: 'cycle_pr_approval', label: 'Avg PR approval' },
+      { id: 'median_pr_approval', label: 'Median PR approval' },
+      { id: 'pr_approval_lead_time', label: 'Approval lead time (SAP, median)' },
+      { id: 'avg_pr_line_value_idr', label: 'Avg PR line value' },
+    ],
+  },
+};
+
 const TAB_KPIS: Record<Tab, string[]> = {
   /**
    * Executive Summary. The first four are the headline tiles; the rest are the
@@ -127,14 +143,17 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'commitment_over_60d',
   ],
   pr: [
-    'cycle_pr_approval', 'median_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
+    // pr_approval_summary is ONE card for four figures (21 Nov 2026):
+    // cycle_pr_approval, median_pr_approval, pr_approval_lead_time and
+    // avg_pr_line_value_idr - see SUMMARY_CARDS.
+    'pr_approval_summary', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
     'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
     // pr_cancellation_rate and pr_deleted left this page on 7 Oct 2026: deleted
     // documents are excluded at load (exclusions.deleted_docs), so both could
     // only ever read 0 - a figure that says nothing was deleted.
-    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand',
+    'emergency_urgent_share', 'at_risk_demand',
     'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
-    'valuation_coverage_pct', 'unique_requisitioners', 'avg_pr_line_value_idr',
+    'valuation_coverage_pct', 'unique_requisitioners',
   ],
   po: [
     'total_po_amount', 'total_po_count', 'cycle_sourcing', 'cycle_po_approval',
@@ -425,6 +444,8 @@ export default function App() {
   // Items badge are chrome, and would otherwise be blank until their own page
   // was opened.
   const CHROME_KPIS = ['total_pr_items', 'pr_not_approved', 'pr_no_po', 'open_items'];
+  /** A slot that is a combined card asks for its parts. */
+  const partsOf = (slot: string): string[] => SUMMARY_CARDS[slot]?.items.map((x) => x.id) ?? [slot];
 
   /**
    * The id list as a STRING, deliberately — the effect below keys on its
@@ -440,7 +461,7 @@ export default function App() {
   const neededKey = useMemo(() => {
     const slots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
     // Layout can swap a slot for a different KPI — ask for what is shown.
-    return [...new Set([...slots.map((sl) => layout.replaced[sl] ?? sl), ...CHROME_KPIS])].join(',');
+    return [...new Set([...slots.flatMap((sl) => partsOf(layout.replaced[sl] ?? sl)), ...CHROME_KPIS])].join(',');
   }, [tab, layout]);
 
   useEffect(() => {
@@ -550,7 +571,9 @@ export default function App() {
   const kpiSlots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
   const chartSlots = applyLayout(TAB_CHARTS[tab], layout, 'chart');
   const visibleKpis = kpiSlots
-    .map((slot) => ({ slot, kpi: kpis.find((k) => k.kpiId === (layout.replaced[slot] ?? slot)) }))
+    // A combined card is shown once its first part has arrived; it renders
+    // its own lines (KpiSummaryCard), so this kpi is only the presence check.
+    .map((slot) => ({ slot, kpi: kpis.find((k) => k.kpiId === partsOf(layout.replaced[slot] ?? slot)[0]) }))
     .filter((x): x is { slot: string; kpi: Kpi } => x.kpi !== undefined);
   const shownCustomKpis = savedCustom.kpis.filter((k) => layout.customKpis.includes(k.title));
   const shownCustomCharts = savedCustom.charts.filter((c) => layout.customCharts.includes(c.title));
@@ -971,7 +994,18 @@ export default function App() {
                         swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
                       />
                     )}
-                    <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
+                    {SUMMARY_CARDS[slot] ? (
+                      <KpiSummaryCard
+                        id={slot}
+                        title={SUMMARY_CARDS[slot]!.title}
+                        currency={currency}
+                        items={SUMMARY_CARDS[slot]!.items.map((x) => ({
+                          label: x.label, kpi: kpis.find((kk) => kk.kpiId === x.id),
+                        }))}
+                      />
+                    ) : (
+                      <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
+                    )}
                   </div>
                 ))}
                 {shownCustomKpis.map((spec) => (

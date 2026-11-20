@@ -216,6 +216,54 @@ function subtitle(kpi: Kpi): string {
   else if (kpi.currencyBasis === 'usd_strict') parts.push('USD, all currencies rated');
   else if (kpi.currencyBasis === 'per_currency') parts.push('per currency — not summed');
 
-  if (parts.length === 0 && kpi.sampleSize !== null) parts.push(`n = ${formatNumber(kpi.sampleSize)}`);
+  // Not on a maximum (21 Nov 2026): "n = 13,200" under "Max PR Approval" read
+  // as how many items took that long. The drill lists exactly those items.
+  if (parts.length === 0 && kpi.sampleSize !== null && !NO_SAMPLE_KPIS.has(kpi.kpiId)) {
+    parts.push(`n = ${formatNumber(kpi.sampleSize)}`);
+  }
   return parts.join(' · ');
+}
+
+const NO_SAMPLE_KPIS = new Set(['max_pr_approval', 'oldest_unreleased']);
+
+/**
+ * Several related figures on ONE card, not clickable (21 Nov 2026, PR
+ * Analysis): four cards that each answered "how long / how much on average"
+ * were simplified into one. Each line keeps its own unit, and the display
+ * currency switch applies to a money line exactly as on a single card.
+ */
+export function KpiSummaryCard({
+  id, title, items, currency = 'USD',
+}: {
+  id: string;
+  title: string;
+  items: { kpi: Kpi | undefined; label: string }[];
+  currency?: 'USD' | 'IDR';
+}) {
+  const line = (k: Kpi | undefined): string => {
+    if (!k || k.status !== 'ok' || k.value === null) return DASH;
+    if (currency === 'USD' && k.unit === 'idr' && k.detail?.['value_usd'] !== null && k.detail?.['value_usd'] !== undefined) {
+      return formatMoney(Number(k.detail['value_usd']), 'USD');
+    }
+    if (currency === 'IDR' && k.unit === 'usd' && k.detail?.['value_idr'] !== null && k.detail?.['value_idr'] !== undefined) {
+      return formatMoney(Number(k.detail['value_idr']), 'IDR');
+    }
+    // One decimal for days here: side by side, "3 d / 3 d / 3 d" hid that the
+    // average is 3.2 while both medians are 3.
+    if (k.unit === 'days') return `${Number(k.value).toLocaleString('en-GB', { maximumFractionDigits: 1 })} d`;
+    return formatKpi(k.value, k.unit);
+  };
+  return (
+    <div className="kpi kpi-multi" style={{ ['--c' as string]: 'var(--heading)' }}>
+      <div className="l kpi-multi-h"><Lbl k={`kpi:${id}`}>{title}</Lbl></div>
+      <dl className="kpi-multi-list">
+        {items.map(({ kpi, label }) => (
+          <div key={label} className="kpi-multi-row" title={kpi?.statusReason ?? undefined}>
+            <dt>{label}</dt>
+            <dd>{line(kpi)}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
 }

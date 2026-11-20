@@ -56,7 +56,27 @@ export interface DrillPredicate {
    * share is below the cut, i.e. the desks before 80% plus the one crossing it.
    */
   topShare?: number;
+  /**
+   * Keep only the rows AT the maximum of a measure (21 Nov 2026): Max PR
+   * Approval and Oldest Unreleased show one number, and their drills listed
+   * every row the max was taken over. The max is computed inside the drill's
+   * own WHERE (same filters, same scope), so it is the card's max under any
+   * filter bar - see AT_MAX.
+   */
+  atMax?: AtMaxMeasure;
 }
+
+/** Measures a drill can be narrowed to the maximum of, with their grain. */
+export type AtMaxMeasure = 'pr_approval_days' | 'pr_unreleased_age';
+const AT_MAX: Record<AtMaxMeasure, { grain: Grain; expr: (a: string) => string; label: string }> = {
+  // max_pr_approval: max(release_final_date - requisition_date)
+  pr_approval_days: {
+    grain: 'pr_item', label: 'PR approval (days)',
+    expr: (a) => `(${a}.release_final_date - ${a}.requisition_date)`,
+  },
+  // oldest_unreleased: max(aging_days) over unreleased items
+  pr_unreleased_age: { grain: 'pr_item', label: 'Unreleased age (days)', expr: (a) => `${a}.aging_days` },
+};
 
 interface TokenPayload extends DrillPredicate {
   v: number; // dataset version — the drill reads the SAME version as the aggregate
@@ -1050,7 +1070,16 @@ export async function executeDrill(
     where.push(compiler(v, t.alias, params, payload.grain));
   }
 
-  const whereSql = where.join(' AND ');
+  let whereSql = where.join(' AND ');
+
+  if (payload.atMax) {
+    const m = AT_MAX[payload.atMax];
+    if (!m || m.grain !== payload.grain) throw new Error(`atMax ${String(payload.atMax)} does not fit grain ${payload.grain}`);
+    // The inner query re-uses the alias, so the same WHERE (and its bound
+    // parameters) describes the same population the maximum is taken over.
+    const e = m.expr(t.alias);
+    whereSql = `${whereSql} AND ${e} = (SELECT max(${e}) FROM ${t.table} ${t.alias} WHERE ${whereSql})`;
+  }
 
   if (payload.view === 'by_purch_group') {
     return executePurchGroupView(payload, whereSql, params, limit, offset, sort);
@@ -1109,9 +1138,13 @@ export async function executeDrill(
     { key: 'measureIdr', label: measure === 'still_to_deliver' ? 'Still to deliver (IDR)' : 'Still to invoice (IDR)', type: 'money', currency: 'IDR' },
     { key: 'measureUsd', label: measure === 'still_to_deliver' ? 'Still to deliver (USD)' : 'Still to invoice (USD)', type: 'money', currency: 'USD' },
   ];
-  const columns = [...COLUMNS[payload.grain], ...measureCols];
-  const measureSelect = measure === 'value' ? ''
-    : `, ${t.alias}.${mIdr} AS "measureIdr", ${t.alias}.${mUsd} AS "measureUsd"`;
+  // An at-max drill shows the measure itself, so each row visibly equals the card.
+  const atMaxCols: DrillPage['columns'] = payload.atMax
+    ? [{ key: 'atMaxValue', label: AT_MAX[payload.atMax].label, type: 'int' }] : [];
+  const columns = [...atMaxCols, ...COLUMNS[payload.grain], ...measureCols];
+  const measureSelect = (measure === 'value' ? ''
+    : `, ${t.alias}.${mIdr} AS "measureIdr", ${t.alias}.${mUsd} AS "measureUsd"`)
+    + (payload.atMax ? `, ${AT_MAX[payload.atMax].expr(t.alias)} AS "atMaxValue"` : '');
 
   const sortCol = sort ? columns.find((c) => c.key === sort.key) : undefined;
   const orderBy = sortCol

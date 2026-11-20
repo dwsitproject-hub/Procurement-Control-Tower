@@ -650,6 +650,18 @@ What changed for users (Sourcing):
   rest need Coupa requisitions, which the integration user may not read (HTTP 403 - a Coupa admin can add
   the requisition read scope).
 
+### 10j. Release of 21 Nov 2026 — shared page layouts; flow chart numbers
+
+The usual §10 BE and FE updates. **Migration 049** runs at API start (instant): `app.ui_layout`, one layout
+per page. No Rebuild.
+
+What changed for users:
+- **Edit layout** is shown to Admins only, and what an Admin arranges is what every user sees (the same rule
+  as Edit Titles). Pages open on their built-in arrangement until an Admin edits them; personal layouts and
+  the personal "View" picker are no longer used (nothing is deleted).
+- PR Analysis, "Requisition flow by month — in against out": a **Show numbers** switch, off by default,
+  prints each segment's count (raised above, became-PO below, brought-forward bands inside).
+
 ## 11. Rollback
 
 **On the affected server:**

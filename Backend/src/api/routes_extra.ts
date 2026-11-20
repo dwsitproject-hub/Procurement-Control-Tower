@@ -242,6 +242,40 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     res.json(await listLabels());
   }));
 
+  /*
+   * Page layouts (049, 21 Nov 2026): one per page, the same for every user.
+   * Everyone reads them - every page renders through them - and only an Admin
+   * writes them, audited like a title rename.
+   */
+  const LAYOUT_TAB = /^[a-z0-9_-]{1,40}$/;
+  r.get('/api/v1/ui-layouts/:tab', role('viewer', async (req, res) => {
+    const tab = String(req.params.tab);
+    if (!LAYOUT_TAB.test(tab)) throw new HttpProblem(400, 'bad-request', 'invalid page name');
+    const row = await queryOne<{ layout: unknown }>(`SELECT layout FROM app.ui_layout WHERE tab = $1`, [tab]);
+    res.set('Cache-Control', 'no-store');
+    res.json({ tab, value: row?.layout ?? null });
+  }));
+  r.put('/api/v1/admin/ui-layouts/:tab', role('admin', async (req, res, ctx) => {
+    const tab = String(req.params.tab);
+    if (!LAYOUT_TAB.test(tab)) throw new HttpProblem(400, 'bad-request', 'invalid page name');
+    const value = (req.body ?? {})['value'];
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new HttpProblem(400, 'bad-request', 'value must be a layout object');
+    }
+    const json = JSON.stringify(value);
+    if (json.length > 50_000) throw new HttpProblem(413, 'too-large', 'layout is too large');
+    await query(
+      `INSERT INTO app.ui_layout (tab, layout, updated_by) VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT (tab) DO UPDATE SET layout = EXCLUDED.layout, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+      [tab, json, ctx.principal.email],
+    );
+    await recordAudit({
+      action: 'ui.layout.set', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome: 'success', objectType: 'ui_layout', objectId: tab, detail: { layout: value }, ip: req.ip,
+    });
+    res.json({ tab, value });
+  }));
+
   // ── W3: entity views ─────────────────────────────────────────────────────
 
   r.get('/api/v1/entity/vendors', role('analyst', async (req, res, ctx) => {

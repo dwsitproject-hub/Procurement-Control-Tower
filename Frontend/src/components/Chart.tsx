@@ -208,6 +208,12 @@ export function ChartPanel({
   const chart = useRef<ChartJS | null>(null);
   const [data, setData] = useState<ChartResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Numbers on the waterfall's segments (21 Nov 2026), off by default: with a
+   * brought-forward stack of five bands per month the chart was unreadable with
+   * every figure printed, so they appear only when asked for.
+   */
+  const [showNumbers, setShowNumbers] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -381,8 +387,53 @@ export function ChartPanel({
           }),
         }] : []),
       ];
+      // Each segment's own count, centred in it; a segment too thin to hold a
+      // number is skipped rather than overprinted.
+      const segmentNumbers = {
+        id: 'waterfallNumbers',
+        afterDatasetsDraw(c: {
+          ctx: CanvasRenderingContext2D;
+          getDatasetMeta: (i: number) => { hidden: boolean | null; data: { x: number; y: number; base: number }[] };
+        }) {
+          if (!showNumbers) return;
+          const ctx = c.ctx;
+          ctx.save();
+          ctx.font = '600 10px "Segoe UI", Arial, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = 'rgba(255,255,255,.85)';
+          ctx.fillStyle = '#1e293b';
+          sets.forEach((d, di) => {
+            const meta = c.getDatasetMeta(di);
+            if (meta.hidden) return;
+            data.buckets.forEach((b, i) => {
+              const n = val(d.key, b.key);
+              const el = meta.data[i];
+              if (!el || n <= 0) return;
+              const top = Math.min(el.y, el.base);
+              const bottom = Math.max(el.y, el.base);
+              // The steps sit side by side at the same height, so their numbers
+              // go outside the bar - raised above, became-PO below - and can
+              // never share a line. The brought-forward bands are printed inside.
+              let y: number;
+              // Cancelled starts where Became PO ends, so its number goes ABOVE
+              // its bar: below would be the very line Became PO's number is on.
+              if (d.key === 'new_pr' || d.key === 'cancelled') y = top - 7;
+              else if (d.key === 'to_po') y = bottom + 7;
+              else if (bottom - top >= 11) y = (top + bottom) / 2;
+              else return;
+              const text = n.toLocaleString('en-GB');
+              ctx.strokeText(text, el.x, y);
+              ctx.fillText(text, el.x, y);
+            });
+          });
+          ctx.restore();
+        },
+      };
       chart.current = new ChartJS(canvas.current, {
         type: 'bar',
+        plugins: [segmentNumbers as never],
         data: {
           labels,
           datasets: sets.map((d) => ({
@@ -574,7 +625,7 @@ export function ChartPanel({
       chart.current?.destroy();
       chart.current = null;
     };
-  }, [data, onDrill, variant, currency, chartId]);
+  }, [data, onDrill, variant, currency, chartId, showNumbers]);
 
   /**
    * The bucket under the pointer by position on the category axis: its tick
@@ -640,7 +691,17 @@ export function ChartPanel({
 
   return (
     <div className={WIDE_CHARTS[chartId] ? 'panel chart-wide' : 'panel'}>
-      <h2><Lbl k={`chart:${chartId}`}>{data.title}</Lbl></h2>
+      {WATERFALL_CHARTS.has(chartId) ? (
+        <div className="chart-head">
+          <h2><Lbl k={`chart:${chartId}`}>{data.title}</Lbl></h2>
+          <label className="chart-num-toggle" title="Print each segment's count on the chart">
+            <input type="checkbox" checked={showNumbers} onChange={(e) => setShowNumbers(e.target.checked)} />
+            Show numbers
+          </label>
+        </div>
+      ) : (
+        <h2><Lbl k={`chart:${chartId}`}>{data.title}</Lbl></h2>
+      )}
       {data.buckets.length === 0 ? (
         // An empty chart states the reason rather than rendering empty axes.
         <p className="note">{data.notes[0] ?? 'No data for this chart'}</p>

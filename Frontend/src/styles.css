@@ -1381,3 +1381,8 @@ table.data.src-cmp .src-cmp-line { min-width: 16rem; max-width: 24rem; }
 .src-click { cursor: pointer; }
 .src-click:hover { background: var(--panel-2, rgba(46, 117, 182, .06)); }
 .kpi-multi-row dd .cu-link { font: inherit; color: inherit; }
+
+/* Chart header with a control on the right (waterfall "Show numbers", 21 Nov 2026). */
+.chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; }
+.chart-head h2 { margin-bottom: 0; }
+.chart-num-toggle { display: inline-flex; align-items: center; gap: .3rem; font-size: .75rem; color: var(--muted); white-space: nowrap; cursor: pointer; }

@@ -5,8 +5,9 @@ import { api } from '../lib/api';
  * G4 — per-user tab layout: v1's lyMove / lyHide / hd-modal (restore hidden) /
  * cd-modal (swap a card's KPI) / "+ Add card / chart", rebuilt server-side.
  *
- * The layout is a per-user preference (`tab_layout_<tab>`), so it follows the
- * user across devices — v1 kept this in localStorage per browser. Only
+ * Since 21 Nov 2026 (049) the layout is ONE per page for every user, stored in
+ * app.ui_layout and edited only by an Admin; it was a per-user preference
+ * (`tab_layout_<tab>`) before, which is no longer read. Only
  * whitelisted ids can appear: KPI ids come from the server's KPI payload and
  * chart ids from the chart catalogue, so a hand-edited preference can name
  * nothing that is not already served.
@@ -102,7 +103,8 @@ export function useTabLayout(tab: string) {
     let cancelled = false;
     setLoaded(false);
     api
-      .get<{ value: unknown }>(`/api/v1/me/preferences/tab_layout_${tab}`)
+      // One layout per page for everyone (049, 21 Nov 2026), set by an Admin.
+      .get<{ value: unknown }>(`/api/v1/ui-layouts/${tab}`)
       .then((p) => {
         if (!cancelled) setLayout(sanitize(p?.value));
       })
@@ -121,8 +123,10 @@ export function useTabLayout(tab: string) {
     (mut: (cur: TabLayout) => TabLayout) => {
       setLayout((cur) => {
         const next = mut(cur);
+        // Admin only: the edit controls are not shown to anyone else, and the
+        // server refuses the write for them anyway.
         void api
-          .put(`/api/v1/me/preferences/tab_layout_${tab}`, { value: next })
+          .put(`/api/v1/admin/ui-layouts/${tab}`, { value: next })
           .catch(() => undefined);
         return next;
       });

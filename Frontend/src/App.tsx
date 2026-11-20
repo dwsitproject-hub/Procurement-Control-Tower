@@ -9,7 +9,6 @@ import { DetailTable } from './components/DetailTable';
 import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
-import { SavedViews } from './components/SavedViews';
 import { PrTables } from './components/PrTables';
 import { PoTables } from './components/PoTables';
 import {
@@ -46,7 +45,7 @@ const CoupaSourcingTab = lazy(() => import('./components/CoupaPages').then((m) =
 const CoupaInvoicesTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaInvoicesTab })));
 import { OverviewCard } from './components/OverviewCards';
 import {
-  LayoutControls, LayoutEditBar, applyLayout, useTabLayout, type TabLayout,
+  LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
 } from './components/LayoutEdit';
 
 // v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
@@ -330,15 +329,6 @@ export default function App() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [editing, setEditing] = useState(false);
   const { layout, update: updateLayout } = useTabLayout(tab);
-  /**
-   * Replace the working layout outright — what applying a saved view does.
-   * Expressed through the same update() so it persists by the same path a hand
-   * edit does; a view that applied only in memory would vanish on reload.
-   */
-  const replaceLayout = useCallback(
-    (next: TabLayout) => updateLayout(() => next),
-    [updateLayout],
-  );
   const [savedCustom, setSavedCustom] = useState<{ kpis: any[]; charts: any[] }>({ kpis: [], charts: [] });
   const [chartCatalog, setChartCatalog] = useState<{ chartId: string; title?: string }[]>([]);
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -741,12 +731,9 @@ export default function App() {
               pickers would be empty dropdowns inviting a click that does
               nothing. Hide, move, restore and reset all still apply.
             */}
-            <SavedViews
-              tab={tab}
-              layout={layout}
-              applyToWorking={replaceLayout}
-              editing={editing}
-            />
+            {/* Admin only (21 Nov 2026): the layout is one per page for every
+                user (049), so only an Admin arranges it. */}
+            {isAdmin && (
             <LayoutEditBar
               editing={editing}
               setEditing={setEditing}
@@ -757,6 +744,7 @@ export default function App() {
               customOptions={{ kpis: [], charts: [] }}
               showAdders={false}
             />
+            )}
             <PageChunk tab={tab}>
             <ExecSummaryTab
               kpis={kpis}
@@ -820,12 +808,10 @@ export default function App() {
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (
           <>
-            <SavedViews
-              tab={tab}
-              layout={layout}
-              applyToWorking={replaceLayout}
-              editing={editing}
-            />
+            {/* Admin only, and shared by every user (049). Custom items stay out
+                of the adders: they belong to whoever saved them, so a shared
+                layout could not show them to anyone else. */}
+            {isAdmin && (
             <LayoutEditBar
               editing={editing}
               setEditing={setEditing}
@@ -833,11 +819,9 @@ export default function App() {
               update={updateLayout}
               kpiOptions={kpis.map((k) => ({ id: k.kpiId, title: k.title })).sort((a, b) => a.title.localeCompare(b.title))}
               chartOptions={chartCatalog.map((c) => ({ id: c.chartId, title: c.title ?? c.chartId }))}
-              customOptions={{
-                kpis: savedCustom.kpis.map((k) => k.title),
-                charts: savedCustom.charts.map((c) => c.title),
-              }}
+              customOptions={{ kpis: [], charts: [] }}
             />
+            )}
             {(TAB_FINDINGS[tab] ?? []).length > 0 && findings.length > 0 && (
               <div className="anomaly-strip">
                 {findings

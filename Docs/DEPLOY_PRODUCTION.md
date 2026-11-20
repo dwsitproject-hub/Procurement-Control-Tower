@@ -601,6 +601,25 @@ What changed for users:
   behind Open PO Commitment, commitment aging and GR/IR add up what is still to deliver / still to
   invoice, with those two columns added, instead of the full line value.
 
+### 10g. Production rollout of 10c–10f together (20 Nov 2026, `df81309`)
+
+Production went from `8dc39d6`/`9ca6c0d` straight to `df81309`, so migrations 046, 047 and 048 run in one
+start. Production connects as its own `pct` account, not a superuser: 046–048 replace existing views and
+rename `core.dim_user_purch_org`, which only the OWNER may do. Before the §10 update, check it read-only
+from the running API:
+
+**PuTTY on 172.28.80.51 (BE):**
+
+```bash
+docker exec pct-api node -e 'const {Client}=require("pg");const c=new Client({connectionString:process.env.DATABASE_URL});c.connect().then(()=>c.query("select current_user as me, n.nspname||chr(46)||c.relname as obj, pg_get_userbyid(c.relowner) as owner from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname||chr(46)||c.relname = any($1) order by 2",[["core.dim_user_purch_org","ops.coupa_supplier_response","ops.v_coupa_supplier_response","ops.v_coupa_po_line","ops.v_coupa_sourcing_event","ops.v_coupa_invoice"]])).then(r=>{console.table(r.rows);return c.end()}).catch(e=>{console.error(e.message);process.exit(1)})'
+```
+
+Expect six rows, every `me` and `owner` = `pct`. Any other owner: stop - the privileged account must
+`ALTER TABLE/VIEW … OWNER TO pct` in DMS first, or the API will fail its migrations at start (the §11
+rollback brings the old image back either way).
+
+After the update: **Rebuild** once (10c, 10e), and the Coupa sync must be running (10c).
+
 ## 11. Rollback
 
 **On the affected server:**

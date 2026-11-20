@@ -643,6 +643,12 @@ What changed for users (Sourcing):
   commodity and supplier row, each pipeline stage and each funnel step. Event figures list events (with the
   awarded supplier and amount); bid figures list bids. The popup's count is the figure's count, Vendor Type
   filter included (76 figures checked on 21 Nov, 0 mismatches).
+- Later the same day: "Event cycle & bids" is not clickable. **"SAP PR" is now "PR No"** and is resolved:
+  the old column showed Coupa's free-text sourcing-ref (0 real PRs). PR No comes from the event's Coupa
+  requisition → its Coupa PO lines → SAP PR, else a 10-digit number in the description from an SAP PR
+  series (PR and PO series never share their first four digits). 94.5% of events have one (was 0%). The
+  rest need Coupa requisitions, which the integration user may not read (HTTP 403 - a Coupa admin can add
+  the requisition read scope).
 
 ## 11. Rollback
 

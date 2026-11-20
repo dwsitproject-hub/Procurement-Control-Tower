@@ -214,31 +214,19 @@ export function CoupaSourcingTab() {
         <div className="kpi kpi-multi" style={{ ['--c' as string]: 'var(--heading)' }}>
           <div className="l kpi-multi-h">Event cycle &amp; bids</div>
           <dl className="kpi-multi-list">
+            {/* Not clickable (21 Nov 2026): a summary of the events, the rows
+                behind it are on the other cards and the funnel. */}
             <div className="kpi-multi-row">
               <dt>Event cycle (median, submit → end)</dt>
-              <dd>
-                <button className="cu-link" title="Events with a submit and an end time"
-                  onClick={() => open('cycle', 'Event cycle — events with a submit and end time')}>
-                  {cycleText(k.median_cycle_days)}
-                </button>
-              </dd>
+              <dd>{cycleText(k.median_cycle_days)}</dd>
             </div>
             <div className="kpi-multi-row">
               <dt>Avg bids per event</dt>
-              <dd>
-                <button className="cu-link" title="Events that drew a bid, with their bid count"
-                  onClick={() => open('with_bids', 'Events with a bid')}>
-                  {b.avg_bids_per_event ?? DASH}
-                </button>
-              </dd>
+              <dd>{b.avg_bids_per_event ?? DASH}</dd>
             </div>
             <div className="kpi-multi-row">
               <dt>Events with bids</dt>
-              <dd>
-                <button className="cu-link" onClick={() => open('with_bids', 'Events with a bid')}>
-                  {formatNumber(Number(b.events_with_bids ?? 0))}
-                </button>
-              </dd>
+              <dd>{formatNumber(Number(b.events_with_bids ?? 0))}</dd>
             </div>
           </dl>
         </div>
@@ -306,7 +294,7 @@ export function CoupaSourcingTab() {
             <thead>
               <tr>
                 <th>Event</th><th>Type</th><th>State</th><th>Commodity</th><th>Description</th>
-                <th>SAP PR</th><th>Supplier</th><th>Vendor Type</th><th className="num">Bids</th><th>Awarded</th><th>Submitted</th>
+                <th>PR No</th><th>Supplier</th><th>Vendor Type</th><th className="num">Bids</th><th>Awarded</th><th>Submitted</th>
                 <th className="num">Amount</th><th>Ccy</th>
               </tr>
             </thead>
@@ -322,7 +310,7 @@ export function CoupaSourcingTab() {
                   <td>{r2.event_state ?? DASH}</td>
                   <td>{r2.commodity ?? DASH}</td>
                   <td className="muted">{r2.description ?? ''}</td>
-                  <td>{r2.sap_pr_no ?? DASH}</td>
+                  <td>{r2.pr_no ?? DASH}</td>
                   <td>{r2.supplier_name ?? DASH}</td>
                   <td><VendorTypeBadge t={r2.vendor_type} /></td>
                   <td className="num">
@@ -433,7 +421,7 @@ function SourcingRowsModal({ req, vendorType, onClose, onCompare }: {
                   <thead>
                     <tr>
                       <th>Event</th><th>Type</th><th>State</th><th>Commodity</th><th>Description</th>
-                      <th>SAP PR</th><th>{isEvent ? 'Awarded supplier' : 'Supplier'}</th><th>Vendor Type</th>
+                      <th>PR No</th><th>{isEvent ? 'Awarded supplier' : 'Supplier'}</th><th>Vendor Type</th>
                       <th className="num">Bids</th><th>Awarded</th><th>Submitted</th>
                       {showCycle && <th className="num">Cycle</th>}
                       <th className="num">{isEvent ? 'Awarded amount' : 'Amount'}</th><th>Ccy</th>
@@ -452,7 +440,7 @@ function SourcingRowsModal({ req, vendorType, onClose, onCompare }: {
                         <td>{r2.event_state ?? DASH}</td>
                         <td>{r2.commodity ?? DASH}</td>
                         <td className="muted">{r2.description ?? ''}</td>
-                        <td>{r2.sap_pr_no ?? DASH}</td>
+                        <td>{r2.pr_no ?? DASH}</td>
                         <td>{r2.supplier_name ?? DASH}</td>
                         <td>{r2.vendor_type ? r2.vendor_type : <span className="muted">—</span>}</td>
                         <td className="num">{formatNumber(Number(r2.bids_on_event ?? 0))}</td>
@@ -614,7 +602,7 @@ function SourcingCompareModal({ eventId, onClose }: { eventId: number; onClose: 
                 {String(ev.event_type ?? '').toUpperCase()} · state {ev.state ?? DASH}
                 {ev.commodity ? ` · ${ev.commodity}` : ''}{ev.plant ? ` · plant ${ev.plant}` : ''}
                 {ev.purch_org ? ` · org ${ev.purch_org}` : ''}{ev.purch_group ? ` · group ${ev.purch_group}` : ''}
-                {ev.sap_pr_no ? ` · SAP PR ${ev.sap_pr_no}` : ''}
+                {ev.pr_no ? ` · PR No ${ev.pr_no}` : ''}
                 {ev.start_time ? ` · ${String(ev.start_time).slice(0, 10)}` : ''}{ev.end_time ? ` → ${String(ev.end_time).slice(0, 10)}` : ''}
               </p>
               {d.fetchNote && <p className="note"><span className="bs sl">note</span> {d.fetchNote}</p>}

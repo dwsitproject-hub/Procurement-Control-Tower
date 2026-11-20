@@ -1229,7 +1229,49 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
    * chosen, bids are that type's and events are those that drew at least one
    * bid of that type.
    */
+  /*
+   * An event's SAP requisition (21 Nov 2026), shown as "PR No".
+   *
+   * The column the page showed was Coupa's custom field sourcing-ref, which is
+   * free text: on the local copy of production 0 of its values was an SAP PR
+   * (036 found the same). The PR is resolved instead, first match wins:
+   *   1. the event's Coupa requisition -> that requisition's Coupa PO lines ->
+   *      the SAP PR they carry (structured, 036);
+   *   2. a 10-digit number in the event description from an SAP PR SERIES -
+   *      its first four digits are those of PRs in the current SAP dataset.
+   *      PR and PO series never share four digits here (PR 1000/1010/1580...,
+   *      PO 1002/1012/1582...), so a PO number never passes, while a PR raised
+   *      after the last SAP load (newer than the dataset) still does.
+   * Events whose requisition has no Coupa PO yet and no PR in the description
+   * stay blank - the requisition itself would say, but the integration user may
+   * not read Coupa requisitions (HTTP 403).
+   */
+  // The SAP PR series (first four digits) of the current dataset, looked up
+  // once per published version: checking each event against the PR table made
+  // the page 2x slower. Digits only, so the list is safe to inline.
+  let prSeriesCache: { v: number | null; sql: string } | null = null;
+  const prSeriesSql = async (): Promise<string> => {
+    const cur = await queryOne<{ id: number | null }>(
+      `SELECT current_version_id AS id FROM core.dataset_pointer WHERE id = 1`,
+    );
+    const v = cur?.id ?? null;
+    if (prSeriesCache && prSeriesCache.v === v) return prSeriesCache.sql;
+    const rows = v === null ? [] : await query<{ p: string }>(
+      `SELECT DISTINCT left(pr_no, 4) AS p FROM core.fact_pr_item WHERE dataset_version_id = $1`, [v],
+    );
+    const list = rows.map((r2) => r2.p).filter((p2) => /^[0-9]{4}$/.test(p2));
+    const sql = list.length === 0 ? `ARRAY[]::text[]` : `ARRAY[${list.map((p2) => `'${p2}'`).join(',')}]::text[]`;
+    prSeriesCache = { v, sql };
+    return sql;
+  };
+  const EVENT_PR_SQL = (e: string, series: string): string => `COALESCE(
+      (SELECT min(_pl.sap_pr_no) FROM ops.coupa_po_line _pl
+        WHERE _pl.requisition_id = ${e}.requisition_id AND _pl.sap_pr_no ~ '^[0-9]{10}$'),
+      (SELECT min(_m[1]) FROM regexp_matches(COALESCE(${e}.description, ''), '(1[0-9]{9})', 'g') AS _m
+        WHERE left(_m[1], 4) = ANY(${series})))`;
+
   r.get('/api/v1/coupa/sourcing', role('analyst', async (req, res) => {
+    const series = await prSeriesSql();
     const vt = parseVendorType((req.query as Record<string, unknown>)['vendorType']);
     const vtLabel = vt === null ? null : vt === 'local' ? 'Local' : 'Import';
     const p: unknown[] = vtLabel === null ? [] : [vtLabel];
@@ -1325,7 +1367,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     // Coupa's Sourcing Data Table (1012), response grain.
     const dataTable = await query(
       `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
-              e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
+              e.commodity, left(e.description, 60) AS description, ${EVENT_PR_SQL('e', series)} AS pr_no,
               r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
               COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
               (SELECT count(*) FROM ops.v_coupa_supplier_response r2
@@ -1364,6 +1406,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
    * SQL except bound values (stage, month, commodity, supplier).
    */
   r.get('/api/v1/coupa/sourcing/rows', role('analyst', async (req, res) => {
+    const series = await prSeriesSql();
     const q = req.query as Record<string, unknown>;
     const what = String(q['what'] ?? '');
     const vt = parseVendorType(q['vendorType']);
@@ -1454,7 +1497,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       // exclusions, and the view would re-check them per row (see /sourcing).
       const rows = await query(
         `SELECT e.id AS event_id, e.event_type, e.state AS event_state, e.commodity,
-                left(e.description, 60) AS description, e.sap_pr_no,
+                left(e.description, 60) AS description, ${EVENT_PR_SQL('e', series)} AS pr_no,
                 (SELECT string_agg(DISTINCT r.supplier_name, ', ') FROM ops.coupa_supplier_response r
                   WHERE r.quote_request_id = e.id AND r.awarded) AS supplier_name,
                 (SELECT string_agg(DISTINCT r.vendor_type, ', ') FROM ops.coupa_supplier_response r
@@ -1490,7 +1533,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       const pp = [...params, limit, offset];
       const rows = await query(
         `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
-                e.commodity, left(e.description, 60) AS description, e.sap_pr_no,
+                e.commodity, left(e.description, 60) AS description, ${EVENT_PR_SQL('e', series)} AS pr_no,
                 r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
                 COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
                 (SELECT count(*) FROM ops.coupa_supplier_response r2
@@ -1522,11 +1565,12 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
    * unreachable the comparison still shows the per-supplier totals it has.
    */
   r.get('/api/v1/coupa/sourcing/event/:id', role('analyst', async (req, res) => {
+    const series = await prSeriesSql();
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) throw new HttpProblem(400, 'bad-request', 'event id must be a positive integer');
     const event = await queryOne<Record<string, unknown>>(
       `SELECT e.id, e.event_type, e.state, e.description, e.commodity,
-              e.plant, e.purch_org, e.purch_group, e.sap_pr_no, e.currency,
+              e.plant, e.purch_org, e.purch_group, ${EVENT_PR_SQL('e', series)} AS pr_no, e.currency,
               e.created_at, e.submit_time, e.start_time, e.end_time, e.supplier_count, e.line_count
          FROM ops.v_coupa_sourcing_event e WHERE e.id = $1`,
       [id],

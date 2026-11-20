@@ -1664,6 +1664,170 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   }));
 
   // ── Coupa Invoices & Payment page (modelled on Coupa Analytics 3148) ─────
+
+  /*
+   * An invoice's purchase orders (21 Nov 2026): the SAP PO number(s) its lines
+   * were posted against - through the Coupa order line, which carries the SAP
+   * PO (006) - and Coupa's own PO number(s) beside them. Reads the line TABLES:
+   * the invoice already passed the exclusions (v_coupa_invoice).
+   */
+  const INV_PO_SQL = (i: string): string => `
+      (SELECT string_agg(DISTINCT _pl.sap_po_no, ', ' ORDER BY _pl.sap_po_no)
+         FROM ops.coupa_invoice_line _il JOIN ops.coupa_po_line _pl ON _pl.order_line_id = _il.order_line_id
+        WHERE _il.invoice_id = ${i}.id AND _pl.sap_po_no ~ '^[0-9]{10}$') AS sap_po_no,
+      (SELECT string_agg(DISTINCT _il.po_number, ', ' ORDER BY _il.po_number)
+         FROM ops.coupa_invoice_line _il WHERE _il.invoice_id = ${i}.id AND _il.po_number IS NOT NULL) AS coupa_po_no`;
+
+  /*
+   * The rows behind an Invoicing & Payment figure (21 Nov 2026), invoices or
+   * payments with their PO numbers. Each key is the figure's own predicate in
+   * /api/v1/coupa/invoices below, so the popup's count is the figure's count;
+   * only bound values (month, status, supplier) reach SQL.
+   */
+  r.get('/api/v1/coupa/invoices/rows', role('analyst', async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const what = String(q['what'] ?? '');
+    const limit = qint(q['limit'], 200, 1, 1000);
+    const offset = qint(q['offset'], 0, 0, 1_000_000);
+    const params: unknown[] = [];
+    const bind = (v: unknown): string => { params.push(v); return `$${params.length}`; };
+    const str = (k: string): string => {
+      const v = String(q[k] ?? '').trim();
+      if (v === '') throw new HttpProblem(400, 'bad-request', `${k} is required for ${what}`);
+      return v;
+    };
+    const LIVE = `i.status NOT IN ('voided','draft')`;
+    const INVOICE: Record<string, () => { where: string; label: string }> = {
+      invoices: () => ({ where: 'TRUE', label: 'All invoices' }),
+      paid: () => ({ where: 'i.paid', label: 'Paid invoices' }),
+      open: () => ({ where: `NOT i.paid AND ${LIVE}`, label: 'Open (unpaid) invoices' }),
+      open_idr: () => ({ where: `NOT i.paid AND ${LIVE} AND i.currency = 'IDR'`, label: 'Open payables — IDR invoices' }),
+      gross_idr: () => ({ where: `${LIVE} AND i.currency = 'IDR'`, label: 'Invoiced — IDR invoices' }),
+      days_to_pay: () => ({
+        where: 'i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL',
+        label: 'Paid invoices with a payment date',
+      }),
+      month_invoices: () => {
+        const mk = str('month');
+        return { where: `to_char(i.invoice_date,'YYYY-MM') = ${bind(mk)}`, label: `Invoices dated ${mk}` };
+      },
+      month_paid: () => {
+        const mk = str('month');
+        return { where: `i.paid AND to_char(i.invoice_date,'YYYY-MM') = ${bind(mk)}`, label: `Invoices dated ${mk}, paid` };
+      },
+      status: () => {
+        const st = str('status');
+        return { where: `i.status = ${bind(st)}`, label: `Invoices — status ${st}` };
+      },
+      supplier: () => {
+        const sp = str('supplier');
+        return { where: `i.supplier_name = ${bind(sp)}`, label: `Invoices — ${sp}` };
+      },
+      supplier_paid: () => {
+        const sp = str('supplier');
+        return { where: `i.paid AND i.supplier_name = ${bind(sp)}`, label: `Paid invoices — ${sp}` };
+      },
+      supplier_gross: () => {
+        const sp = str('supplier');
+        return {
+          where: `i.supplier_name = ${bind(sp)} AND i.currency = 'IDR' AND ${LIVE}`,
+          label: `Invoiced (IDR) — ${sp}`,
+        };
+      },
+    };
+    const PAYMENT: Record<string, () => { where: string; label: string }> = {
+      payments: () => ({ where: 'TRUE', label: 'Payments recorded' }),
+      payments_idr: () => ({ where: `i.currency = 'IDR'`, label: 'Payments — IDR invoices' }),
+      month_payments: () => {
+        const mk = str('month');
+        return {
+          where: `p.payment_date IS NOT NULL AND to_char(p.payment_date,'YYYY-MM') = ${bind(mk)} AND i.currency = 'IDR'`,
+          label: `Payments in ${mk} — IDR invoices`,
+        };
+      },
+    };
+
+    if (INVOICE[what]) {
+      const { where, label } = INVOICE[what]!();
+      const [tot] = await query<{ n: number; gross_idr: number | null; other_ccy: number }>(
+        `SELECT count(*)::int AS n,
+                sum(i.gross_total) FILTER (WHERE i.currency = 'IDR') AS gross_idr,
+                count(*) FILTER (WHERE i.currency IS DISTINCT FROM 'IDR')::int AS other_ccy
+           FROM ops.v_coupa_invoice i WHERE ${where}`,
+        params,
+      );
+      const pp = [...params, limit, offset];
+      const rows = await query(
+        `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
+                i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
+                ${INV_PO_SQL('i')},
+                CASE WHEN i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL
+                     THEN (i.payment_date::date - i.invoice_date) END AS days_to_pay,
+                (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+           FROM ops.v_coupa_invoice i
+          WHERE ${where}
+          ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC
+          LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
+        pp,
+      );
+      res.json({ what, grain: 'invoice', label, total: tot?.n ?? 0, grossIdr: tot?.gross_idr ?? null, otherCcy: tot?.other_ccy ?? 0, rows });
+      return;
+    }
+    if (PAYMENT[what]) {
+      const { where, label } = PAYMENT[what]!();
+      const [tot] = await query<{ n: number; paid_idr: number | null }>(
+        `SELECT count(*)::int AS n, sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr
+           FROM ops.coupa_payment p JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id WHERE ${where}`,
+        params,
+      );
+      const pp = [...params, limit, offset];
+      const rows = await query(
+        `SELECT p.id AS payment_id, p.payment_date, p.amount_paid, p.sap_payment_doc,
+                i.id, i.invoice_number, i.invoice_date, i.supplier_name, i.currency, i.status, ${INV_PO_SQL('i')}
+           FROM ops.coupa_payment p JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
+          WHERE ${where}
+          ORDER BY p.payment_date DESC NULLS LAST, p.id DESC
+          LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
+        pp,
+      );
+      res.json({ what, grain: 'payment', label, total: tot?.n ?? 0, paidIdr: tot?.paid_idr ?? null, rows });
+      return;
+    }
+    throw new HttpProblem(400, 'bad-request', `unknown invoicing figure: ${what}`);
+  }));
+
+  /*
+   * One invoice, line by line (21 Nov 2026): what each line billed, against
+   * which SAP PO line and Coupa PO, and the payments recorded on it.
+   */
+  r.get('/api/v1/coupa/invoices/:id/lines', role('analyst', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new HttpProblem(400, 'bad-request', 'invoice id must be a positive integer');
+    const invoice = await queryOne<Record<string, unknown>>(
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
+              i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.supplier_number, i.payment_term,
+              ${INV_PO_SQL('i')}
+         FROM ops.v_coupa_invoice i WHERE i.id = $1`,
+      [id],
+    );
+    if (!invoice) throw new HttpProblem(404, 'not-found', 'Invoice not found or excluded');
+    const lines = await query(
+      `SELECT l.id, l.item_number, l.po_number AS coupa_po_no, pl.sap_po_no, pl.sap_po_item,
+              pl.description, l.quantity, pl.uom, l.price, l.total, l.tax_amount, l.status
+         FROM ops.coupa_invoice_line l
+         LEFT JOIN ops.coupa_po_line pl ON pl.order_line_id = l.order_line_id
+        WHERE l.invoice_id = $1
+        ORDER BY l.id`,
+      [id],
+    );
+    const payments = await query(
+      `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc, p.notes
+         FROM ops.coupa_payment p WHERE p.invoice_id = $1 ORDER BY p.payment_date NULLS LAST`,
+      [id],
+    );
+    res.json({ invoice, lines, payments });
+  }));
+
   r.get('/api/v1/coupa/invoices', role('analyst', async (_req, res) => {
     const [kpis] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS invoices,
@@ -1715,13 +1879,14 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
+              ${INV_PO_SQL('i')},
               (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
          FROM ops.v_coupa_invoice i
         ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
     );
     const recentPayments = await query(
       `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc,
-              i.invoice_number, i.supplier_name, i.currency
+              i.id AS invoice_id, i.invoice_number, i.supplier_name, i.currency, ${INV_PO_SQL('i')}
          FROM ops.coupa_payment p
          JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
         ORDER BY p.payment_date DESC NULLS LAST LIMIT 50`,

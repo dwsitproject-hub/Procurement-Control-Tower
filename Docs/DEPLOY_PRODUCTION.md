@@ -694,6 +694,18 @@ What changed for users (Delivery):
 - Every Delivery drill shows Vendor Type, Planned delivery, GR vs plan (d), PO release → GR (d) and
   PR → GR (d) beside the usual columns.
 
+### 10m. Release of 21 Nov 2026 — Invoicing & Payment click-through and PO numbers
+
+The usual §10 BE and FE updates; no migration, no Rebuild (the page reads the live Coupa store).
+
+What changed for users (Invoicing & Payment):
+- Every card, both month charts, every supplier figure and every status row opens the invoices or
+  payments it counts (counts and IDR amounts equal the figure - 39 figures checked, 0 mismatches).
+- Every invoice row - in those popups and in the Recent invoices / Recent payments tables - shows its
+  **PO No**: the SAP PO number(s) its lines were posted against, with Coupa's PO number beside it.
+- Clicking an invoice opens it line by line: SAP PO and item, Coupa PO, item, description, quantity, price,
+  total, match status, and the payments recorded on it.
+
 ## 11. Rollback
 
 **On the affected server:**

@@ -6,6 +6,7 @@ import { api } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
 import { Lbl } from '../lib/labels';
 import { FloatControls } from './FloatControls';
+import { placeLabelAbove, type LabelRect } from '../lib/chartLabels';
 
 ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
@@ -68,6 +69,7 @@ function OpsBars({
         ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#64748B';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
+        const placed: LabelRect[] = [];
         c.data.datasets.forEach((ds: any, di: number) => {
           const meta = c.getDatasetMeta(di);
           if (meta.hidden) return;
@@ -76,7 +78,7 @@ function OpsBars({
             const el = meta.data[i];
             if (!el) return;
             const sp = series[di];
-            ctx.fillText(sp?.money ? M(v) : formatNumber(Number(v)), el.x, el.y - 2);
+            placeLabelAbove(ctx, placed, sp?.money ? M(v) : formatNumber(Number(v)), el.x, el.y, el.width ?? 20);
           });
         });
         ctx.restore();
@@ -108,6 +110,8 @@ function OpsBars({
         onHover: (e: any, els: unknown[]) => {
           if (onBar && e?.native?.target) e.native.target.style.cursor = els.length > 0 ? 'pointer' : 'default';
         },
+        // Headroom for the value labels above the tallest bars.
+        scales: { y: { beginAtZero: true, grace: '15%' } },
         plugins: {
           legend: { display: series.length > 1, position: 'bottom', labels: { boxWidth: 12 } },
           tooltip: {

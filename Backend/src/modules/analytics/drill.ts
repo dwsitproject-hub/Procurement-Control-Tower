@@ -326,12 +326,18 @@ const FILTERS: Record<string, Compiler> = {
   hasPr: (_v, a) => `EXISTS (SELECT 1 FROM core.fact_pr_item _hp
                               WHERE _hp.dataset_version_id = ${a}.dataset_version_id
                                 AND _hp.pr_no = ${a}.pr_no AND _hp.pr_item = ${a}.pr_item)`,
-  /** pr_po_price_variance's population: PR price above 1, PO price above 0. */
-  priceVarianceEvaluable: (_v, a) => `${a}.unit_price > 0 AND EXISTS (
+  /**
+   * pr_po_price_variance's population: PR price above 1, PO price above 0,
+   * IDR lines, and PO price within 10x of the estimate either way (21 Nov 2026,
+   * see the KPI in mart_parity.ts).
+   */
+  priceVarianceEvaluable: (_v, a) => `${a}.unit_price > 0 AND ${a}.currency_code = 'IDR' AND EXISTS (
                               SELECT 1 FROM core.fact_pr_item _pv
                                WHERE _pv.dataset_version_id = ${a}.dataset_version_id
                                  AND _pv.pr_no = ${a}.pr_no AND _pv.pr_item = ${a}.pr_item
-                                 AND _pv.valuation_price > 1)`,
+                                 AND _pv.valuation_price > 1
+                                 AND ${a}.unit_price / _pv.valuation_price > 0.1
+                                 AND ${a}.unit_price / _pv.valuation_price < 10)`,
   unreleased: (_v, a) => `${a}.release_final_date IS NULL`,
   released: (_v, a) => `${a}.release_final_date IS NOT NULL`,
   purchOrg: (v, a, ps) => `${a}.purch_org = ${p(ps, String(v))}`,

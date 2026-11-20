@@ -104,6 +104,15 @@ const SUMMARY_CARDS: Record<string, { title: string; items: { id: string; label:
       { id: 'avg_pr_line_value_idr', label: 'Avg PR line value' },
     ],
   },
+  // PO Analysis (21 Nov 2026): three "how long / how much on average" cards in one.
+  po_cycle_value_summary: {
+    title: 'Sourcing, Approval & PO Value',
+    items: [
+      { id: 'cycle_sourcing', label: 'Avg sourcing lead time' },
+      { id: 'cycle_po_approval', label: 'Avg PO approval' },
+      { id: 'avg_po_value_idr', label: 'Avg PO value' },
+    ],
+  },
 };
 
 const TAB_KPIS: Record<Tab, string[]> = {
@@ -155,12 +164,14 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'valuation_coverage_pct', 'unique_requisitioners',
   ],
   po: [
-    'total_po_amount', 'total_po_count', 'cycle_sourcing', 'cycle_po_approval',
+    // po_cycle_value_summary = cycle_sourcing + cycle_po_approval +
+    // avg_po_value_idr on one card (21 Nov 2026, SUMMARY_CARDS).
+    'total_po_amount', 'total_po_count', 'po_cycle_value_summary',
     'po_line_items', 'unique_suppliers', 'grir_over_60d', 'commitment_over_60d',
     'lines_pending_po_approval', 'hold_po_lines', 'gr_coverage_pct',
     'pending_po_approvals', 'pr_po_price_variance', 'tail_spend_pct',
     'direct_po_share', 'sto_share', 'split_sourcing', 'po_irc',
-    'tail_spend_po_pct', 'avg_po_value_idr', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
+    'tail_spend_po_pct', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
   ],
   delivery: [
     'cycle_delivery', 'cycle_e2e', 'delivered_gr', 'reversal_rate',

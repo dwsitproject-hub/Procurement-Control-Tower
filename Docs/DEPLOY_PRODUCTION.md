@@ -662,6 +662,22 @@ What changed for users:
 - PR Analysis, "Requisition flow by month — in against out": a **Show numbers** switch, off by default,
   prints each segment's count (raised above, became-PO below, brought-forward bands inside).
 
+### 10k. Release of 21 Nov 2026 — PO Analysis cards, price variance, readable chart numbers
+
+The usual §10 BE and FE updates; no migration. Then **Rebuild** once: PR to PO Price Variance is
+precomputed, so an unfiltered page keeps the old figure until then.
+
+What changed for users:
+- PO Analysis: Avg Sourcing LT, Avg PO Approval and Avg PO Value (IDR) are one card, "Sourcing, Approval &
+  PO Value", not clickable.
+- **PR to PO Price Variance** now compares IDR lines only and leaves out unit mismatches (a PO price 10x or
+  more above, or a tenth or less of, the PR estimate - per-1,000 vs per-unit pricing). With the token-price
+  and free-line rules already there, it reads 8.4% for 2026 locally (was 194,584%); the drill opens the same
+  lines.
+- Chart numbers never print over each other: a label is horizontal when it fits its bar, upright when it
+  does not, inside the bar when there is no room above, and skipped (tooltip only) when it would still
+  touch another. Doughnut slices show the value where it fits the slice, else the percentage.
+
 ## 11. Rollback
 
 **On the affected server:**

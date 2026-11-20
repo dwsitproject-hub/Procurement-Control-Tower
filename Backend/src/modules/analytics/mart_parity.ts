@@ -432,15 +432,26 @@ export const PARITY_KPIS: KpiSpec[] = [
     // 19 Nov 2026: a PR valued at 1 (or less) is a TOKEN price - the requester
     // typed 1 because the form demanded a number - and a PO line at 0 is a free
     // item. Either turns the ratio into thousands of percent and says nothing
-    // about negotiation, so both leave the count. The drill selects the same
-    // population (priceVarianceEvaluable), so its row count equals the sample.
-    sql: `SELECT 100.0 * avg((pol.unit_price - pri.valuation_price) / NULLIF(pri.valuation_price, 0)) AS value,
+    // about negotiation, so both leave the count.
+    //
+    // 21 Nov 2026: still 150,979% after that, for two more reasons, so two more
+    // conditions (the same population in the drill, priceVarianceEvaluable):
+    //   * IDR lines only. The PR valuation is always IDR; a USD or CNY PO price
+    //     against it reads as -99.99% (1,326 such lines, median -79.8%).
+    //   * no unit mismatch: a PO price 10x or more above, or a tenth or less of,
+    //     the estimate is a per-1,000 vs per-unit pricing difference, not a
+    //     price change (360 of 19,048 IDR lines; one at +99,900% outweighs
+    //     thousands of real ones). Local, all years: 7.5% (2026: 8.4%).
+    sql: `SELECT 100.0 * avg(pol.unit_price / pri.valuation_price - 1) AS value,
                  count(*)::int AS sample
             FROM ${POL} pol
             JOIN ${PRI} pri ON pri.dataset_version_id = pol.dataset_version_id
                            AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
            WHERE pol.dataset_version_id = $1 AND NOT pol.is_sto
-             AND pri.valuation_price > 1 AND pol.unit_price > 0`,
+             AND pri.valuation_price > 1 AND pol.unit_price > 0
+             AND pol.currency_code = 'IDR'
+             AND pol.unit_price / pri.valuation_price > 0.1
+             AND pol.unit_price / pri.valuation_price < 10`,
     drill: { grain: 'po_line', filters: { notSto: true, priceVarianceEvaluable: true } },
     worseWhenHigh: { warn: 10, crit: 25 },
   },

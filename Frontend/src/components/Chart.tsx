@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { placeLabelAbove, placeLabelAt, type LabelRect } from '../lib/chartLabels';
 import {
   ArcElement, BarController, BarElement, CategoryScale, Chart as ChartJS,
   DoughnutController, Legend, LinearScale, Tooltip,
@@ -306,14 +307,20 @@ export function ChartPanel({
       const total = values.reduce((a, v) => a + Number(v), 0);
       const segmentLabels = {
         id: 'segmentLabels',
-        afterDatasetsDraw(c: { ctx: CanvasRenderingContext2D; getDatasetMeta: (i: number) => { data: { tooltipPosition: () => { x: number; y: number } }[] } }) {
+        afterDatasetsDraw(c: { ctx: CanvasRenderingContext2D; getDatasetMeta: (i: number) => { data: {
+          tooltipPosition: () => { x: number; y: number };
+          innerRadius?: number; outerRadius?: number; startAngle?: number; endAngle?: number;
+        }[] } }) {
           const ctx = c.ctx;
           const meta = c.getDatasetMeta(0);
           ctx.save();
           ctx.font = '700 11px "Segoe UI", Arial, sans-serif';
           ctx.fillStyle = '#fff';
+          ctx.strokeStyle = 'rgba(15,23,42,.45)';
+          ctx.lineWidth = 3;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
+          const placed: LabelRect[] = [];
           values.forEach((v, i) => {
             if (total <= 0 || Number(v) / total < 0.04) return; // unreadable slivers
             const el = meta.data[i];
@@ -323,7 +330,20 @@ export function ChartPanel({
             const txt = displayUnit === 'count'
               ? Number(v).toLocaleString('en-GB')
               : formatKpi(Number(v), displayUnit);
-            ctx.fillText(`${txt} (${pct}%)`, pos.x, pos.y);
+            // The slice's own room (21 Nov 2026): the full label where it fits
+            // the ring, the percentage alone where it does not - the legend
+            // carries every value - and nothing on a slice too small for that.
+            // Horizontal text on a slice at the side of the ring runs ACROSS the
+            // ring, so its room is the ring's thickness; at the top or bottom
+            // it runs along the arc.
+            const ring = (el.outerRadius ?? 0) - (el.innerRadius ?? 0);
+            const arc = ((el.endAngle ?? 0) - (el.startAngle ?? 0)) * (((el.outerRadius ?? 0) + (el.innerRadius ?? 0)) / 2);
+            const across = Math.abs(Math.cos(((el.startAngle ?? 0) + (el.endAngle ?? 0)) / 2));
+            const room = (across > 0.6 ? ring / across : Math.min(arc, ring * 3)) * 0.95;
+            let label = `${txt} (${pct}%)`;
+            if (ctx.measureText(label).width > room) label = `${pct}%`;
+            if (ctx.measureText(label).width > room) return;
+            placeLabelAt(ctx, placed, label, pos.x, pos.y, true);
           });
           ctx.restore();
         },
@@ -404,6 +424,7 @@ export function ChartPanel({
           ctx.lineWidth = 3;
           ctx.strokeStyle = 'rgba(255,255,255,.85)';
           ctx.fillStyle = '#1e293b';
+          const placed: LabelRect[] = [];
           sets.forEach((d, di) => {
             const meta = c.getDatasetMeta(di);
             if (meta.hidden) return;
@@ -423,9 +444,7 @@ export function ChartPanel({
               else if (d.key === 'to_po') y = bottom + 7;
               else if (bottom - top >= 11) y = (top + bottom) / 2;
               else return;
-              const text = n.toLocaleString('en-GB');
-              ctx.strokeText(text, el.x, y);
-              ctx.fillText(text, el.x, y);
+              placeLabelAt(ctx, placed, n.toLocaleString('en-GB'), el.x, y, true);
             });
           });
           ctx.restore();
@@ -503,7 +522,7 @@ export function ChartPanel({
       afterDatasetsDraw(c: {
         ctx: CanvasRenderingContext2D;
         data: { datasets: { data: (number | null)[] }[] };
-        getDatasetMeta: (i: number) => { data: { x: number; y: number }[]; hidden: boolean | null };
+        getDatasetMeta: (i: number) => { data: { x: number; y: number; width?: number; height?: number }[]; hidden: boolean | null };
       }) {
         if (barCount > 24) return;
         const ctx = c.ctx;
@@ -512,6 +531,8 @@ export function ChartPanel({
         ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#64748B';
         ctx.textAlign = horizontal ? 'left' : 'center';
         ctx.textBaseline = horizontal ? 'middle' : 'bottom';
+        // Every label checks the ones already drawn (lib/chartLabels.ts).
+        const placed: LabelRect[] = [];
         c.data.datasets.forEach((ds, di) => {
           const meta = c.getDatasetMeta(di);
           if (meta.hidden) return;
@@ -525,8 +546,16 @@ export function ChartPanel({
               const av = bucket ? annSeries.points.find((x) => x.bucketKey === bucket.key)?.value : null;
               if (av !== null && av !== undefined) txt += ` · ${formatKpi(Number(av), annUnit)}`;
             }
-            if (horizontal) ctx.fillText(txt, el.x + 4, el.y);
-            else ctx.fillText(txt, el.x, el.y - 2);
+            if (horizontal) {
+              const w = ctx.measureText(txt).width;
+              const h = Math.max(10, Math.min(12, (el.height ?? 12)));
+              const rect = { x0: el.x + 4, x1: el.x + 4 + w, y0: el.y - h / 2, y1: el.y + h / 2 };
+              if (placed.some((p2) => rect.x0 < p2.x1 && p2.x0 < rect.x1 && rect.y0 < p2.y1 && p2.y0 < rect.y1)) return;
+              ctx.fillText(txt, el.x + 4, el.y);
+              placed.push(rect);
+            } else {
+              placeLabelAbove(ctx, placed, txt, el.x, el.y, el.width ?? 20, (el as { base?: number }).base);
+            }
           });
         });
         ctx.restore();
@@ -616,7 +645,13 @@ export function ChartPanel({
             }
           : {
               x: { grid: { display: false }, ticks: { maxRotation: 60, minRotation: 0, autoSkip: true } },
-              y: { beginAtZero: true, ticks: { callback: (v) => formatKpi(Number(v), displayUnit) } },
+              // Headroom for the labels above the tallest bars; more when bars
+              // are narrow enough that labels turn upright.
+              y: {
+                beginAtZero: true,
+                grace: barCount > 10 ? '30%' : '12%',
+                ticks: { callback: (v) => formatKpi(Number(v), displayUnit) },
+              },
             },
       },
     });

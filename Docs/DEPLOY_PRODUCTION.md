@@ -706,6 +706,18 @@ What changed for users (Invoicing & Payment):
 - Clicking an invoice opens it line by line: SAP PO and item, Coupa PO, item, description, quantity, price,
   total, match status, and the payments recorded on it.
 
+### 10n. Release of 23 Nov 2026 — Invoicing & Payment: payment aging
+
+The usual §10 BE and FE updates; no migration, no Rebuild.
+
+What changed for users (Invoicing & Payment):
+- **Payment aging** everywhere an invoice is listed: due date (invoice date + the payment term's days -
+  I30, D30, D60, I90… - the invoice carries no due date of its own), age in days, days overdue (open) or
+  days paid late (paid), and an aging bucket. Payments show days to pay and days paid late.
+- A new **Open payables aging** panel: open invoices by days past due (not yet due, 1-30, 31-60, 61-90,
+  91-180, >180, no term), each bucket clickable; the buckets add up to the Open card.
+- "Avg days to pay" is no longer clickable; every other figure still opens its invoices or payments.
+
 ## 11. Rollback
 
 **On the affected server:**

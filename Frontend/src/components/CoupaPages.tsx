@@ -775,8 +775,9 @@ export function CoupaInvoicesTab() {
           onClick={() => open('payments', 'Payments recorded')} />
         <Kpi v={p2.paid_idr == null ? DASH : `${(Number(p2.paid_idr) / 1e9).toFixed(2)} B IDR`} label="Paid amount (IDR)"
           onClick={() => open('payments_idr', 'Payments — IDR invoices')} />
-        <Kpi v={k.avg_days_to_pay == null ? DASH : `${Number(k.avg_days_to_pay).toFixed(1)} d`} label="Avg days to pay" sub="invoice date → payment date"
-          onClick={() => open('days_to_pay', 'Paid invoices — days to pay')} />
+        {/* Not clickable (23 Nov 2026): an average; the paid invoices behind it
+            open from the Paid card. */}
+        <Kpi v={k.avg_days_to_pay == null ? DASH : `${Number(k.avg_days_to_pay).toFixed(1)} d`} label="Avg days to pay" sub="invoice date → payment date" />
       </div>
 
       <div className="chart-grid">
@@ -824,6 +825,31 @@ export function CoupaInvoicesTab() {
           </div>
         </div>
         <div className="panel">
+          <h3 className="pr-tbl-h"><Lbl>Open payables aging — days past due</Lbl></h3>
+          <p className="note" style={{ marginTop: 0 }}>Due date = invoice date + the payment term's days (I30, D30…). Click a bucket for its invoices.</p>
+          <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
+            <table className="data dd-tbl">
+              <thead><tr><th>Days past due</th><th className="num">Invoices</th><th className="num">Amount (M IDR)</th><th style={{ width: '35%' }} /></tr></thead>
+              <tbody>
+                {(d.aging ?? []).length === 0 && <tr><td colSpan={4} className="muted">No open invoices.</td></tr>}
+                {(() => {
+                  const rows = (d.aging ?? []) as any[];
+                  const max = Math.max(1, ...rows.map((x) => Number(x.invoices)));
+                  return rows.map((x, i) => (
+                    <tr key={x.bucket} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for these invoices"
+                      onClick={() => open('aging', agingTitle(String(x.bucket)), { bucket: String(x.bucket) })}>
+                      <td><span className={`bs ${AGING_PILL[String(x.bucket)] ?? 'sl'}`}>{agingLabel(String(x.bucket))}</span></td>
+                      <td className="num">{formatNumber(Number(x.invoices))}{Number(x.other_ccy) > 0 ? <span className="muted" title={`${x.other_ccy} non-IDR invoices not in the amount`}> ⚠</span> : null}</td>
+                      <td className="num">{M(x.gross_idr)}</td>
+                      <td><span className="aging-bar" style={{ width: `${(Number(x.invoices) / max) * 100}%` }} /></td>
+                    </tr>
+                  ));
+                })()}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="panel">
           <h3 className="pr-tbl-h"><Lbl>Invoice status mix</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
             <table className="data dd-tbl">
@@ -850,7 +876,7 @@ export function CoupaInvoicesTab() {
               <thead>
                 <tr>
                   <th>Invoice #</th><th>Date</th><th>Supplier</th><th>PO No</th><th>Status</th>
-                  <th className="num">Gross</th><th>Ccy</th><th>Term</th><th>Paid on</th>
+                  <th className="num">Gross</th><th>Ccy</th><th>Term</th><th>Due</th><th className="num">Overdue (d)</th><th>Paid on</th>
                 </tr>
               </thead>
               <tbody>
@@ -865,6 +891,8 @@ export function CoupaInvoicesTab() {
                     <td className="num">{i2.gross_total === null ? DASH : formatNumber(Number(i2.gross_total))}</td>
                     <td><span className="dd-ccy">{i2.currency ?? DASH}</span></td>
                     <td>{i2.payment_term ?? DASH}</td>
+                    <td>{fmtDate(i2.due_date)}</td>
+                    <td className="num"><Overdue inv={i2} /></td>
                     <td>{i2.payment_date ? String(i2.payment_date).slice(0, 10) : DASH}</td>
                   </tr>
                 ))}
@@ -926,6 +954,26 @@ function PoNos({ sap, coupa }: { sap: string | null | undefined; coupa: string |
 }
 
 const fmtDate = (v: unknown): string => (v ? String(v).slice(0, 10) : DASH);
+
+/** Days past due of an OPEN invoice; a paid one shows how late it was paid. */
+function Overdue({ inv }: { inv: Record<string, any> }) {
+  if (inv.paid) {
+    return inv.paid_late_days != null && Number(inv.paid_late_days) > 0
+      ? <span className="muted" title="Paid this many days after the due date">{formatNumber(Number(inv.paid_late_days))} late</span>
+      : <span className="muted">{DASH}</span>;
+  }
+  if (inv.overdue_days == null) return <span className="muted" title="No payment term">{DASH}</span>;
+  const n = Number(inv.overdue_days);
+  return n > 0 ? <strong style={{ color: n > 90 ? '#C0392B' : n > 30 ? '#B45309' : undefined }}>{formatNumber(n)}</strong>
+    : <span className="muted">not due</span>;
+}
+
+const AGING_PILL: Record<string, string> = {
+  'Not yet due': 'sd', '1-30': 'su', '31-60': 'sn', '61-90': 'sn', '91-180': 'sa', '>180': 'spdel', 'No term': 'sl',
+};
+const agingLabel = (b: string): string => (b === 'Not yet due' || b === 'No term' ? b : `${b} d`);
+const agingTitle = (b: string): string =>
+  b === 'Not yet due' || b === 'No term' ? `Open invoices — ${b.toLowerCase()}` : `Open invoices — ${b} days overdue`;
 
 /**
  * The invoices or payments behind one Invoicing & Payment figure (21 Nov
@@ -996,12 +1044,14 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
                     {isPay ? (
                       <tr>
                         <th>Paid on</th><th>Invoice #</th><th>Invoice date</th><th>Supplier</th><th>PO No</th>
-                        <th className="num">Amount</th><th>Ccy</th><th>SAP payment doc</th>
+                        <th className="num">Amount</th><th>Ccy</th><th>Term</th><th>Due</th>
+                        <th className="num">Days to pay</th><th className="num">Paid late (d)</th><th>SAP payment doc</th>
                       </tr>
                     ) : (
                       <tr>
                         <th>Invoice #</th><th>Date</th><th>Supplier</th><th>PO No</th><th>Status</th>
                         <th className="num">Gross</th><th className="num">Tax</th><th>Ccy</th><th>Term</th>
+                        <th>Due</th><th className="num">Age (d)</th><th className="num">Overdue (d)</th><th>Aging</th>
                         <th>Paid on</th>{showDays && <th className="num">Days to pay</th>}<th className="num">Lines</th>
                       </tr>
                     )}
@@ -1020,6 +1070,10 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
                             <td><PoNos sap={r2.sap_po_no} coupa={r2.coupa_po_no} /></td>
                             <td className="num">{r2.amount_paid == null ? DASH : formatNumber(Number(r2.amount_paid))}</td>
                             <td><span className="dd-ccy">{r2.currency ?? DASH}</span></td>
+                            <td>{r2.payment_term ?? DASH}</td>
+                            <td>{fmtDate(r2.due_date)}</td>
+                            <td className="num">{r2.days_to_pay == null ? DASH : formatNumber(Number(r2.days_to_pay))}</td>
+                            <td className="num">{r2.paid_late_days == null ? DASH : formatNumber(Number(r2.paid_late_days))}</td>
                             <td>{r2.sap_payment_doc ?? DASH}</td>
                           </>
                         ) : (
@@ -1033,6 +1087,10 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
                             <td className="num">{r2.tax_amount == null ? DASH : formatNumber(Number(r2.tax_amount))}</td>
                             <td><span className="dd-ccy">{r2.currency ?? DASH}</span></td>
                             <td>{r2.payment_term ?? DASH}</td>
+                            <td>{fmtDate(r2.due_date)}</td>
+                            <td className="num">{r2.age_days == null ? DASH : formatNumber(Number(r2.age_days))}</td>
+                            <td className="num"><Overdue inv={r2} /></td>
+                            <td>{r2.aging_bucket ? <span className={`bs ${AGING_PILL[String(r2.aging_bucket)] ?? 'sl'}`}>{agingLabel(String(r2.aging_bucket))}</span> : DASH}</td>
                             <td>{fmtDate(r2.payment_date)}</td>
                             {showDays && <td className="num">{r2.days_to_pay == null ? DASH : formatNumber(Number(r2.days_to_pay))}</td>}
                             <td className="num">{formatNumber(Number(r2.lines ?? 0))}</td>
@@ -1091,7 +1149,12 @@ function InvoiceLinesModal({ invoiceId, onClose }: { invoiceId: number; onClose:
                 {fmtDate(inv.invoice_date)} · <span className={`bs ${inv.paid ? 'sd' : INV_PILL[String(inv.status)] ?? 'sl'}`}>{inv.paid ? 'paid' : inv.status}</span>
                 {' · '}gross {inv.gross_total == null ? DASH : formatNumber(Number(inv.gross_total))} <span className="dd-ccy">{inv.currency ?? ''}</span>
                 {inv.payment_term ? <> · term {inv.payment_term}</> : null}
+                {inv.due_date ? <> · due {fmtDate(inv.due_date)}</> : null}
                 {inv.payment_date ? <> · paid on {fmtDate(inv.payment_date)}</> : null}
+                {inv.age_days != null ? <> · age {formatNumber(Number(inv.age_days))} d</> : null}
+                {inv.paid
+                  ? (inv.paid_late_days != null && Number(inv.paid_late_days) > 0 ? <> · paid {formatNumber(Number(inv.paid_late_days))} d late</> : null)
+                  : (inv.overdue_days != null ? <> · <strong>{Number(inv.overdue_days) > 0 ? `${formatNumber(Number(inv.overdue_days))} d overdue` : 'not yet due'}</strong></> : null)}
                 {' · PO No '}<PoNos sap={inv.sap_po_no} coupa={inv.coupa_po_no} />
               </p>
               <div className="table-wrap dt-scroll">

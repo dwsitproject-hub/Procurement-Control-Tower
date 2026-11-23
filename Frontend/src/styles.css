@@ -1393,3 +1393,6 @@ table.data.src-cmp .src-cmp-line { min-width: 16rem; max-width: 24rem; }
 .kpi-vt-row .kpi-vt { margin-left: 0; }
 .kpi-multi-item { display: grid; gap: 0; }
 .kpi-multi-vt { font-size: .62rem; color: var(--muted, #64748b); text-align: right; line-height: 1.2; }
+
+/* Invoicing: open payables aging bars (23 Nov 2026). */
+.aging-bar { display: block; height: 8px; border-radius: 4px; background: var(--accent, #2E75B6); opacity: .75; }

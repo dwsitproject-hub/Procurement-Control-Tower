@@ -1679,6 +1679,35 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
          FROM ops.coupa_invoice_line _il WHERE _il.invoice_id = ${i}.id AND _il.po_number IS NOT NULL) AS coupa_po_no`;
 
   /*
+   * Payment aging (23 Nov 2026). Coupa's terms are a letter and a number of
+   * days (I30, D30, D60, I90...) and the invoice carries no due date, so the
+   * due date is the invoice date plus the term's days - the only date on the
+   * invoice to count from. Age is days since the invoice (to the payment once
+   * paid); overdue is days past that due date, today for an open invoice.
+   */
+  const TERM_DAYS = (i: string): string => `NULLIF(substring(${i}.payment_term from '([0-9]+)$'), '')::int`;
+  const DUE_SQL = (i: string): string => `(${i}.invoice_date + ${TERM_DAYS(i)})`;
+  const AGING_BUCKETS = ['Not yet due', '1-30', '31-60', '61-90', '91-180', '>180', 'No term'] as const;
+  const BUCKET_SQL = (i: string): string => `CASE
+      WHEN ${DUE_SQL(i)} IS NULL THEN 'No term'
+      WHEN CURRENT_DATE <= ${DUE_SQL(i)} THEN 'Not yet due'
+      WHEN CURRENT_DATE - ${DUE_SQL(i)} <= 30 THEN '1-30'
+      WHEN CURRENT_DATE - ${DUE_SQL(i)} <= 60 THEN '31-60'
+      WHEN CURRENT_DATE - ${DUE_SQL(i)} <= 90 THEN '61-90'
+      WHEN CURRENT_DATE - ${DUE_SQL(i)} <= 180 THEN '91-180'
+      ELSE '>180' END`;
+  const AGING_COLS = (i: string): string => `
+      ${DUE_SQL(i)} AS due_date,
+      CASE WHEN ${i}.invoice_date IS NULL THEN NULL
+           WHEN ${i}.paid AND ${i}.payment_date IS NOT NULL THEN ${i}.payment_date::date - ${i}.invoice_date
+           WHEN NOT ${i}.paid THEN CURRENT_DATE - ${i}.invoice_date END AS age_days,
+      CASE WHEN ${DUE_SQL(i)} IS NULL THEN NULL
+           WHEN NOT ${i}.paid THEN GREATEST(CURRENT_DATE - ${DUE_SQL(i)}, 0) END AS overdue_days,
+      CASE WHEN ${i}.paid AND ${i}.payment_date IS NOT NULL AND ${DUE_SQL(i)} IS NOT NULL
+           THEN GREATEST(${i}.payment_date::date - ${DUE_SQL(i)}, 0) END AS paid_late_days,
+      CASE WHEN NOT ${i}.paid AND ${i}.status NOT IN ('voided','draft') THEN ${BUCKET_SQL(i)} END AS aging_bucket`;
+
+  /*
    * The rows behind an Invoicing & Payment figure (21 Nov 2026), invoices or
    * payments with their PO numbers. Each key is the figure's own predicate in
    * /api/v1/coupa/invoices below, so the popup's count is the figure's count;
@@ -1734,6 +1763,15 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
           label: `Invoiced (IDR) — ${sp}`,
         };
       },
+      // The aging panel: open invoices in one bucket of days past due.
+      aging: () => {
+        const b = str('bucket');
+        if (!(AGING_BUCKETS as readonly string[]).includes(b)) throw new HttpProblem(400, 'bad-request', 'unknown aging bucket');
+        return {
+          where: `NOT i.paid AND ${LIVE} AND ${BUCKET_SQL('i')} = ${bind(b)}`,
+          label: b === 'Not yet due' || b === 'No term' ? `Open invoices — ${b.toLowerCase()}` : `Open invoices — ${b} days overdue`,
+        };
+      },
     };
     const PAYMENT: Record<string, () => { where: string; label: string }> = {
       payments: () => ({ where: 'TRUE', label: 'Payments recorded' }),
@@ -1760,7 +1798,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       const rows = await query(
         `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
                 i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
-                ${INV_PO_SQL('i')},
+                ${INV_PO_SQL('i')}, ${AGING_COLS('i')},
                 CASE WHEN i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL
                      THEN (i.payment_date::date - i.invoice_date) END AS days_to_pay,
                 (SELECT count(*) FROM ops.coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
@@ -1783,7 +1821,11 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       const pp = [...params, limit, offset];
       const rows = await query(
         `SELECT p.id AS payment_id, p.payment_date, p.amount_paid, p.sap_payment_doc,
-                i.id, i.invoice_number, i.invoice_date, i.supplier_name, i.currency, i.status, ${INV_PO_SQL('i')}
+                i.id, i.invoice_number, i.invoice_date, i.supplier_name, i.currency, i.status, i.payment_term,
+                ${INV_PO_SQL('i')}, ${DUE_SQL('i')} AS due_date,
+                (p.payment_date::date - i.invoice_date) AS days_to_pay,
+                CASE WHEN ${DUE_SQL('i')} IS NOT NULL AND p.payment_date IS NOT NULL
+                     THEN GREATEST(p.payment_date::date - ${DUE_SQL('i')}, 0) END AS paid_late_days
            FROM ops.coupa_payment p JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
           WHERE ${where}
           ORDER BY p.payment_date DESC NULLS LAST, p.id DESC
@@ -1806,7 +1848,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const invoice = await queryOne<Record<string, unknown>>(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.supplier_number, i.payment_term,
-              ${INV_PO_SQL('i')}
+              ${INV_PO_SQL('i')}, ${AGING_COLS('i')}
          FROM ops.v_coupa_invoice i WHERE i.id = $1`,
       [id],
     );
@@ -1867,6 +1909,18 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const statusMix = await query(
       `SELECT status, count(*)::int AS n FROM ops.v_coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
     );
+    // Open payables by days past due (23 Nov 2026); each bucket opens its invoices.
+    const agingRows = await query<{ bucket: string; invoices: number; gross_idr: number | null; other_ccy: number }>(
+      `SELECT ${BUCKET_SQL('i')} AS bucket, count(*)::int AS invoices,
+              sum(i.gross_total) FILTER (WHERE i.currency = 'IDR') AS gross_idr,
+              count(*) FILTER (WHERE i.currency IS DISTINCT FROM 'IDR')::int AS other_ccy
+         FROM ops.v_coupa_invoice i
+        WHERE NOT i.paid AND i.status NOT IN ('voided','draft')
+        GROUP BY 1`,
+    );
+    const aging = AGING_BUCKETS
+      .map((b) => agingRows.find((r2) => r2.bucket === b) ?? { bucket: b, invoices: 0, gross_idr: null, other_ccy: 0 })
+      .filter((r2) => r2.invoices > 0);
     const topSuppliers = await query(
       `SELECT supplier_name, count(*)::int AS invoices,
               sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr,
@@ -1879,7 +1933,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
-              ${INV_PO_SQL('i')},
+              ${INV_PO_SQL('i')}, ${AGING_COLS('i')},
               (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
          FROM ops.v_coupa_invoice i
         ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
@@ -1897,7 +1951,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     );
     res.json({
       configured: coupaConfigured(), kpis, pay, invoicesByMonth, paymentsByMonth,
-      statusMix, topSuppliers, recentInvoices, recentPayments, watermarks: wm,
+      statusMix, aging, topSuppliers, recentInvoices, recentPayments, watermarks: wm,
     });
   }));
 

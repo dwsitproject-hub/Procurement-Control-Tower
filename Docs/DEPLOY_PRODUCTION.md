@@ -746,6 +746,10 @@ What changed for users:
   - The layout is configurable like the other pages: Admin only, and shared by every user.
   - Every amount follows the IDR / USD switch, each invoice or payment converted at its own month's
     rate. Invoices with no rate for their month are counted but left out of the amount, marked ⚠.
+- **Governance page removed:** gone from the menu and from the Admin page-access matrix. An old
+  `/governance` link opens the Executive Summary. Stored Governance grants are ignored, with no data
+  change. Its figures are still computed, and those used elsewhere (Retro POs on Approvals, the
+  Executive Summary cards) are unchanged.
 
 ## 11. Rollback
 

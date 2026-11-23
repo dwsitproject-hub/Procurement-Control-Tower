@@ -3,9 +3,10 @@ import {
   BarController, BarElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, Tooltip,
 } from 'chart.js';
 import { api } from '../lib/api';
-import { DASH, formatNumber } from '../lib/format';
+import { DASH, formatMoney, formatNumber } from '../lib/format';
 import { Lbl } from '../lib/labels';
 import { FloatControls } from './FloatControls';
+import { LayoutControls, LayoutEditBar, applyLayout, type TabLayout } from './LayoutEdit';
 import { placeLabelAbove, type LabelRect } from '../lib/chartLabels';
 
 ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
@@ -49,7 +50,7 @@ function OpsBars({
 }: {
   title: string;
   rows: Record<string, any>[];
-  series: { key: string; label: string; color: string; money?: boolean }[];
+  series: { key: string; label: string; color: string; money?: boolean; currency?: string }[];
   /** A bar was clicked: its row and its series key. */
   onBar?: (row: Record<string, any>, seriesKey: string) => void;
 }) {
@@ -118,7 +119,7 @@ function OpsBars({
             callbacks: {
               label: (ctx: any) => {
                 const sp = series[ctx.datasetIndex];
-                return `${sp?.label}: ${sp?.money ? M(ctx.parsed.y) + ' IDR' : formatNumber(ctx.parsed.y)}`;
+                return `${sp?.label}: ${sp?.money ? `${M(ctx.parsed.y)} ${sp.currency ?? 'IDR'}` : formatNumber(ctx.parsed.y)}`;
               },
             },
           },
@@ -135,7 +136,7 @@ function OpsBars({
   );
 }
 
-function SyncNote({ watermarks }: { watermarks: Record<string, any>[] | undefined }) {
+function SyncNote({ watermarks, converted = false }: { watermarks: Record<string, any>[] | undefined; converted?: boolean }) {
   return (
     <div className="panel" style={{ borderLeft: '3px solid var(--accent)' }}>
       <p className="note" style={{ margin: 0 }}>
@@ -143,7 +144,10 @@ function SyncNote({ watermarks }: { watermarks: Record<string, any>[] | undefine
         {watermarks?.length
           ? ` — synced ${watermarks.map((w) => `${w.object} ${w.last_updated_at ? String(w.last_updated_at).slice(0, 16) : DASH} (${w.last_status ?? DASH})`).join(' · ')}`
           : ' — no sync has run yet'}
-        . Separate from the SAP dataset versions. IDR document-currency amounts only; other currencies are counted, never silently converted.
+        . Separate from the SAP dataset versions.{' '}
+        {converted
+          ? 'Amounts follow the IDR / USD switch, each converted at its own month’s rate; any without a rate are counted but left out of the amount (⚠).'
+          : 'IDR document-currency amounts only; other currencies are counted, never silently converted.'}
       </p>
     </div>
   );
@@ -728,7 +732,35 @@ const INV_PILL: Record<string, string> = {
   voided: 'spdel', draft: 'sl', disputed: 'sa', on_hold: 'shold',
 };
 
-export function CoupaInvoicesTab() {
+/**
+ * The Invoicing & Payment page.
+ *
+ * 23 Nov 2026: its layout is configurable like the other pages - the same
+ * shared, Admin-only layout (049): cards and panels can be moved and hidden -
+ * and every amount follows the IDR / USD switch, each invoice converted at its
+ * own month's rate (the server returns both currencies).
+ */
+const INV_CARD_IDS = [
+  'inv_total', 'inv_paid', 'inv_open', 'inv_open_amt', 'inv_gross_amt', 'inv_payments', 'inv_paid_amt', 'inv_avg_days',
+];
+const INV_PANEL_IDS = [
+  'inv_by_month', 'pay_by_month', 'inv_top_suppliers', 'inv_aging', 'inv_status_mix', 'inv_recent', 'pay_recent',
+];
+const EMPTY_LAYOUT_LOCAL: TabLayout = {
+  hidden: [], kpiOrder: [], chartOrder: [], replaced: {}, addedKpis: [], addedCharts: [],
+  customKpis: [], customCharts: [], panelOrder: [],
+} as unknown as TabLayout;
+
+export function CoupaInvoicesTab({
+  currency = 'IDR', layout = EMPTY_LAYOUT_LOCAL, updateLayout, editing = false, setEditing, isAdmin = false,
+}: {
+  currency?: 'USD' | 'IDR';
+  layout?: TabLayout;
+  updateLayout?: (mut: (cur: TabLayout) => TabLayout) => void;
+  editing?: boolean;
+  setEditing?: (v: boolean) => void;
+  isAdmin?: boolean;
+}) {
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
   /** The figure whose invoices / payments are open (21 Nov 2026). */
@@ -747,7 +779,14 @@ export function CoupaInvoicesTab() {
   }
   const k = d.kpis ?? {};
   const p2 = d.pay ?? {};
+  const isIdr = currency === 'IDR';
+  /** An amount pair (usd, idr) in the reader's currency. */
+  const money = (usd: unknown, idr: unknown): string => {
+    const v = isIdr ? idr : usd;
+    return v === null || v === undefined ? DASH : formatMoney(Number(v), currency);
+  };
   const paidPct = Number(k.invoices ?? 0) > 0 ? ((Number(k.paid_count ?? 0) / Number(k.invoices)) * 100).toFixed(0) : null;
+  const unratedNote = Number(k.unrated ?? 0) > 0 ? `${k.unrated} without an FX rate, not in the amount` : undefined;
   function onInvoiceBar(row: Record<string, any>, key: string) {
     const mk = String(row.mk);
     if (key === 'paid') open('month_paid', `Invoices dated ${mk}, paid`, { month: mk });
@@ -755,178 +794,213 @@ export function CoupaInvoicesTab() {
   }
   function onPaymentBar(row: Record<string, any>) {
     const mk = String(row.mk);
-    open('month_payments', `Payments in ${mk} — IDR invoices`, { month: mk });
+    open('month_payments', `Payments in ${mk}`, { month: mk });
   }
+
+  const CARDS: Record<string, React.ReactNode> = {
+    inv_total: <Kpi v={formatNumber(Number(k.invoices ?? 0))} label="Total invoices" sub={`${k.currencies ?? 0} currencies`}
+      onClick={() => open('invoices', 'All invoices')} />,
+    inv_paid: <Kpi v={formatNumber(Number(k.paid_count ?? 0))} label="Paid" sub={paidPct === null ? undefined : `${paidPct}% of all invoices`}
+      onClick={() => open('paid', 'Paid invoices')} />,
+    inv_open: <Kpi v={formatNumber(Number(k.open_count ?? 0))} label="Open (unpaid)" sub="excl. drafts and voided"
+      onClick={() => open('open', 'Open (unpaid) invoices')} />,
+    inv_open_amt: <Kpi v={money(k.open_usd, k.open_idr)} label={`Open payables (${currency})`}
+      sub={unratedNote ?? 'every currency at its month’s rate'}
+      onClick={() => open('open_idr', 'Open payables')} />,
+    inv_gross_amt: <Kpi v={money(k.gross_usd, k.gross_idr)} label={`Gross invoiced (${currency})`}
+      sub={k.tax_idr == null ? undefined : `tax ${money(k.tax_usd, k.tax_idr)}`}
+      onClick={() => open('gross_idr', 'Gross invoiced')} />,
+    inv_payments: <Kpi v={formatNumber(Number(p2.payments ?? 0))} label="Payments recorded" sub={`${formatNumber(Number(p2.with_sap_doc ?? 0))} with SAP payment doc`}
+      onClick={() => open('payments', 'Payments recorded')} />,
+    inv_paid_amt: <Kpi v={money(p2.paid_usd, p2.paid_idr)} label={`Paid amount (${currency})`}
+      onClick={() => open('payments_idr', 'Paid amount')} />,
+    // Not clickable (23 Nov 2026): an average; the paid invoices open from Paid.
+    inv_avg_days: <Kpi v={k.avg_days_to_pay == null ? DASH : `${Number(k.avg_days_to_pay).toFixed(1)} d`} label="Avg days to pay" sub="invoice date → payment date" />,
+  };
+
+  const PANELS: Record<string, React.ReactNode> = {
+    inv_by_month: (
+      <OpsBars title="Invoices by month" rows={d.invoicesByMonth ?? []} series={INVOICE_SERIES} onBar={onInvoiceBar} />
+    ),
+    pay_by_month: (
+      <OpsBars title={`Payments by month (M ${currency})`} rows={d.paymentsByMonth ?? []}
+        series={isIdr ? PAYMENT_SERIES_IDR : PAYMENT_SERIES_USD} onBar={onPaymentBar} />
+    ),
+    inv_top_suppliers: (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>Top suppliers by invoiced value</Lbl></h3>
+        <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
+          <table className="data dd-tbl">
+            <thead><tr><th>Supplier</th><th className="num">Invoices</th><th className="num">Paid</th><th className="num">Gross ({currency})</th></tr></thead>
+            <tbody>
+              {(d.topSuppliers ?? []).map((t: any, i: number) => {
+                const sp = { supplier: String(t.supplier_name) };
+                return (
+                  <tr key={t.supplier_name} className={i % 2 ? '' : 're'}>
+                    <td>{t.supplier_name}</td>
+                    <td className="num">
+                      <button className="cu-link" onClick={() => open('supplier', `Invoices — ${t.supplier_name}`, sp)}>{formatNumber(t.invoices)}</button>
+                    </td>
+                    <td className="num">
+                      <button className="cu-link" onClick={() => open('supplier_paid', `Paid invoices — ${t.supplier_name}`, sp)}>{formatNumber(t.paid)}</button>
+                    </td>
+                    <td className="num">
+                      <button className="cu-link" onClick={() => open('supplier_gross', `Invoiced — ${t.supplier_name}`, sp)}>{money(t.gross_usd, t.gross_idr)}</button>
+                      {Number(t.unrated) > 0 ? <span className="muted" title={`${t.unrated} invoices without an FX rate, not in the amount`}> ⚠</span> : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ),
+    inv_aging: (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>Open payables aging — days past due</Lbl></h3>
+        <p className="note" style={{ marginTop: 0 }}>Due date = invoice date + the payment term's days (I30, D30…). Click a bucket for its invoices.</p>
+        <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
+          <table className="data dd-tbl">
+            <thead><tr><th>Days past due</th><th className="num">Invoices</th><th className="num">Amount ({currency})</th><th style={{ width: '35%' }} /></tr></thead>
+            <tbody>
+              {(d.aging ?? []).length === 0 && <tr><td colSpan={4} className="muted">No open invoices.</td></tr>}
+              {(() => {
+                const rows = (d.aging ?? []) as any[];
+                const max = Math.max(1, ...rows.map((x) => Number(x.invoices)));
+                return rows.map((x, i) => (
+                  <tr key={x.bucket} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for these invoices"
+                    onClick={() => open('aging', agingTitle(String(x.bucket)), { bucket: String(x.bucket) })}>
+                    <td><span className={`bs ${AGING_PILL[String(x.bucket)] ?? 'sl'}`}>{agingLabel(String(x.bucket))}</span></td>
+                    <td className="num">{formatNumber(Number(x.invoices))}</td>
+                    <td className="num">{money(x.gross_usd, x.gross_idr)}{Number(x.unrated) > 0 ? <span className="muted" title={`${x.unrated} without an FX rate`}> ⚠</span> : null}</td>
+                    <td><span className="aging-bar" style={{ width: `${(Number(x.invoices) / max) * 100}%` }} /></td>
+                  </tr>
+                ));
+              })()}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ),
+    inv_status_mix: (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>Invoice status mix</Lbl></h3>
+        <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
+          <table className="data dd-tbl">
+            <thead><tr><th>Status</th><th className="num">Invoices</th></tr></thead>
+            <tbody>
+              {(d.statusMix ?? []).map((x: any, i: number) => (
+                <tr key={x.status} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for these invoices"
+                  onClick={() => open('status', `Invoices — status ${x.status}`, { status: String(x.status) })}>
+                  <td><span className={`bs ${INV_PILL[String(x.status)] ?? 'sl'}`}>{x.status}</span></td>
+                  <td className="num">{formatNumber(x.n)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ),
+    inv_recent: (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>Recent invoices</Lbl> <span className="muted">— newest 50 · click a row for its lines</span></h3>
+        <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
+          <table className="data dd-tbl">
+            <thead>
+              <tr>
+                <th>Invoice #</th><th>Date</th><th>Supplier</th><th>PO No</th><th>Status</th>
+                <th className="num">Gross</th><th>Ccy</th><th className="num">Gross ({currency})</th>
+                <th>Term</th><th>Due</th><th className="num">Overdue (d)</th><th>Paid on</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(d.recentInvoices ?? []).map((i2: any, i: number) => (
+                <tr key={i2.id} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for this invoice's lines"
+                  onClick={() => setLineOf(Number(i2.id))}>
+                  <td>{i2.invoice_number ?? i2.id}</td>
+                  <td>{fmtDate(i2.invoice_date)}</td>
+                  <td>{(i2.supplier_name ?? '').slice(0, 28)}</td>
+                  <td><PoNos sap={i2.sap_po_no} coupa={i2.coupa_po_no} /></td>
+                  <td><span className={`bs ${i2.paid ? 'sd' : INV_PILL[String(i2.status)] ?? 'sl'}`}>{i2.paid ? 'paid' : i2.status}</span></td>
+                  <td className="num">{i2.gross_total === null ? DASH : formatNumber(Number(i2.gross_total))}</td>
+                  <td><span className="dd-ccy">{i2.currency ?? DASH}</span></td>
+                  <td className="num">{money(i2.gross_usd, i2.gross_idr)}</td>
+                  <td>{i2.payment_term ?? DASH}</td>
+                  <td>{fmtDate(i2.due_date)}</td>
+                  <td className="num"><Overdue inv={i2} /></td>
+                  <td>{fmtDate(i2.payment_date)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ),
+    pay_recent: (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>Recent payments</Lbl> <span className="muted">— newest 50</span></h3>
+        <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
+          <table className="data dd-tbl">
+            <thead>
+              <tr><th>Paid on</th><th>Invoice #</th><th>Supplier</th><th>PO No</th><th className="num">Amount</th><th>Ccy</th><th className="num">Amount ({currency})</th><th>SAP doc</th></tr>
+            </thead>
+            <tbody>
+              {(d.recentPayments ?? []).map((p3: any, i: number) => (
+                <tr key={`${p3.invoice_number}|${i}`} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for this invoice's lines"
+                  onClick={() => setLineOf(Number(p3.invoice_id))}>
+                  <td>{fmtDate(p3.payment_date)}</td>
+                  <td>{p3.invoice_number ?? DASH}</td>
+                  <td>{(p3.supplier_name ?? '').slice(0, 28)}</td>
+                  <td><PoNos sap={p3.sap_po_no} coupa={p3.coupa_po_no} /></td>
+                  <td className="num">{p3.amount_paid === null ? DASH : formatNumber(Number(p3.amount_paid))}</td>
+                  <td><span className="dd-ccy">{p3.currency ?? DASH}</span></td>
+                  <td className="num">{money(p3.amount_usd, p3.amount_idr)}</td>
+                  <td>{p3.sap_payment_doc ?? DASH}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ),
+  };
+
+  const cardSlots = applyLayout(INV_CARD_IDS, layout, 'kpi');
+  const panelSlots = applyLayout(INV_PANEL_IDS, layout, 'panel');
+  const canEdit = isAdmin && updateLayout !== undefined && setEditing !== undefined;
+  const slot = (id: string, kind: 'kpi' | 'panel', currentIds: string[], node: React.ReactNode) => (
+    <div key={id} className={editing && canEdit ? 'ly-slot' : undefined}>
+      {editing && canEdit && (
+        <LayoutControls id={id} kind={kind} layout={layout} update={updateLayout!} currentIds={currentIds} />
+      )}
+      {node}
+    </div>
+  );
+
   return (
     <>
-      <SyncNote watermarks={d.watermarks} />
+      <SyncNote watermarks={d.watermarks} converted />
+      {canEdit && (
+        <LayoutEditBar
+          editing={editing}
+          setEditing={setEditing!}
+          layout={layout}
+          update={updateLayout!}
+          kpiOptions={[]}
+          chartOptions={[]}
+          customOptions={{ kpis: [], charts: [] }}
+          showAdders={false}
+        />
+      )}
       <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
-        <Kpi v={formatNumber(Number(k.invoices ?? 0))} label="Total invoices" sub={`${k.currencies ?? 0} currencies`}
-          onClick={() => open('invoices', 'All invoices')} />
-        <Kpi v={formatNumber(Number(k.paid_count ?? 0))} label="Paid" sub={paidPct === null ? undefined : `${paidPct}% of all invoices`}
-          onClick={() => open('paid', 'Paid invoices')} />
-        <Kpi v={formatNumber(Number(k.open_count ?? 0))} label="Open (unpaid)" sub="excl. drafts and voided"
-          onClick={() => open('open', 'Open (unpaid) invoices')} />
-        <Kpi v={k.open_idr == null ? DASH : `${(Number(k.open_idr) / 1e9).toFixed(2)} B IDR`} label="Open payables (IDR)" sub={Number(k.other_ccy ?? 0) > 0 ? `${k.other_ccy} non-IDR invoices not converted` : undefined}
-          onClick={() => open('open_idr', 'Open payables — IDR invoices')} />
-        <Kpi v={k.gross_idr == null ? DASH : `${(Number(k.gross_idr) / 1e9).toFixed(2)} B IDR`} label="Gross invoiced (IDR)" sub={k.tax_idr == null ? undefined : `tax ${M(k.tax_idr)} IDR`}
-          onClick={() => open('gross_idr', 'Invoiced — IDR invoices')} />
-        <Kpi v={formatNumber(Number(p2.payments ?? 0))} label="Payments recorded" sub={`${formatNumber(Number(p2.with_sap_doc ?? 0))} with SAP payment doc`}
-          onClick={() => open('payments', 'Payments recorded')} />
-        <Kpi v={p2.paid_idr == null ? DASH : `${(Number(p2.paid_idr) / 1e9).toFixed(2)} B IDR`} label="Paid amount (IDR)"
-          onClick={() => open('payments_idr', 'Payments — IDR invoices')} />
-        {/* Not clickable (23 Nov 2026): an average; the paid invoices behind it
-            open from the Paid card. */}
-        <Kpi v={k.avg_days_to_pay == null ? DASH : `${Number(k.avg_days_to_pay).toFixed(1)} d`} label="Avg days to pay" sub="invoice date → payment date" />
+        {cardSlots.filter((id) => CARDS[id]).map((id) => slot(id, 'kpi', cardSlots, CARDS[id]))}
       </div>
-
       <div className="chart-grid">
-        <OpsBars
-          title="Invoices by month"
-          rows={d.invoicesByMonth ?? []}
-          series={INVOICE_SERIES}
-          onBar={onInvoiceBar}
-        />
-        <OpsBars
-          title="Payments by month (M IDR)"
-          rows={d.paymentsByMonth ?? []}
-          series={PAYMENT_SERIES}
-          onBar={onPaymentBar}
-        />
-      </div>
-
-      <div className="chart-grid" style={{ marginTop: '1rem' }}>
-        <div className="panel">
-          <h3 className="pr-tbl-h"><Lbl>Top suppliers by invoiced value — IDR documents</Lbl></h3>
-          <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
-            <table className="data dd-tbl">
-              <thead><tr><th>Supplier</th><th className="num">Invoices</th><th className="num">Paid</th><th className="num">Gross (M IDR)</th></tr></thead>
-              <tbody>
-                {(d.topSuppliers ?? []).map((t: any, i: number) => {
-                  const sp = { supplier: String(t.supplier_name) };
-                  return (
-                    <tr key={t.supplier_name} className={i % 2 ? '' : 're'}>
-                      <td>{t.supplier_name}</td>
-                      <td className="num">
-                        <button className="cu-link" onClick={() => open('supplier', `Invoices — ${t.supplier_name}`, sp)}>{formatNumber(t.invoices)}</button>
-                        {t.other_ccy > 0 ? <span className="muted" title={`${t.other_ccy} non-IDR invoices not in the amount`}> ⚠</span> : null}
-                      </td>
-                      <td className="num">
-                        <button className="cu-link" onClick={() => open('supplier_paid', `Paid invoices — ${t.supplier_name}`, sp)}>{formatNumber(t.paid)}</button>
-                      </td>
-                      <td className="num">
-                        <button className="cu-link" onClick={() => open('supplier_gross', `Invoiced (IDR) — ${t.supplier_name}`, sp)}>{M(t.gross_idr)}</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div className="panel">
-          <h3 className="pr-tbl-h"><Lbl>Open payables aging — days past due</Lbl></h3>
-          <p className="note" style={{ marginTop: 0 }}>Due date = invoice date + the payment term's days (I30, D30…). Click a bucket for its invoices.</p>
-          <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
-            <table className="data dd-tbl">
-              <thead><tr><th>Days past due</th><th className="num">Invoices</th><th className="num">Amount (M IDR)</th><th style={{ width: '35%' }} /></tr></thead>
-              <tbody>
-                {(d.aging ?? []).length === 0 && <tr><td colSpan={4} className="muted">No open invoices.</td></tr>}
-                {(() => {
-                  const rows = (d.aging ?? []) as any[];
-                  const max = Math.max(1, ...rows.map((x) => Number(x.invoices)));
-                  return rows.map((x, i) => (
-                    <tr key={x.bucket} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for these invoices"
-                      onClick={() => open('aging', agingTitle(String(x.bucket)), { bucket: String(x.bucket) })}>
-                      <td><span className={`bs ${AGING_PILL[String(x.bucket)] ?? 'sl'}`}>{agingLabel(String(x.bucket))}</span></td>
-                      <td className="num">{formatNumber(Number(x.invoices))}{Number(x.other_ccy) > 0 ? <span className="muted" title={`${x.other_ccy} non-IDR invoices not in the amount`}> ⚠</span> : null}</td>
-                      <td className="num">{M(x.gross_idr)}</td>
-                      <td><span className="aging-bar" style={{ width: `${(Number(x.invoices) / max) * 100}%` }} /></td>
-                    </tr>
-                  ));
-                })()}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div className="panel">
-          <h3 className="pr-tbl-h"><Lbl>Invoice status mix</Lbl></h3>
-          <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
-            <table className="data dd-tbl">
-              <thead><tr><th>Status</th><th className="num">Invoices</th></tr></thead>
-              <tbody>
-                {(d.statusMix ?? []).map((x: any, i: number) => (
-                  <tr key={x.status} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for these invoices"
-                    onClick={() => open('status', `Invoices — status ${x.status}`, { status: String(x.status) })}>
-                    <td><span className={`bs ${INV_PILL[String(x.status)] ?? 'sl'}`}>{x.status}</span></td>
-                    <td className="num">{formatNumber(x.n)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <div className="chart-grid" style={{ marginTop: '1rem' }}>
-        <div className="panel">
-          <h3 className="pr-tbl-h"><Lbl>Recent invoices</Lbl> <span className="muted">— newest 50 · click a row for its lines</span></h3>
-          <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
-            <table className="data dd-tbl">
-              <thead>
-                <tr>
-                  <th>Invoice #</th><th>Date</th><th>Supplier</th><th>PO No</th><th>Status</th>
-                  <th className="num">Gross</th><th>Ccy</th><th>Term</th><th>Due</th><th className="num">Overdue (d)</th><th>Paid on</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(d.recentInvoices ?? []).map((i2: any, i: number) => (
-                  <tr key={i2.id} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for this invoice's lines"
-                    onClick={() => setLineOf(Number(i2.id))}>
-                    <td>{i2.invoice_number ?? i2.id}</td>
-                    <td>{i2.invoice_date ? String(i2.invoice_date).slice(0, 10) : DASH}</td>
-                    <td>{(i2.supplier_name ?? '').slice(0, 28)}</td>
-                    <td><PoNos sap={i2.sap_po_no} coupa={i2.coupa_po_no} /></td>
-                    <td><span className={`bs ${i2.paid ? 'sd' : INV_PILL[String(i2.status)] ?? 'sl'}`}>{i2.paid ? 'paid' : i2.status}</span></td>
-                    <td className="num">{i2.gross_total === null ? DASH : formatNumber(Number(i2.gross_total))}</td>
-                    <td><span className="dd-ccy">{i2.currency ?? DASH}</span></td>
-                    <td>{i2.payment_term ?? DASH}</td>
-                    <td>{fmtDate(i2.due_date)}</td>
-                    <td className="num"><Overdue inv={i2} /></td>
-                    <td>{i2.payment_date ? String(i2.payment_date).slice(0, 10) : DASH}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div className="panel">
-          <h3 className="pr-tbl-h"><Lbl>Recent payments</Lbl> <span className="muted">— newest 50</span></h3>
-          <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
-            <table className="data dd-tbl">
-              <thead>
-                <tr><th>Paid on</th><th>Invoice #</th><th>Supplier</th><th>PO No</th><th className="num">Amount</th><th>Ccy</th><th>SAP doc</th></tr>
-              </thead>
-              <tbody>
-                {(d.recentPayments ?? []).map((p3: any, i: number) => (
-                  <tr key={`${p3.invoice_number}|${i}`} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for this invoice's lines"
-                    onClick={() => setLineOf(Number(p3.invoice_id))}>
-                    <td>{p3.payment_date ? String(p3.payment_date).slice(0, 10) : DASH}</td>
-                    <td>{p3.invoice_number ?? DASH}</td>
-                    <td>{(p3.supplier_name ?? '').slice(0, 28)}</td>
-                    <td><PoNos sap={p3.sap_po_no} coupa={p3.coupa_po_no} /></td>
-                    <td className="num">{p3.amount_paid === null ? DASH : formatNumber(Number(p3.amount_paid))}</td>
-                    <td><span className="dd-ccy">{p3.currency ?? DASH}</span></td>
-                    <td>{p3.sap_payment_doc ?? DASH}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        {panelSlots.filter((id) => PANELS[id]).map((id) => slot(id, 'panel', panelSlots, PANELS[id]))}
       </div>
       {rowsOf !== null && (
-        <InvoiceRowsModal req={rowsOf} onClose={() => setRowsOf(null)} onInvoice={setLineOf} />
+        <InvoiceRowsModal req={rowsOf} currency={currency} onClose={() => setRowsOf(null)} onInvoice={setLineOf} />
       )}
       {lineOf !== null && <InvoiceLinesModal invoiceId={lineOf} onClose={() => setLineOf(null)} />}
     </>
@@ -937,7 +1011,8 @@ const INVOICE_SERIES = [
   { key: 'invoices', label: 'Invoices', color: '#2E75B6' },
   { key: 'paid', label: 'Paid', color: '#4CAF50' },
 ];
-const PAYMENT_SERIES = [{ key: 'paid_idr', label: 'Paid (IDR)', color: '#0D9488', money: true }];
+const PAYMENT_SERIES_IDR = [{ key: 'paid_idr', label: 'Paid (IDR)', color: '#0D9488', money: true, currency: 'IDR' }];
+const PAYMENT_SERIES_USD = [{ key: 'paid_usd', label: 'Paid (USD)', color: '#0D9488', money: true, currency: 'USD' }];
 
 /**
  * An invoice's purchase orders: the SAP PO number(s), with Coupa's own PO
@@ -980,11 +1055,16 @@ const agingTitle = (b: string): string =>
  * 2026), each with its PO numbers; a row opens the invoice's lines. The count
  * in the header is the figure's count - the server uses its own predicate.
  */
-function InvoiceRowsModal({ req, onClose, onInvoice }: {
+function InvoiceRowsModal({ req, currency = 'IDR', onClose, onInvoice }: {
   req: SourcingRowsReq;
+  currency?: 'USD' | 'IDR';
   onClose: () => void;
   onInvoice: (invoiceId: number) => void;
 }) {
+  const conv = (usd: unknown, idr: unknown): string => {
+    const v = currency === 'IDR' ? idr : usd;
+    return v === null || v === undefined ? DASH : formatMoney(Number(v), currency);
+  };
   const [d, setD] = useState<Record<string, any> | null>(null);
   const [rows, setRows] = useState<Record<string, any>[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -1032,9 +1112,9 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
             <>
               <p className="count">
                 <strong>{formatNumber(Number(d.total ?? 0))}</strong> {isPay ? 'payments' : 'invoices'}
-                {!isPay && d.grossIdr != null && <> · Σ {M(d.grossIdr)} IDR gross (IDR invoices)</>}
-                {!isPay && Number(d.otherCcy ?? 0) > 0 && <> · {formatNumber(Number(d.otherCcy))} in other currencies</>}
-                {isPay && d.paidIdr != null && <> · Σ {M(d.paidIdr)} IDR paid</>}
+                {!isPay && <> · Σ {conv(d.grossUsd, d.grossIdr)} gross</>}
+                {isPay && <> · Σ {conv(d.paidUsd, d.paidIdr)} paid</>}
+                {Number(d.unrated ?? 0) > 0 && <> · {formatNumber(Number(d.unrated))} without an FX rate, not in the total</>}
                 {rows.length < Number(d.total ?? 0) && <> · showing {formatNumber(rows.length)}</>}
                 <span className="muted"> · click a row for the invoice's lines</span>
               </p>
@@ -1044,13 +1124,13 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
                     {isPay ? (
                       <tr>
                         <th>Paid on</th><th>Invoice #</th><th>Invoice date</th><th>Supplier</th><th>PO No</th>
-                        <th className="num">Amount</th><th>Ccy</th><th>Term</th><th>Due</th>
+                        <th className="num">Amount</th><th>Ccy</th><th className="num">Amount ({currency})</th><th>Term</th><th>Due</th>
                         <th className="num">Days to pay</th><th className="num">Paid late (d)</th><th>SAP payment doc</th>
                       </tr>
                     ) : (
                       <tr>
                         <th>Invoice #</th><th>Date</th><th>Supplier</th><th>PO No</th><th>Status</th>
-                        <th className="num">Gross</th><th className="num">Tax</th><th>Ccy</th><th>Term</th>
+                        <th className="num">Gross</th><th className="num">Tax</th><th>Ccy</th><th className="num">Gross ({currency})</th><th>Term</th>
                         <th>Due</th><th className="num">Age (d)</th><th className="num">Overdue (d)</th><th>Aging</th>
                         <th>Paid on</th>{showDays && <th className="num">Days to pay</th>}<th className="num">Lines</th>
                       </tr>
@@ -1070,6 +1150,7 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
                             <td><PoNos sap={r2.sap_po_no} coupa={r2.coupa_po_no} /></td>
                             <td className="num">{r2.amount_paid == null ? DASH : formatNumber(Number(r2.amount_paid))}</td>
                             <td><span className="dd-ccy">{r2.currency ?? DASH}</span></td>
+                            <td className="num">{conv(r2.amount_usd, r2.amount_idr)}</td>
                             <td>{r2.payment_term ?? DASH}</td>
                             <td>{fmtDate(r2.due_date)}</td>
                             <td className="num">{r2.days_to_pay == null ? DASH : formatNumber(Number(r2.days_to_pay))}</td>
@@ -1086,6 +1167,7 @@ function InvoiceRowsModal({ req, onClose, onInvoice }: {
                             <td className="num">{r2.gross_total == null ? DASH : formatNumber(Number(r2.gross_total))}</td>
                             <td className="num">{r2.tax_amount == null ? DASH : formatNumber(Number(r2.tax_amount))}</td>
                             <td><span className="dd-ccy">{r2.currency ?? DASH}</span></td>
+                            <td className="num">{conv(r2.gross_usd, r2.gross_idr)}</td>
                             <td>{r2.payment_term ?? DASH}</td>
                             <td>{fmtDate(r2.due_date)}</td>
                             <td className="num">{r2.age_days == null ? DASH : formatNumber(Number(r2.age_days))}</td>

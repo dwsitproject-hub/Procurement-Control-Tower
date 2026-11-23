@@ -317,7 +317,10 @@ export const PARITY_KPIS: KpiSpec[] = [
                  count(*) FILTER (WHERE release_final_date - requisition_date <= 3)::int AS numerator,
                  count(*)::int AS denominator, count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1 AND release_final_date IS NOT NULL`,
-    drill: { grain: 'pr_item', filters: { released: true } },
+    // The items that WERE approved within 3 days, with their approval days
+    // (23 Nov 2026): the drill opened every approved item, so a reader saw
+    // items that took 300+ days under a "within 3 days" figure.
+    drill: { grain: 'pr_item', columns: 'pr_approval', filters: { released: true, prApprovalLte: 3 } },
     worseWhenLow: { warn: 70, crit: 50 },
   },
   {
@@ -2683,6 +2686,37 @@ export const PARITY_CHARTS: ChartSpec[] = [
             FROM core.fact_pr_release WHERE dataset_version_id = $1 AND approve_date IS NULL
            GROUP BY pic_release ORDER BY 3 DESC LIMIT 20`,
   },
+  // POs pending approval by the person they wait on (23 Nov 2026): each
+  // pending PO once, at its CURRENT approver (first unapproved SAP release
+  // step), so the bars add up to the card. Split by origin: Coupa holds no PO
+  // approval queue - its POs are issued after the requisition is approved - so
+  // every PO approval waits in SAP's release strategy, and "via Coupa" marks the
+  // POs that were created in Coupa and integrated to SAP.
+  ...(['sap', 'coupa'] as const).map((src) => ({
+    chartId: 'pending_po_by_pic',
+    seriesKey: src,
+    seriesLabel: src === 'sap' ? 'Created in SAP' : 'Created in Coupa → SAP',
+    unit: 'count',
+    sql: `WITH p AS (
+            SELECT dataset_version_id, po_no FROM ${POL}
+             WHERE dataset_version_id = $1 AND po_release_state = 'pending'
+             GROUP BY 1, 2
+          ), a AS (
+            SELECT p.po_no,
+                   (SELECT r.pic_release FROM core.fact_po_release r
+                     WHERE r.dataset_version_id = p.dataset_version_id AND r.po_no = p.po_no AND r.approve_date IS NULL
+                     ORDER BY r.rel_seq LIMIT 1) AS pic,
+                   EXISTS (SELECT 1 FROM ops.coupa_po_line c WHERE c.sap_po_no = p.po_no) AS via_coupa
+              FROM p
+          )
+          SELECT COALESCE(pic, '?') AS bucket_key, COALESCE(pic, '(unknown)') AS bucket_label,
+                 count(*) FILTER (WHERE ${src === 'coupa' ? '' : 'NOT '}via_coupa)::numeric AS value,
+                 count(*) FILTER (WHERE ${src === 'coupa' ? '' : 'NOT '}via_coupa)::int AS row_count,
+                 jsonb_build_object('grain','po_line','view','by_po','filters',
+                   jsonb_build_object('poReleaseState','pending','poCurrentApprover', pic,
+                                      'poInCoupa', ${src === 'coupa' ? 'true' : 'false'})) AS drill
+            FROM a GROUP BY pic ORDER BY count(*) DESC, pic LIMIT 20`,
+  })),
   {
     chartId: 'wbs_by_plant', seriesKey: 'violations', seriesLabel: 'Violations', unit: 'count',
     sql: `SELECT plant AS bucket_key, plant AS bucket_label,

@@ -1685,6 +1685,28 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
    * invoice to count from. Age is days since the invoice (to the payment once
    * paid); overdue is days past that due date, today for an open invoice.
    */
+  /*
+   * Amounts in the reader's currency (23 Nov 2026). Each invoice converts at
+   * ITS month's rate from the shared FX store (core.fx_rate - SAP file + Data
+   * Hub, the rates every other page uses); a payment at its payment month. An
+   * amount with no rate for its month stays NULL and is counted as unrated,
+   * never guessed. Both currencies are returned; the page shows one.
+   */
+  const FX_RATE = (ccy: string, d: string): string => `(SELECT _fx.usd_per_unit FROM core.fx_rate _fx
+      WHERE _fx.dataset_version_id = (SELECT current_version_id FROM core.dataset_pointer WHERE id = 1)
+        AND _fx.currency_code = ${ccy}
+        AND _fx.period_year = EXTRACT(YEAR FROM ${d})::int AND _fx.period_month = EXTRACT(MONTH FROM ${d})::int)`;
+  const TO_USD = (amt: string, ccy: string, d: string): string =>
+    `(CASE WHEN ${ccy} = 'USD' THEN ${amt} ELSE ${amt} * ${FX_RATE(ccy, d)} END)`;
+  const TO_IDR = (amt: string, ccy: string, d: string): string =>
+    `(CASE WHEN ${ccy} = 'IDR' THEN ${amt} ELSE ${TO_USD(amt, ccy, d)} / NULLIF(${FX_RATE(`'IDR'`, d)}, 0) END)`;
+  const INV_D = (i: string): string => `COALESCE(${i}.invoice_date, ${i}.created_at::date)`;
+  const INV_USD = (i: string, col = 'gross_total'): string => TO_USD(`${i}.${col}`, `${i}.currency`, INV_D(i));
+  const INV_IDR = (i: string, col = 'gross_total'): string => TO_IDR(`${i}.${col}`, `${i}.currency`, INV_D(i));
+  const PAY_D = `COALESCE(p.payment_date::date, ${INV_D('i')})`;
+  const PAY_USD = TO_USD('p.amount_paid', 'i.currency', PAY_D);
+  const PAY_IDR = TO_IDR('p.amount_paid', 'i.currency', PAY_D);
+
   const TERM_DAYS = (i: string): string => `NULLIF(substring(${i}.payment_term from '([0-9]+)$'), '')::int`;
   const DUE_SQL = (i: string): string => `(${i}.invoice_date + ${TERM_DAYS(i)})`;
   const AGING_BUCKETS = ['Not yet due', '1-30', '31-60', '61-90', '91-180', '>180', 'No term'] as const;
@@ -1730,8 +1752,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       invoices: () => ({ where: 'TRUE', label: 'All invoices' }),
       paid: () => ({ where: 'i.paid', label: 'Paid invoices' }),
       open: () => ({ where: `NOT i.paid AND ${LIVE}`, label: 'Open (unpaid) invoices' }),
-      open_idr: () => ({ where: `NOT i.paid AND ${LIVE} AND i.currency = 'IDR'`, label: 'Open payables — IDR invoices' }),
-      gross_idr: () => ({ where: `${LIVE} AND i.currency = 'IDR'`, label: 'Invoiced — IDR invoices' }),
+      // The amount cards cover every currency, converted (23 Nov 2026).
+      open_idr: () => ({ where: `NOT i.paid AND ${LIVE}`, label: 'Open payables' }),
+      gross_idr: () => ({ where: `${LIVE}`, label: 'Gross invoiced' }),
       days_to_pay: () => ({
         where: 'i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL',
         label: 'Paid invoices with a payment date',
@@ -1759,8 +1782,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       supplier_gross: () => {
         const sp = str('supplier');
         return {
-          where: `i.supplier_name = ${bind(sp)} AND i.currency = 'IDR' AND ${LIVE}`,
-          label: `Invoiced (IDR) — ${sp}`,
+          where: `i.supplier_name = ${bind(sp)} AND ${LIVE}`,
+          label: `Invoiced — ${sp}`,
         };
       },
       // The aging panel: open invoices in one bucket of days past due.
@@ -1775,22 +1798,21 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     };
     const PAYMENT: Record<string, () => { where: string; label: string }> = {
       payments: () => ({ where: 'TRUE', label: 'Payments recorded' }),
-      payments_idr: () => ({ where: `i.currency = 'IDR'`, label: 'Payments — IDR invoices' }),
+      payments_idr: () => ({ where: 'TRUE', label: 'Paid amount' }),
       month_payments: () => {
         const mk = str('month');
         return {
-          where: `p.payment_date IS NOT NULL AND to_char(p.payment_date,'YYYY-MM') = ${bind(mk)} AND i.currency = 'IDR'`,
-          label: `Payments in ${mk} — IDR invoices`,
+          where: `p.payment_date IS NOT NULL AND to_char(p.payment_date,'YYYY-MM') = ${bind(mk)}`,
+          label: `Payments in ${mk}`,
         };
       },
     };
 
     if (INVOICE[what]) {
       const { where, label } = INVOICE[what]!();
-      const [tot] = await query<{ n: number; gross_idr: number | null; other_ccy: number }>(
-        `SELECT count(*)::int AS n,
-                sum(i.gross_total) FILTER (WHERE i.currency = 'IDR') AS gross_idr,
-                count(*) FILTER (WHERE i.currency IS DISTINCT FROM 'IDR')::int AS other_ccy
+      const [tot] = await query<{ n: number; gross_usd: number | null; gross_idr: number | null; unrated: number }>(
+        `SELECT count(*)::int AS n, sum(${INV_USD('i')}) AS gross_usd, sum(${INV_IDR('i')}) AS gross_idr,
+                count(*) FILTER (WHERE i.gross_total IS NOT NULL AND ${INV_USD('i')} IS NULL)::int AS unrated
            FROM ops.v_coupa_invoice i WHERE ${where}`,
         params,
       );
@@ -1798,6 +1820,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       const rows = await query(
         `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
                 i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
+                ${INV_USD('i')} AS gross_usd, ${INV_IDR('i')} AS gross_idr,
                 ${INV_PO_SQL('i')}, ${AGING_COLS('i')},
                 CASE WHEN i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL
                      THEN (i.payment_date::date - i.invoice_date) END AS days_to_pay,
@@ -1808,19 +1831,24 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
           LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
         pp,
       );
-      res.json({ what, grain: 'invoice', label, total: tot?.n ?? 0, grossIdr: tot?.gross_idr ?? null, otherCcy: tot?.other_ccy ?? 0, rows });
+      res.json({
+        what, grain: 'invoice', label, total: tot?.n ?? 0,
+        grossUsd: tot?.gross_usd ?? null, grossIdr: tot?.gross_idr ?? null, unrated: tot?.unrated ?? 0, rows,
+      });
       return;
     }
     if (PAYMENT[what]) {
       const { where, label } = PAYMENT[what]!();
-      const [tot] = await query<{ n: number; paid_idr: number | null }>(
-        `SELECT count(*)::int AS n, sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr
+      const [tot] = await query<{ n: number; paid_usd: number | null; paid_idr: number | null; unrated: number }>(
+        `SELECT count(*)::int AS n, sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr,
+                count(*) FILTER (WHERE p.amount_paid IS NOT NULL AND ${PAY_USD} IS NULL)::int AS unrated
            FROM ops.coupa_payment p JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id WHERE ${where}`,
         params,
       );
       const pp = [...params, limit, offset];
       const rows = await query(
         `SELECT p.id AS payment_id, p.payment_date, p.amount_paid, p.sap_payment_doc,
+                ${PAY_USD} AS amount_usd, ${PAY_IDR} AS amount_idr,
                 i.id, i.invoice_number, i.invoice_date, i.supplier_name, i.currency, i.status, i.payment_term,
                 ${INV_PO_SQL('i')}, ${DUE_SQL('i')} AS due_date,
                 (p.payment_date::date - i.invoice_date) AS days_to_pay,
@@ -1832,7 +1860,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
           LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
         pp,
       );
-      res.json({ what, grain: 'payment', label, total: tot?.n ?? 0, paidIdr: tot?.paid_idr ?? null, rows });
+      res.json({
+        what, grain: 'payment', label, total: tot?.n ?? 0,
+        paidUsd: tot?.paid_usd ?? null, paidIdr: tot?.paid_idr ?? null, unrated: tot?.unrated ?? 0, rows,
+      });
       return;
     }
     throw new HttpProblem(400, 'bad-request', `unknown invoicing figure: ${what}`);
@@ -1873,34 +1904,39 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   r.get('/api/v1/coupa/invoices', role('analyst', async (_req, res) => {
     const [kpis] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS invoices,
-              count(*) FILTER (WHERE paid)::int AS paid_count,
-              count(*) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft'))::int AS open_count,
-              sum(gross_total) FILTER (WHERE NOT paid AND status NOT IN ('voided','draft') AND currency = 'IDR') AS open_idr,
-              sum(gross_total) FILTER (WHERE status NOT IN ('voided','draft') AND currency = 'IDR') AS gross_idr,
-              sum(tax_amount) FILTER (WHERE status NOT IN ('voided','draft') AND currency = 'IDR') AS tax_idr,
-              count(*) FILTER (WHERE currency <> 'IDR')::int AS other_ccy,
-              count(DISTINCT currency)::int AS currencies,
-              avg((payment_date::date - invoice_date)::numeric)
-                FILTER (WHERE paid AND payment_date IS NOT NULL AND invoice_date IS NOT NULL) AS avg_days_to_pay
-         FROM ops.v_coupa_invoice`,
+              count(*) FILTER (WHERE i.paid)::int AS paid_count,
+              count(*) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft'))::int AS open_count,
+              sum(${INV_USD('i')}) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft')) AS open_usd,
+              sum(${INV_IDR('i')}) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft')) AS open_idr,
+              sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
+              sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr,
+              sum(${INV_USD('i', 'tax_amount')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS tax_usd,
+              sum(${INV_IDR('i', 'tax_amount')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS tax_idr,
+              count(*) FILTER (WHERE i.status NOT IN ('voided','draft') AND i.gross_total IS NOT NULL
+                                 AND ${INV_USD('i')} IS NULL)::int AS unrated,
+              count(DISTINCT i.currency)::int AS currencies,
+              avg((i.payment_date::date - i.invoice_date)::numeric)
+                FILTER (WHERE i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL) AS avg_days_to_pay
+         FROM ops.v_coupa_invoice i`,
     );
     const [pay] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS payments,
-              sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr,
+              sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr,
               count(*) FILTER (WHERE p.sap_payment_doc IS NOT NULL)::int AS with_sap_doc
          FROM ops.coupa_payment p
          JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id`,
     );
     const invoicesByMonth = await query(
-      `SELECT to_char(invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
-              count(*) FILTER (WHERE paid)::int AS paid,
-              sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr
-         FROM ops.v_coupa_invoice WHERE invoice_date IS NOT NULL
+      `SELECT to_char(i.invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
+              count(*) FILTER (WHERE i.paid)::int AS paid,
+              sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
+              sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr
+         FROM ops.v_coupa_invoice i WHERE i.invoice_date IS NOT NULL
         GROUP BY 1 ORDER BY 1`,
     );
     const paymentsByMonth = await query(
       `SELECT to_char(p.payment_date,'YYYY-MM') AS mk, count(*)::int AS payments,
-              sum(p.amount_paid) FILTER (WHERE i.currency = 'IDR') AS paid_idr
+              sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr
          FROM ops.coupa_payment p
          JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
         WHERE p.payment_date IS NOT NULL
@@ -1910,36 +1946,39 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       `SELECT status, count(*)::int AS n FROM ops.v_coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
     );
     // Open payables by days past due (23 Nov 2026); each bucket opens its invoices.
-    const agingRows = await query<{ bucket: string; invoices: number; gross_idr: number | null; other_ccy: number }>(
+    const agingRows = await query<{ bucket: string; invoices: number; gross_usd: number | null; gross_idr: number | null; unrated: number }>(
       `SELECT ${BUCKET_SQL('i')} AS bucket, count(*)::int AS invoices,
-              sum(i.gross_total) FILTER (WHERE i.currency = 'IDR') AS gross_idr,
-              count(*) FILTER (WHERE i.currency IS DISTINCT FROM 'IDR')::int AS other_ccy
+              sum(${INV_USD('i')}) AS gross_usd, sum(${INV_IDR('i')}) AS gross_idr,
+              count(*) FILTER (WHERE i.gross_total IS NOT NULL AND ${INV_USD('i')} IS NULL)::int AS unrated
          FROM ops.v_coupa_invoice i
         WHERE NOT i.paid AND i.status NOT IN ('voided','draft')
         GROUP BY 1`,
     );
     const aging = AGING_BUCKETS
-      .map((b) => agingRows.find((r2) => r2.bucket === b) ?? { bucket: b, invoices: 0, gross_idr: null, other_ccy: 0 })
+      .map((b) => agingRows.find((r2) => r2.bucket === b) ?? { bucket: b, invoices: 0, gross_usd: null, gross_idr: null, unrated: 0 })
       .filter((r2) => r2.invoices > 0);
     const topSuppliers = await query(
-      `SELECT supplier_name, count(*)::int AS invoices,
-              sum(gross_total) FILTER (WHERE currency = 'IDR' AND status NOT IN ('voided','draft')) AS gross_idr,
-              count(*) FILTER (WHERE paid)::int AS paid,
-              count(*) FILTER (WHERE currency <> 'IDR')::int AS other_ccy
-         FROM ops.v_coupa_invoice
-        WHERE supplier_name IS NOT NULL
-        GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+      `SELECT i.supplier_name, count(*)::int AS invoices,
+              sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
+              sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr,
+              count(*) FILTER (WHERE i.paid)::int AS paid,
+              count(*) FILTER (WHERE i.status NOT IN ('voided','draft') AND i.gross_total IS NOT NULL
+                                 AND ${INV_USD('i')} IS NULL)::int AS unrated
+         FROM ops.v_coupa_invoice i
+        WHERE i.supplier_name IS NOT NULL
+        GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 12`,
     );
     const recentInvoices = await query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
               i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
+              ${INV_USD('i')} AS gross_usd, ${INV_IDR('i')} AS gross_idr,
               ${INV_PO_SQL('i')}, ${AGING_COLS('i')},
               (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
          FROM ops.v_coupa_invoice i
         ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
     );
     const recentPayments = await query(
-      `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc,
+      `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc, ${PAY_USD} AS amount_usd, ${PAY_IDR} AS amount_idr,
               i.id AS invoice_id, i.invoice_number, i.supplier_name, i.currency, ${INV_PO_SQL('i')}
          FROM ops.coupa_payment p
          JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id

@@ -42,7 +42,7 @@ export type Grain = 'pr_item' | 'po_line' | 'gr_posting' | 'pr_release' | 'po_re
  * PO amount. The desk figures count desks, so a list of thousands of PO lines
  * answered a question nobody asked; a list of desks is the figure itself.
  */
-export type DrillView = 'by_purch_group';
+export type DrillView = 'by_purch_group' | 'by_po';
 
 export interface DrillPredicate {
   grain: Grain;
@@ -70,7 +70,7 @@ export interface DrillPredicate {
    * are made of - GR against the planned date, PO release to GR, PR to GR - so
    * a "9.3 d" card opens rows that show their days, not a generic order list.
    */
-  columns?: 'delivery';
+  columns?: 'delivery' | 'pr_approval';
 }
 
 /** Measures a drill can be narrowed to the maximum of, with their grain. */
@@ -484,6 +484,17 @@ const FILTERS: Record<string, Compiler> = {
   companyCode: (v, a, ps) => `${a}.company_code = ${p(ps, String(v))}`,
   purchGroup: (v, a, ps) =>
     v === null ? `${a}.purch_group IS NULL` : `${a}.purch_group = ${p(ps, String(v))}`,
+  /**
+   * The PO's CURRENT approver (23 Nov 2026): the first unapproved step of its
+   * SAP release strategy. null = a pending PO with no open step recorded.
+   */
+  poCurrentApprover: (v, a, ps) => `(SELECT _r.pic_release FROM core.fact_po_release _r
+      WHERE _r.dataset_version_id = ${a}.dataset_version_id AND _r.po_no = ${a}.po_no AND _r.approve_date IS NULL
+      ORDER BY _r.rel_seq LIMIT 1) ${v === null || v === undefined ? 'IS NULL' : `= ${p(ps, String(v))}`}`,
+  /** The SAP PO also exists in Coupa (created there and integrated to SAP). */
+  poInCoupa: (v, a) => `${v ? '' : 'NOT '}EXISTS (SELECT 1 FROM ops.coupa_po_line _cp WHERE _cp.sap_po_no = ${a}.po_no)`,
+  /** Requisition approved within N days of being raised (approved_within_3d). */
+  prApprovalLte: (v, a, ps) => `(${a}.release_final_date - ${a}.requisition_date) <= ${p(ps, Number(v))}`,
   /** A purchasing group is present - the desk KPIs count only these. */
   hasPurchGroup: (_v, a) => `(${a}.purch_group IS NOT NULL AND btrim(${a}.purch_group) <> '')`,
   /**
@@ -1105,6 +1116,9 @@ export async function executeDrill(
   if (payload.view === 'by_purch_group') {
     return executePurchGroupView(payload, whereSql, params, limit, offset, sort);
   }
+  if (payload.view === 'by_po') {
+    return executePoView(payload, whereSql, params, limit, offset, sort);
+  }
 
   /*
    * The PO-line measure the figure behind this drill adds up (20 Nov 2026).
@@ -1174,10 +1188,19 @@ export async function executeDrill(
         ]
           : [c]))
     : COLUMNS[payload.grain];
-  const columns = [...atMaxCols, ...base, ...measureCols];
+  // PR approval days beside the item (approved_within_3d, 23 Nov 2026). The
+  // generic "Aging (d)" - days since the PR date - goes: beside an approval
+  // figure it read as "approved after 300 days".
+  const prAppr = payload.columns === 'pr_approval' && payload.grain === 'pr_item';
+  const base2 = prAppr
+    ? base.flatMap((c) => (c.key === 'prItem' ? [c, { key: 'prApprovalDays', label: 'PR approval (days)', type: 'int' }]
+      : c.key === 'agingDays' ? [] : [c]))
+    : base;
+  const columns = [...atMaxCols, ...base2, ...measureCols];
   const measureSelect = (measure === 'value' ? ''
     : `, ${t.alias}.${mIdr} AS "measureIdr", ${t.alias}.${mUsd} AS "measureUsd"`)
     + (payload.atMax ? `, ${AT_MAX[payload.atMax].expr(t.alias)} AS "atMaxValue"` : '')
+    + (prAppr ? `, (${t.alias}.release_final_date - ${t.alias}.requisition_date) AS "prApprovalDays"` : '')
     + (delivery
       ? `, CASE WHEN ${t.alias}.vendor_code LIKE 'LN%' THEN 'Local'
                 WHEN ${t.alias}.vendor_code LIKE 'IN%' THEN 'Import' END AS "vendorType",
@@ -1334,6 +1357,100 @@ async function executePurchGroupView(
     totalCount: total,
     note: payload.scope.length === 0 ? 'no rows are within your data scope' : null,
     columns: PURCH_GROUP_VIEW_COLUMNS,
+    rows: rows.map((r) => ({ ...r, flags: [] })),
+    nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
+    totals: tot
+      ? {
+          idrSum: tot.idr === null ? null : Number(tot.idr),
+          usdSum: tot.unrated > 0 || tot.usd === null ? null : Number(tot.usd),
+          usdComplete: tot.unrated === 0,
+        }
+      : null,
+    detailHandoff: detailHandoffFor(payload.filters ?? {}),
+  };
+}
+
+const PO_VIEW_COLUMNS: DrillPage['columns'] = [
+  { key: 'poNo', label: 'PO No', type: 'string' },
+  { key: 'vendorName', label: 'Vendor', type: 'string' },
+  { key: 'plant', label: 'Plant', type: 'string' },
+  { key: 'purchOrg', label: 'Purchasing Organization', type: 'string' },
+  { key: 'purchGroup', label: 'Purchasing Group', type: 'string' },
+  { key: 'purchGroupName', label: 'Purchasing Group Name', type: 'string' },
+  { key: 'poDate', label: 'PO date', type: 'date' },
+  { key: 'daysSincePo', label: 'Days since PO', type: 'int' },
+  { key: 'currentApprover', label: 'Waiting on', type: 'string' },
+  { key: 'source', label: 'Created in', type: 'string' },
+  { key: 'coupaPo', label: 'Coupa PO', type: 'string' },
+  { key: 'poLines', label: 'PO lines', type: 'int' },
+  { key: 'valueIdr', label: 'PO Amount (IDR)', type: 'money', currency: 'IDR' },
+  { key: 'valueUsd', label: 'PO Amount (USD)', type: 'money', currency: 'USD' },
+];
+
+/**
+ * The drill population summarised per PURCHASE ORDER (23 Nov 2026). "POs
+ * pending approval" counts POs while its drill listed their lines (91 POs, 254
+ * rows on staging); one row per PO makes the popup the figure. Each row says
+ * whom the PO waits on (the first unapproved SAP release step), how long it has
+ * waited since its PO date, and whether it was created in Coupa.
+ */
+async function executePoView(
+  payload: TokenPayload,
+  whereSql: string,
+  params: unknown[],
+  limit: number,
+  offset: number,
+  sort: { key: string; dir: 'asc' | 'desc' } | null,
+): Promise<DrillPage> {
+  if (payload.grain !== 'po_line') throw new Error('by_po needs the po_line grain');
+  const base = `
+    WITH g AS (
+      SELECT f.po_no, min(f.dataset_version_id) AS v,
+             min(f.vendor_name) AS vendor, min(f.plant) AS plant, min(f.purch_org) AS purch_org,
+             min(f.purch_group) AS purch_group, min(f.document_date) AS po_date,
+             count(*)::int AS po_lines, sum(f.net_order_value_idr) AS value_idr, sum(f.net_order_value_usd) AS value_usd,
+             count(*) FILTER (WHERE f.net_order_value IS NOT NULL AND f.net_order_value_usd IS NULL)::int AS unrated
+        FROM core.fact_po_line f WHERE ${whereSql}
+       GROUP BY f.po_no
+    )`;
+  const tot = await queryOne<{ n: number; idr: number | null; usd: number | null; unrated: number }>(
+    `${base} SELECT count(*)::int AS n, sum(value_idr) AS idr, sum(value_usd) AS usd,
+                    COALESCE(sum(unrated), 0)::int AS unrated FROM g`,
+    params,
+  );
+  const total = tot?.n ?? 0;
+  const sortCol = sort ? PO_VIEW_COLUMNS.find((c) => c.key === sort.key) : undefined;
+  const orderBy = sortCol
+    ? `"${sortCol.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, "poNo"`
+    : `"poDate" ASC NULLS LAST, "poNo"`;
+  const pp = [...params, limit, offset];
+  const rows = await query<Record<string, unknown>>(
+    `${base}
+     SELECT g.po_no AS "poNo", g.vendor AS "vendorName", g.plant, g.purch_org AS "purchOrg",
+            g.purch_group AS "purchGroup", pg.description AS "purchGroupName",
+            g.po_date AS "poDate",
+            ((SELECT dv.as_of_date FROM core.dataset_version dv WHERE dv.id = g.v)::date - g.po_date) AS "daysSincePo",
+            (SELECT _r.pic_release FROM core.fact_po_release _r
+              WHERE _r.dataset_version_id = g.v AND _r.po_no = g.po_no AND _r.approve_date IS NULL
+              ORDER BY _r.rel_seq LIMIT 1) AS "currentApprover",
+            CASE WHEN EXISTS (SELECT 1 FROM ops.coupa_po_line _c WHERE _c.sap_po_no = g.po_no)
+                 THEN 'Coupa → SAP' ELSE 'SAP' END AS "source",
+            (SELECT min(_c.po_number) FROM ops.coupa_po_line _c WHERE _c.sap_po_no = g.po_no) AS "coupaPo",
+            g.po_lines AS "poLines", g.value_idr AS "valueIdr",
+            CASE WHEN g.unrated = 0 THEN g.value_usd END AS "valueUsd"
+       FROM g LEFT JOIN core.dim_purch_group pg ON pg.code = g.purch_group
+      ORDER BY ${orderBy}
+      LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
+    pp,
+  );
+  return {
+    label: payload.label ?? describeFilters(payload),
+    grain: payload.grain,
+    view: 'by_po',
+    datasetVersionId: payload.v,
+    totalCount: total,
+    note: payload.scope.length === 0 ? 'no rows are within your data scope' : null,
+    columns: PO_VIEW_COLUMNS,
     rows: rows.map((r) => ({ ...r, flags: [] })),
     nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
     totals: tot

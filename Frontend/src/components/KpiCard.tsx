@@ -198,6 +198,11 @@ function subtitle(kpi: Kpi): string {
     parts.push(`${formatNumber(Number(kpi.numerator ?? 0))} PRs · ${(Number(kpi.detail['chip_value_idr']) / 1e9).toFixed(1)} B IDR`);
   }
 
+  // Its drill opens the items that MADE it (23 Nov 2026), so say how many.
+  if (kpi.kpiId === 'approved_within_3d' && kpi.numerator !== null && kpi.denominator !== null) {
+    parts.push(`${formatNumber(Number(kpi.numerator))} of ${formatNumber(Number(kpi.denominator))} approved items`);
+  }
+
   if (kpi.detail && kpi.detail['entityUnit']) {
     // The figure counts entities; the drill opens the rows behind them.
     parts.push('distinct ' + String(kpi.detail['entityUnit']) + ' — drill opens the lines');

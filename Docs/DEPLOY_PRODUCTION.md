@@ -718,6 +718,29 @@ What changed for users (Invoicing & Payment):
   91-180, >180, no term), each bucket clickable; the buckets add up to the Open card.
 - "Avg days to pay" is no longer clickable; every other figure still opens its invoices or payments.
 
+### 10o. Release of 23 Nov 2026 — Approvals fixes and chart; Invoicing layout and currency
+
+The usual §10 BE and FE updates; no migration. **Then Rebuild** (Admin → Rebuild): the Approvals drills
+and the new chart are precomputed in the mart, so until a Rebuild the old drills (and no chart bars) show.
+
+What changed for users:
+- **Approvals:**
+  - "Avg PR approval", "Avg PO approval" and "Oldest unreleased PR" are now one card, "Approval Cycle",
+    which is not clickable.
+  - **POs pending approval** opens one row per PO, the same count as the card. Before, it listed PO
+    lines (91 POs vs 254 lines on staging). New columns: Waiting on (the open SAP release step's
+    approver), Created in (SAP or Coupa → SAP), Coupa PO, and PO lines.
+  - **Approved within 3d %** opens only the PR items approved within 3 days (the numerator), with a
+    "PR approval (days)" column. Before, it opened every approved item. The days-since-PR "Aging"
+    column is gone from this popup, because it read as an approval time.
+  - New chart **POs pending approval by approver**: pending POs by the approver whose SAP release
+    step is open, split into Created in SAP vs Created in Coupa → SAP. Coupa has no PO approval
+    queue, so every PO approval waits in SAP. Each bar opens its POs.
+- **Invoicing & Payment:**
+  - The layout is configurable like the other pages: Admin only, and shared by every user.
+  - Every amount follows the IDR / USD switch, each invoice or payment converted at its own month's
+    rate. Invoices with no rate for their month are counted but left out of the amount, marked ⚠.
+
 ## 11. Rollback
 
 **On the affected server:**

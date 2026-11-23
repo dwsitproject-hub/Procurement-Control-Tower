@@ -104,6 +104,15 @@ const SUMMARY_CARDS: Record<string, { title: string; items: { id: string; label:
       { id: 'avg_pr_line_value_idr', label: 'Avg PR line value' },
     ],
   },
+  // Approvals (23 Nov 2026): the two approval cycles and the oldest wait, one card.
+  approvals_summary: {
+    title: 'Approval Cycle',
+    items: [
+      { id: 'cycle_pr_approval', label: 'Avg PR approval' },
+      { id: 'cycle_po_approval', label: 'Avg PO approval' },
+      { id: 'oldest_unreleased', label: 'Oldest unreleased PR' },
+    ],
+  },
   // Delivery (21 Nov 2026): the two lead-time cards in one, each line keeping
   // its Local / Import split.
   delivery_lt_summary: {
@@ -188,8 +197,10 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'otd_vs_requested',
   ],
   approvals: [
-    'pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval',
-    'cycle_po_approval', 'approved_within_3d', 'oldest_unreleased', 'retro_po_rate',
+    // approvals_summary = cycle_pr_approval + cycle_po_approval +
+    // oldest_unreleased on one card (23 Nov 2026, SUMMARY_CARDS).
+    'approvals_summary', 'pending_pr_approvals', 'pending_po_approvals',
+    'approved_within_3d', 'retro_po_rate',
     'worst_approver_gap', 'auto_release_share_pct',
   ],
   governance: [
@@ -234,7 +245,7 @@ const TAB_CHARTS: Record<Tab, string[]> = {
     'delivery_ordered_vs_received', 'delivery_by_category', 'delivery_by_priority',
     'delivery_distribution', 'e2e_by_month', 'e2e_by_category', 'movement_mix',
   ],
-  approvals: ['pending_pr_by_pic'],
+  approvals: ['pending_pr_by_pic', 'pending_po_by_pic'],
   governance: ['wbs_by_plant', 'unapproved_by_category'],
   vendors: [],
   materials: [],
@@ -815,7 +826,16 @@ export default function App() {
         ) : tab === 'coupa_src' ? (
           <PageChunk tab={tab}><CoupaSourcingTab /></PageChunk>
         ) : tab === 'coupa_inv' ? (
-          <PageChunk tab={tab}><CoupaInvoicesTab /></PageChunk>
+          <PageChunk tab={tab}>
+            <CoupaInvoicesTab
+              currency={currency}
+              layout={layout}
+              updateLayout={updateLayout}
+              editing={editing}
+              setEditing={setEditing}
+              isAdmin={isAdmin}
+            />
+          </PageChunk>
         ) : tab === 'custom' ? (
           <PageChunk tab={tab}><CustomTab onDrill={onDrill} currency={currency} /></PageChunk>
         ) : tab === 'master' ? (

@@ -165,6 +165,17 @@ export const CHART_META: ChartMeta[] = [
     unit: 'count',
   },
   {
+    chartId: 'pending_po_by_pic',
+    title: 'POs pending approval by approver',
+    tab: 'approvals',
+    grain: 'po_line',
+    unit: 'count',
+    notes: [
+      'Each pending PO once, at the approver its first open SAP release step waits on',
+      'Coupa has no PO approval queue (its POs are issued after the requisition is approved), so every PO approval waits in SAP; "Coupa → SAP" marks POs created in Coupa and integrated to SAP',
+    ],
+  },
+  {
     chartId: 'wbs_by_plant',
     title: 'WBS violations by plant',
     tab: 'governance',

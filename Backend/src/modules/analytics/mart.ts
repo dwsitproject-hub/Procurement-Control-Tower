@@ -519,9 +519,10 @@ export async function inlineKpis(
         WHERE dataset_version_id = $1 AND po_release_state = 'pending'${c.sql}`,
       [versionId, ...c.params],
     );
+    // One row per PO (23 Nov 2026): the drill counts what the card counts.
     kpis.push(simpleCount('pending_po_approvals', pendPo[0]!.n, 'count', null,
-      { releaseExemptExcluded: exemptLines, entityUnit: 'POs' },
-      drillOf({ grain: 'po_line', filters: { poReleaseState: 'pending' } })));
+      { releaseExemptExcluded: exemptLines },
+      drillOf({ grain: 'po_line', view: 'by_po', filters: { poReleaseState: 'pending' } })));
   });
 
   return kpis;

@@ -506,8 +506,10 @@ export async function inlineKpis(
                          AND r.approve_date IS NULL)${c.sql}`,
       [versionId, ...c.params],
     );
-    kpis.push(simpleCount('pending_pr_approvals', pendPr[0]!.n, 'count', null, { entityUnit: 'PR items' },
-      drillOf({ grain: 'pr_item', filters: { releasePending: true } })));
+    // PR LINES (23 Nov 2026): every approval figure counts lines, and the
+    // drill lists the same lines with whom each waits on.
+    kpis.push(simpleCount('pending_pr_approvals', pendPr[0]!.n, 'count', null, null,
+      drillOf({ grain: 'pr_item', columns: 'approval_queue', filters: { releasePending: true } })));
   });
 
   await block([['pending_po_approvals', 'count']], async () => {
@@ -515,14 +517,15 @@ export async function inlineKpis(
     // never be approved, so leaving them in the queue would strand them.
     const c = fc('po_line', '');
     const pendPo = await q<{ n: number }>(
-      `SELECT count(DISTINCT po_no)::int AS n FROM core.fact_po_line
+      `SELECT count(*)::int AS n FROM core.fact_po_line
         WHERE dataset_version_id = $1 AND po_release_state = 'pending'${c.sql}`,
       [versionId, ...c.params],
     );
-    // One row per PO (23 Nov 2026): the drill counts what the card counts.
+    // PO LINES (23 Nov 2026), like PRs pending approval: the card and its
+    // drill count the same lines (it counted POs, 91 vs 254 lines on staging).
     kpis.push(simpleCount('pending_po_approvals', pendPo[0]!.n, 'count', null,
       { releaseExemptExcluded: exemptLines },
-      drillOf({ grain: 'po_line', view: 'by_po', filters: { poReleaseState: 'pending' } })));
+      drillOf({ grain: 'po_line', columns: 'approval_queue', filters: { poReleaseState: 'pending' } })));
   });
 
   return kpis;

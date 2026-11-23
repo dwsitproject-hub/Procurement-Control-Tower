@@ -2676,19 +2676,34 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     // Pending release STEPS by the person they wait on. Filtered, like every
     // PR-release figure, by the year/month the requisition was raised.
+    // PR LINES pending approval by the person they wait on (23 Nov 2026):
+    // each pending PR item once, at its CURRENT approver (first open release
+    // step), so the bars add up to the card. It counted open release STEPS,
+    // so an item waiting on three approvers counted three times.
     chartId: 'pending_pr_by_pic', seriesKey: 'pending', seriesLabel: 'Pending', unit: 'count',
-    filterKind: 'pr_release',
-    sql: `SELECT COALESCE(pic_release, '?') AS bucket_key,
-                 COALESCE(pic_release, '(unknown)') AS bucket_label,
+    filterKind: 'pr_item',
+    sql: `WITH a AS (
+            SELECT (SELECT r.pic_release FROM core.fact_pr_release r
+                     WHERE r.dataset_version_id = core.fact_pr_item.dataset_version_id
+                       AND r.pr_no = core.fact_pr_item.pr_no AND r.pr_item = core.fact_pr_item.pr_item
+                       AND r.approve_date IS NULL
+                     ORDER BY r.rel_seq LIMIT 1) AS pic
+              FROM core.fact_pr_item
+             WHERE dataset_version_id = $1
+               AND EXISTS (SELECT 1 FROM core.fact_pr_release r2
+                            WHERE r2.dataset_version_id = core.fact_pr_item.dataset_version_id
+                              AND r2.pr_no = core.fact_pr_item.pr_no AND r2.pr_item = core.fact_pr_item.pr_item
+                              AND r2.approve_date IS NULL)
+          )
+          SELECT COALESCE(pic, '?') AS bucket_key, COALESCE(pic, '(unknown)') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_release','filters',
-                   jsonb_build_object('picRelease', pic_release,'pending',true)) AS drill
-            FROM core.fact_pr_release WHERE dataset_version_id = $1 AND approve_date IS NULL
-           GROUP BY pic_release ORDER BY 3 DESC LIMIT 20`,
+                 jsonb_build_object('grain','pr_item','columns','approval_queue','filters',
+                   jsonb_build_object('releasePending', true, 'prCurrentApprover', pic)) AS drill
+            FROM a GROUP BY pic ORDER BY count(*) DESC, pic LIMIT 20`,
   },
-  // POs pending approval by the person they wait on (23 Nov 2026): each
-  // pending PO once, at its CURRENT approver (first unapproved SAP release
-  // step), so the bars add up to the card. Split by origin: Coupa holds no PO
+  // PO LINES pending approval by the person they wait on (23 Nov 2026): each
+  // pending line once, at its PO's CURRENT approver (first unapproved SAP
+  // release step), so the bars add up to the card. Split by origin: Coupa holds no PO
   // approval queue - its POs are issued after the requisition is approved - so
   // every PO approval waits in SAP's release strategy, and "via Coupa" marks the
   // POs that were created in Coupa and integrated to SAP.
@@ -2697,10 +2712,11 @@ export const PARITY_CHARTS: ChartSpec[] = [
     seriesKey: src,
     seriesLabel: src === 'sap' ? 'Created in SAP' : 'Created in Coupa → SAP',
     unit: 'count',
-    sql: `WITH p AS (
+    sql: `WITH l AS (
             SELECT dataset_version_id, po_no FROM ${POL}
              WHERE dataset_version_id = $1 AND po_release_state = 'pending'
-             GROUP BY 1, 2
+          ), p AS (
+            SELECT DISTINCT dataset_version_id, po_no FROM l
           ), a AS (
             SELECT p.po_no,
                    (SELECT r.pic_release FROM core.fact_po_release r
@@ -2712,10 +2728,10 @@ export const PARITY_CHARTS: ChartSpec[] = [
           SELECT COALESCE(pic, '?') AS bucket_key, COALESCE(pic, '(unknown)') AS bucket_label,
                  count(*) FILTER (WHERE ${src === 'coupa' ? '' : 'NOT '}via_coupa)::numeric AS value,
                  count(*) FILTER (WHERE ${src === 'coupa' ? '' : 'NOT '}via_coupa)::int AS row_count,
-                 jsonb_build_object('grain','po_line','view','by_po','filters',
+                 jsonb_build_object('grain','po_line','columns','approval_queue','filters',
                    jsonb_build_object('poReleaseState','pending','poCurrentApprover', pic,
                                       'poInCoupa', ${src === 'coupa' ? 'true' : 'false'})) AS drill
-            FROM a GROUP BY pic ORDER BY count(*) DESC, pic LIMIT 20`,
+            FROM l JOIN a USING (po_no) GROUP BY pic ORDER BY count(*) DESC, pic LIMIT 20`,
   })),
   {
     chartId: 'wbs_by_plant', seriesKey: 'violations', seriesLabel: 'Violations', unit: 'count',

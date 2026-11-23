@@ -727,15 +727,21 @@ What changed for users:
 - **Approvals:**
   - "Avg PR approval", "Avg PO approval" and "Oldest unreleased PR" are now one card, "Approval Cycle",
     which is not clickable.
-  - **POs pending approval** opens one row per PO, the same count as the card. Before, it listed PO
-    lines (91 POs vs 254 lines on staging). New columns: Waiting on (the open SAP release step's
-    approver), Created in (SAP or Coupa → SAP), Coupa PO, and PO lines.
+  - **Every approval-queue figure counts LINES**, like the PR card always did. **PO lines pending
+    approval** (was "POs pending approval") now counts PO lines, the same lines its popup lists.
+    Before, the card counted POs but the popup listed lines (91 vs 254 on staging). "PRs pending
+    approval" is renamed **PR lines pending approval**. Both popups gain a **Waiting on** column (the
+    approver of the first open release step); the PO popup also shows Created in (SAP or
+    Coupa → SAP) and Coupa PO.
+  - **PR lines pending approval by approver** counts each pending PR line once, at its current
+    approver. Before, it counted open release steps: a line waiting on three approvers counted three
+    times, so the bars added up to more than the card.
   - **Approved within 3d %** opens only the PR items approved within 3 days (the numerator), with a
     "PR approval (days)" column. Before, it opened every approved item. The days-since-PR "Aging"
     column is gone from this popup, because it read as an approval time.
-  - New chart **POs pending approval by approver**: pending POs by the approver whose SAP release
-    step is open, split into Created in SAP vs Created in Coupa → SAP. Coupa has no PO approval
-    queue, so every PO approval waits in SAP. Each bar opens its POs.
+  - New chart **PO lines pending approval by approver**: pending PO lines by the approver whose SAP
+    release step is open, split into Created in SAP vs Created in Coupa → SAP. Coupa has no PO
+    approval queue, so every PO approval waits in SAP. Each bar opens its lines.
 - **Invoicing & Payment:**
   - The layout is configurable like the other pages: Admin only, and shared by every user.
   - Every amount follows the IDR / USD switch, each invoice or payment converted at its own month's

@@ -14,19 +14,21 @@ export function BrandMark({ size = 24 }: { size?: number }) {
       focusable="false"
       style={{ display: 'block', flexShrink: 0 }}
     >
-      <rect x="14" y="41" width="8" height="12" rx="2" fill="#6AA9E9" />
-      <rect x="28" y="31" width="8" height="22" rx="2" fill="#FFFFFF" />
-      <rect x="42" y="37" width="8" height="16" rx="2" fill="#6AA9E9" />
-      <path d="M25.9 20.5 A7 7 0 0 1 38.1 20.5" fill="none" stroke="#FFFFFF" strokeWidth="3" strokeLinecap="round" />
+      {/* Colours come from the theme (--brand-*), so the mark reads on both the
+          dark and the light top bar; the literals are the old navy-bar fallback. */}
+      <rect x="14" y="41" width="8" height="12" rx="2" style={{ fill: 'var(--brand-a, #6AA9E9)' }} />
+      <rect x="28" y="31" width="8" height="22" rx="2" style={{ fill: 'var(--brand-b, #FFFFFF)' }} />
+      <rect x="42" y="37" width="8" height="16" rx="2" style={{ fill: 'var(--brand-a, #6AA9E9)' }} />
+      <path d="M25.9 20.5 A7 7 0 0 1 38.1 20.5" fill="none" strokeWidth="3" strokeLinecap="round" style={{ stroke: 'var(--brand-b, #FFFFFF)' }} />
       <path
         d="M21.6 18 A12 12 0 0 1 42.4 18"
         fill="none"
-        stroke="#FFFFFF"
         strokeOpacity="0.5"
         strokeWidth="3"
         strokeLinecap="round"
+        style={{ stroke: 'var(--brand-b, #FFFFFF)' }}
       />
-      <circle cx="32" cy="24" r="3.2" fill="#ED7D31" />
+      <circle cx="32" cy="24" r="3.2" style={{ fill: 'var(--brand-dot, #ED7D31)' }} />
     </svg>
   );
 }

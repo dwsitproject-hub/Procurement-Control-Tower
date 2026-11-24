@@ -8,6 +8,7 @@ import { Lbl } from '../lib/labels';
 import { FloatControls } from './FloatControls';
 import { LayoutControls, LayoutEditBar, applyLayout, type TabLayout } from './LayoutEdit';
 import { placeLabelAbove, type LabelRect } from '../lib/chartLabels';
+import { syncChartTheme } from '../lib/chartTheme';
 
 ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
@@ -85,7 +86,7 @@ function OpsBars({
         ctx.restore();
       },
     };
-    chart.current = new ChartJS(canvas.current, {
+    syncChartTheme(); chart.current = new ChartJS(canvas.current, {
       type: 'bar',
       plugins: [barLabels as never],
       data: {

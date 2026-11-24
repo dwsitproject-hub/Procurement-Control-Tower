@@ -13,6 +13,7 @@
 
 import { AGE_BANDS as SHARED_AGE_BANDS, ageBandPredicateSql } from '@pct/rules';
 import { query, queryOne } from '../../db/client.js';
+import { memo } from './cache.js';
 import {
   DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
@@ -622,6 +623,52 @@ function buildDetailWhere(
   return { sql: where.join(' AND '), params };
 }
 
+/**
+ * Facets power the filter dropdowns. Each is computed from the same predicate
+ * MINUS its own column - see buildDetailWhere. Before that omission the list
+ * collapsed to whatever was already selected, which made it impossible to pick
+ * a second value in any filter. Four at a time (24 Nov 2026); the result keeps
+ * FACETS' order.
+ */
+async function detailFacets(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  filters: DetailFilters,
+): Promise<DetailPage['facets']> {
+  const lists = new Array<{ value: string; count: number }[]>(FACETS.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < FACETS.length) {
+      const i = next++;
+      const { name, col } = FACETS[i]!;
+      const w = buildDetailWhere(versionId, scope, filters, name);
+      const f = await query<{ value: string | null; n: number }>(
+        `SELECT d.${col} AS value, count(*)::int AS n
+           FROM core.v_detail d WHERE ${w.sql}
+          GROUP BY 1 ORDER BY 2 DESC LIMIT 200`,
+        w.params,
+      );
+      const opts = f
+        .filter((x) => x.value !== null)
+        .map((x) => ({ value: x.value as string, count: x.n }));
+      // A value the reader has already selected must appear in the list even
+      // if this dataset no longer offers it - otherwise the only way to clear
+      // it is the "Clear filters" button, and the tick it came from is gone
+      // from the screen while still filtering the rows.
+      const chosen = (filters[name] as string[] | undefined) ?? [];
+      const present = new Set(opts.map((o) => o.value));
+      for (const v of chosen) {
+        if (!present.has(v)) opts.push({ value: v, count: 0 });
+      }
+      lists[i] = opts;
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  const facets: DetailPage['facets'] = {};
+  FACETS.forEach(({ name }, i) => { facets[name] = lists[i]!; });
+  return facets;
+}
+
 export async function queryDetail(
   versionId: number,
   asOfDate: string,
@@ -641,11 +688,22 @@ export async function queryDetail(
 ): Promise<DetailPage> {
   const { sql: whereSql, params } = buildDetailWhere(versionId, scope, filters);
 
-  const countRow = await queryOne<{ n: number }>(
-    `SELECT count(*)::int AS n FROM core.v_detail d WHERE ${whereSql}`,
-    params,
-  );
-  const total = countRow?.n ?? 0;
+  /*
+   * Performance pass (24 Nov 2026): the count, the page and the facets used to
+   * run one after another - 11 facet scans of v_detail at ~0.26 s each, 2.7 s
+   * for Open Items' first paint. They now run together, the facets four at a
+   * time, and the count and facets are cached for the version (immutable), the
+   * reader's scope and the filters: paging, sorting and coming back to the page
+   * reuse them. The page of rows itself is always read fresh.
+   */
+  const countP = memo(versionId, ['detail-count', scope, filters], async () =>
+    (await queryOne<{ n: number }>(
+      `SELECT count(*)::int AS n FROM core.v_detail d WHERE ${whereSql}`,
+      params,
+    ))?.n ?? 0);
+  const facetsP = includeFacets
+    ? memo(versionId, ['detail-facets', scope, filters], () => detailFacets(versionId, scope, filters))
+    : Promise.resolve({} as DetailPage['facets']);
 
   // Sort column is looked up in the whitelist, never interpolated from input.
   const sortCol = sort ? COLUMN_BY_KEY.get(sort.key) : undefined;
@@ -671,7 +729,7 @@ export async function queryDetail(
    * Sorting BY a Coupa column has to look up every row to know the order, so
    * that one case still joins first.
    */
-  const rows = await query<Record<string, unknown>>(
+  const rowsP = query<Record<string, unknown>>(
     sortCol?.coupa && sortCol.sortable
       ? `SELECT ${select}, ${flagCols}
            FROM core.v_detail d${coupaJoin}
@@ -686,6 +744,7 @@ export async function queryDetail(
           ORDER BY ${orderBy}`,
     pageParams,
   );
+  const [total, rows, facets] = await Promise.all([countP, rowsP, facetsP]);
 
   const decorated = rows.map((r) => {
     const flags: string[] = [];
@@ -699,37 +758,6 @@ export async function queryDetail(
     for (const k of ['_sto', '_exempt', '_token', '_link', '_direct', '_wbs', '_retro']) delete r[k];
     return { ...r, flags };
   });
-
-  // Facets power the filter dropdowns. Each is computed from the same predicate
-  // MINUS its own column — see buildDetailWhere. Before that omission the list
-  // collapsed to whatever was already selected, which made it impossible to
-  // pick a second value in any filter.
-  const facets: DetailPage['facets'] = {};
-  if (includeFacets) {
-    for (const { name, col } of FACETS) {
-      const w = buildDetailWhere(versionId, scope, filters, name);
-      const f = await query<{ value: string | null; n: number }>(
-        `SELECT d.${col} AS value, count(*)::int AS n
-           FROM core.v_detail d WHERE ${w.sql}
-          GROUP BY 1 ORDER BY 2 DESC LIMIT 200`,
-        w.params,
-      );
-      const opts = f
-        .filter((x) => x.value !== null)
-        .map((x) => ({ value: x.value as string, count: x.n }));
-
-      // A value the reader has already selected must appear in the list even
-      // if this dataset no longer offers it — otherwise the only way to clear
-      // it is the "Clear filters" button, and the tick it came from is gone
-      // from the screen while still filtering the rows.
-      const chosen = (filters[name] as string[] | undefined) ?? [];
-      const present = new Set(opts.map((o) => o.value));
-      for (const v of chosen) {
-        if (!present.has(v)) opts.push({ value: v, count: 0 });
-      }
-      facets[name] = opts;
-    }
-  }
 
   return {
     datasetVersionId: versionId,

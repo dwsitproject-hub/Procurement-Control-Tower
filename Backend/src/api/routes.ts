@@ -677,11 +677,13 @@ export function buildRouter(): Router {
     // live path cannot affect the default dashboard.
     if (!isEmptyFilter(gf)) {
       const fpLive = sessionFingerprint(ctx.sid);
-      const liveAll = await memo(v.id, ['kpi', gf], () => computeLiveKpis(v.id, gf));
+      // Only the page's own KPIs are computed (24 Nov 2026), each cached on its
+      // own - see computeLiveKpis. The grouped builders return their whole
+      // group, so the result is still narrowed to what was asked.
+      const liveAll = await computeLiveKpis(v.id, gf, wanted);
       const live = wanted ? liveAll.filter((k) => wanted.has(k.kpiId)) : liveAll;
-      // Membership is tested against EVERY live KPI, not just the requested
-      // ones: a KPI that recomputes live must not be listed as unavailable
-      // merely because this page did not ask for it.
+      // A wanted KPI with no live computation is not in liveAll and is listed
+      // as unavailable below; one that recomputes live always is.
       const liveIds = new Set(liveAll.map((k) => k.kpiId));
 
       // The 18 original mart KPIs (cycle times, GR/IR share, expedite, WBS…)

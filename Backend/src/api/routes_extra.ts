@@ -87,6 +87,26 @@ function popupPlants(q: Record<string, unknown>): string[] {
   return String(q['popPlant'] ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '').slice(0, 300);
 }
 
+/**
+ * What a cached Coupa page depends on besides the dataset version (24 Nov 2026):
+ * the sync watermarks (every run moves them, so a sync always shows) and, for
+ * pages that convert currencies, the version's FX rates - the Data Hub upserts
+ * those without publishing a new version. Exclusion edits clear the cache
+ * outright (clearResultCache).
+ */
+async function coupaFingerprint(withFx: boolean): Promise<string> {
+  const r = await queryOne<{ wm: string | null; fx: string | null }>(
+    `SELECT (SELECT string_agg(object || '=' || COALESCE(last_updated_at::text, '') || '/'
+                               || COALESCE(last_run_at::text, ''), ';' ORDER BY object)
+               FROM ops.coupa_watermark) AS wm,
+            ${withFx
+    ? `(SELECT count(*)::text || ':' || COALESCE(sum(usd_per_unit), 0)::text FROM core.fx_rate
+                WHERE dataset_version_id = (SELECT current_version_id FROM core.dataset_pointer WHERE id = 1))`
+    : 'NULL'} AS fx`,
+  );
+  return `${r?.wm ?? ''}|${r?.fx ?? ''}`;
+}
+
 export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   const { role, requireScope, currentVersion, HttpProblem } = h;
 
@@ -1314,119 +1334,125 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                        WHERE vr.quote_request_id = e.id AND vr.vendor_type = $1)`;
     const rType = vtLabel === null ? '' : ' AND r.vendor_type = $1';
 
-    const [kpis] = await query<Record<string, unknown>>(
-      `SELECT count(*)::int AS events,
-              count(*) FILTER (WHERE e.state NOT IN ('complete','canceled','template','test_complete'))::int AS open_events,
-              count(*) FILTER (WHERE e.state = 'complete')::int AS completed,
-              percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (e.end_time - e.submit_time))/86400.0)
-                FILTER (WHERE e.submit_time IS NOT NULL AND e.end_time IS NOT NULL) AS median_cycle_days,
-              sum(e.planned_savings) FILTER (WHERE e.currency = 'IDR') AS planned_savings_idr,
-              count(*) FILTER (WHERE e.planned_savings IS NOT NULL AND e.currency <> 'IDR')::int AS savings_other_ccy
-         FROM ops.v_coupa_sourcing_event e WHERE e.state <> 'template'${evType}`,
-      p,
-    );
-    const [bids] = await query<Record<string, unknown>>(
-      `SELECT count(*)::int AS responses,
-              count(DISTINCT r.quote_request_id)::int AS events_with_bids,
-              count(DISTINCT r.supplier_name)::int AS suppliers,
-              round(count(*)::numeric / NULLIF(count(DISTINCT r.quote_request_id), 0), 1) AS avg_bids_per_event,
-              count(*) FILTER (WHERE r.awarded)::int AS awarded
-         FROM ops.v_coupa_supplier_response r WHERE r.state = 'submitted'${rType}`,
-      p,
-    );
-    /*
-     * The event pipeline (19 Nov 2026). It used to be one sentence of totals in
-     * an otherwise empty panel. Now: every event by the stage its Coupa state
-     * puts it in, in pipeline order, then the bid funnel. Templates and test
-     * events are not events anyone is running and stay out.
-     */
-    const pipeline = await query<{ stage: string; events: number; with_bids: number; awarded: number }>(
-      `WITH ev AS (
-         SELECT e.id,
-                CASE WHEN e.state IN ('new','draft') THEN 'draft'
-                     WHEN e.state = 'prod' THEN 'live'
-                     WHEN e.state = 'pause' THEN 'paused'
-                     WHEN e.state = 'closed_for_edit' THEN 'evaluation'
-                     WHEN e.state = 'complete' THEN 'complete'
-                     WHEN e.state = 'canceled' THEN 'canceled'
-                     ELSE 'other' END AS stage
+    // Cached until the Coupa data or the dataset version changes, and its
+    // queries run together (24 Nov 2026, performance pass): 2.5-3 s per visit
+    // before, every one re-checking the exclusions through the views.
+    const ver = await currentVersion();
+    const page = await memo(ver?.id ?? 0, ['coupa-sourcing', vt, await coupaFingerprint(false)], async () => {
+      const kpisQ = query<Record<string, unknown>>(
+        `SELECT count(*)::int AS events,
+                count(*) FILTER (WHERE e.state NOT IN ('complete','canceled','template','test_complete'))::int AS open_events,
+                count(*) FILTER (WHERE e.state = 'complete')::int AS completed,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (e.end_time - e.submit_time))/86400.0)
+                  FILTER (WHERE e.submit_time IS NOT NULL AND e.end_time IS NOT NULL) AS median_cycle_days,
+                sum(e.planned_savings) FILTER (WHERE e.currency = 'IDR') AS planned_savings_idr,
+                count(*) FILTER (WHERE e.planned_savings IS NOT NULL AND e.currency <> 'IDR')::int AS savings_other_ccy
+           FROM ops.v_coupa_sourcing_event e WHERE e.state <> 'template'${evType}`,
+        p,
+      );
+      const bidsQ = query<Record<string, unknown>>(
+        `SELECT count(*)::int AS responses,
+                count(DISTINCT r.quote_request_id)::int AS events_with_bids,
+                count(DISTINCT r.supplier_name)::int AS suppliers,
+                round(count(*)::numeric / NULLIF(count(DISTINCT r.quote_request_id), 0), 1) AS avg_bids_per_event,
+                count(*) FILTER (WHERE r.awarded)::int AS awarded
+           FROM ops.v_coupa_supplier_response r WHERE r.state = 'submitted'${rType}`,
+        p,
+      );
+      /*
+       * The event pipeline (19 Nov 2026). It used to be one sentence of totals in
+       * an otherwise empty panel. Now: every event by the stage its Coupa state
+       * puts it in, in pipeline order, then the bid funnel. Templates and test
+       * events are not events anyone is running and stay out.
+       */
+      const pipelineQ = query<{ stage: string; events: number; with_bids: number; awarded: number }>(
+        `WITH ev AS (
+           SELECT e.id,
+                  CASE WHEN e.state IN ('new','draft') THEN 'draft'
+                       WHEN e.state = 'prod' THEN 'live'
+                       WHEN e.state = 'pause' THEN 'paused'
+                       WHEN e.state = 'closed_for_edit' THEN 'evaluation'
+                       WHEN e.state = 'complete' THEN 'complete'
+                       WHEN e.state = 'canceled' THEN 'canceled'
+                       ELSE 'other' END AS stage
+             FROM ops.v_coupa_sourcing_event e
+            WHERE e.state NOT IN ('template','test_complete')${evType}
+         )
+         SELECT ev.stage, count(*)::int AS events,
+                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
+                                                WHERE r.quote_request_id = ev.id AND r.state = 'submitted'${rType}))::int AS with_bids,
+                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
+                                                WHERE r.quote_request_id = ev.id AND r.awarded${rType}))::int AS awarded
+           FROM ev GROUP BY 1`,
+        p,
+      );
+      const eventsByMonthQ = query(
+        `SELECT to_char(e.created_at,'YYYY-MM') AS mk, count(*)::int AS events,
+                count(*) FILTER (WHERE e.state = 'complete')::int AS completed
            FROM ops.v_coupa_sourcing_event e
-          WHERE e.state NOT IN ('template','test_complete')${evType}
-       )
-       SELECT ev.stage, count(*)::int AS events,
-              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
-                                              WHERE r.quote_request_id = ev.id AND r.state = 'submitted'${rType}))::int AS with_bids,
-              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ops.v_coupa_supplier_response r
-                                              WHERE r.quote_request_id = ev.id AND r.awarded${rType}))::int AS awarded
-         FROM ev GROUP BY 1`,
-      p,
-    );
-    const eventsByMonth = await query(
-      `SELECT to_char(e.created_at,'YYYY-MM') AS mk, count(*)::int AS events,
-              count(*) FILTER (WHERE e.state = 'complete')::int AS completed
-         FROM ops.v_coupa_sourcing_event e
-        WHERE e.state <> 'template' AND e.created_at IS NOT NULL${evType}
-        GROUP BY 1 ORDER BY 1`,
-      p,
-    );
-    // The response VIEW already keeps only bids whose event passes the exclusions,
-    // so the joins below use the event TABLE: joining the event view as well made
-    // Postgres re-check the exclusions per row - 20-26 s per query on 44k bids,
-    // 0.2 s this way, same rows (19 Nov 2026).
-    // Coupa's 'Spend by Commodity / Supplier and Event Type': awarded bid
-    // amounts, IDR documents only (strict - other currencies are counted, not
-    // converted, because the ops store has no per-line FX equivalents).
-    const byCommodity = await query(
-      `SELECT COALESCE(e.commodity,'(none)') AS commodity,
-              count(*)::int AS awarded_bids,
-              sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
-              count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
-         FROM ops.v_coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
-        WHERE r.awarded${rType}
-        GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
-      p,
-    );
-    const bySupplier = await query(
-      `SELECT r.supplier_name, max(r.vendor_type) AS vendor_type,
-              count(*)::int AS awarded_bids,
-              sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
-              count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
-         FROM ops.v_coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
-        WHERE r.awarded AND r.supplier_name IS NOT NULL${rType}
-        GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 12`,
-      p,
-    );
-    // Coupa's Sourcing Data Table (1012), response grain.
-    const dataTable = await query(
-      `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
-              e.commodity, left(e.description, 60) AS description, ${EVENT_PR_SQL('e', series)} AS pr_no,
-              r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
-              COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
-              (SELECT count(*) FROM ops.v_coupa_supplier_response r2
-                WHERE r2.quote_request_id = r.quote_request_id AND r2.state = 'submitted')::int AS bids_on_event
-         FROM ops.v_coupa_supplier_response r
-         JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
-        WHERE TRUE${rType}
-        ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
-        LIMIT 200`,
-      p,
-    );
-    const [typeCoverage] = await query<Record<string, unknown>>(
-      `SELECT count(*) FILTER (WHERE vendor_type = 'Local')::int AS local,
-              count(*) FILTER (WHERE vendor_type = 'Import')::int AS import,
-              count(*) FILTER (WHERE vendor_type IS NULL)::int AS unknown
-         FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
-    );
+          WHERE e.state <> 'template' AND e.created_at IS NOT NULL${evType}
+          GROUP BY 1 ORDER BY 1`,
+        p,
+      );
+      // The response VIEW already keeps only bids whose event passes the exclusions,
+      // so the joins below use the event TABLE: joining the event view as well made
+      // Postgres re-check the exclusions per row - 20-26 s per query on 44k bids,
+      // 0.2 s this way, same rows (19 Nov 2026).
+      // Coupa's 'Spend by Commodity / Supplier and Event Type': awarded bid
+      // amounts, IDR documents only (strict - other currencies are counted, not
+      // converted, because the ops store has no per-line FX equivalents).
+      const byCommodityQ = query(
+        `SELECT COALESCE(e.commodity,'(none)') AS commodity,
+                count(*)::int AS awarded_bids,
+                sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
+                count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
+           FROM ops.v_coupa_supplier_response r
+           JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+          WHERE r.awarded${rType}
+          GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 12`,
+        p,
+      );
+      const bySupplierQ = query(
+        `SELECT r.supplier_name, max(r.vendor_type) AS vendor_type,
+                count(*)::int AS awarded_bids,
+                sum(r.total_amount) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') = 'IDR') AS amount_idr,
+                count(*) FILTER (WHERE COALESCE(NULLIF(r.currency,''), e.currency, 'IDR') <> 'IDR')::int AS other_ccy
+           FROM ops.v_coupa_supplier_response r
+           JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+          WHERE r.awarded AND r.supplier_name IS NOT NULL${rType}
+          GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 12`,
+        p,
+      );
+      // Coupa's Sourcing Data Table (1012), response grain.
+      const dataTableQ = query(
+        `SELECT r.quote_request_id AS event_id, e.event_type, e.state AS event_state,
+                e.commodity, left(e.description, 60) AS description, ${EVENT_PR_SQL('e', series)} AS pr_no,
+                r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
+                COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
+                (SELECT count(*) FROM ops.v_coupa_supplier_response r2
+                  WHERE r2.quote_request_id = r.quote_request_id AND r2.state = 'submitted')::int AS bids_on_event
+           FROM ops.v_coupa_supplier_response r
+           JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+          WHERE TRUE${rType}
+          ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
+          LIMIT 200`,
+        p,
+      );
+      const typeCoverageQ = query<Record<string, unknown>>(
+        `SELECT count(*) FILTER (WHERE vendor_type = 'Local')::int AS local,
+                count(*) FILTER (WHERE vendor_type = 'Import')::int AS import,
+                count(*) FILTER (WHERE vendor_type IS NULL)::int AS unknown
+           FROM ops.v_coupa_supplier_response WHERE state = 'submitted'`,
+      );
+      const [[kpis], [bids], pipeline, eventsByMonth, byCommodity, bySupplier, dataTable, [typeCoverage]] =
+        await Promise.all([kpisQ, bidsQ, pipelineQ, eventsByMonthQ, byCommodityQ, bySupplierQ, dataTableQ, typeCoverageQ]);
+      return { kpis, bids, pipeline, eventsByMonth, byCommodity, bySupplier, dataTable, typeCoverage };
+    });
     const wm = await query(
       `SELECT object, last_updated_at, last_run_at, last_status FROM ops.coupa_watermark
         WHERE object IN ('quote_requests') ORDER BY object`,
     );
-    res.json({
-      configured: coupaConfigured(), vendorType: vt, kpis, bids, pipeline, eventsByMonth,
-      byCommodity, bySupplier, dataTable, typeCoverage, watermarks: wm,
-    });
+    res.json({ configured: coupaConfigured(), vendorType: vt, ...page, watermarks: wm });
   }));
 
   /*
@@ -1902,96 +1928,103 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
   }));
 
   r.get('/api/v1/coupa/invoices', role('analyst', async (_req, res) => {
-    const [kpis] = await query<Record<string, unknown>>(
-      `SELECT count(*)::int AS invoices,
-              count(*) FILTER (WHERE i.paid)::int AS paid_count,
-              count(*) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft'))::int AS open_count,
-              sum(${INV_USD('i')}) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft')) AS open_usd,
-              sum(${INV_IDR('i')}) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft')) AS open_idr,
-              sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
-              sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr,
-              sum(${INV_USD('i', 'tax_amount')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS tax_usd,
-              sum(${INV_IDR('i', 'tax_amount')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS tax_idr,
-              count(*) FILTER (WHERE i.status NOT IN ('voided','draft') AND i.gross_total IS NOT NULL
-                                 AND ${INV_USD('i')} IS NULL)::int AS unrated,
-              count(DISTINCT i.currency)::int AS currencies,
-              avg((i.payment_date::date - i.invoice_date)::numeric)
-                FILTER (WHERE i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL) AS avg_days_to_pay
-         FROM ops.v_coupa_invoice i`,
-    );
-    const [pay] = await query<Record<string, unknown>>(
-      `SELECT count(*)::int AS payments,
-              sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr,
-              count(*) FILTER (WHERE p.sap_payment_doc IS NOT NULL)::int AS with_sap_doc
-         FROM ops.coupa_payment p
-         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id`,
-    );
-    const invoicesByMonth = await query(
-      `SELECT to_char(i.invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
-              count(*) FILTER (WHERE i.paid)::int AS paid,
-              sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
-              sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr
-         FROM ops.v_coupa_invoice i WHERE i.invoice_date IS NOT NULL
-        GROUP BY 1 ORDER BY 1`,
-    );
-    const paymentsByMonth = await query(
-      `SELECT to_char(p.payment_date,'YYYY-MM') AS mk, count(*)::int AS payments,
-              sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr
-         FROM ops.coupa_payment p
-         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
-        WHERE p.payment_date IS NOT NULL
-        GROUP BY 1 ORDER BY 1`,
-    );
-    const statusMix = await query(
-      `SELECT status, count(*)::int AS n FROM ops.v_coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
-    );
-    // Open payables by days past due (23 Nov 2026); each bucket opens its invoices.
-    const agingRows = await query<{ bucket: string; invoices: number; gross_usd: number | null; gross_idr: number | null; unrated: number }>(
-      `SELECT ${BUCKET_SQL('i')} AS bucket, count(*)::int AS invoices,
-              sum(${INV_USD('i')}) AS gross_usd, sum(${INV_IDR('i')}) AS gross_idr,
-              count(*) FILTER (WHERE i.gross_total IS NOT NULL AND ${INV_USD('i')} IS NULL)::int AS unrated
-         FROM ops.v_coupa_invoice i
-        WHERE NOT i.paid AND i.status NOT IN ('voided','draft')
-        GROUP BY 1`,
-    );
-    const aging = AGING_BUCKETS
-      .map((b) => agingRows.find((r2) => r2.bucket === b) ?? { bucket: b, invoices: 0, gross_usd: null, gross_idr: null, unrated: 0 })
-      .filter((r2) => r2.invoices > 0);
-    const topSuppliers = await query(
-      `SELECT i.supplier_name, count(*)::int AS invoices,
-              sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
-              sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr,
-              count(*) FILTER (WHERE i.paid)::int AS paid,
-              count(*) FILTER (WHERE i.status NOT IN ('voided','draft') AND i.gross_total IS NOT NULL
-                                 AND ${INV_USD('i')} IS NULL)::int AS unrated
-         FROM ops.v_coupa_invoice i
-        WHERE i.supplier_name IS NOT NULL
-        GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 12`,
-    );
-    const recentInvoices = await query(
-      `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
-              i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
-              ${INV_USD('i')} AS gross_usd, ${INV_IDR('i')} AS gross_idr,
-              ${INV_PO_SQL('i')}, ${AGING_COLS('i')},
-              (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
-         FROM ops.v_coupa_invoice i
-        ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
-    );
-    const recentPayments = await query(
-      `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc, ${PAY_USD} AS amount_usd, ${PAY_IDR} AS amount_idr,
-              i.id AS invoice_id, i.invoice_number, i.supplier_name, i.currency, ${INV_PO_SQL('i')}
-         FROM ops.coupa_payment p
-         JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
-        ORDER BY p.payment_date DESC NULLS LAST LIMIT 50`,
-    );
+    // Cached until the Coupa data, the FX rates or the dataset version change,
+    // and its queries run together (24 Nov 2026, performance pass): 5-6 s per
+    // visit before - every query re-reads the invoice view and its exclusions,
+    // and every amount looks up its month's rate.
+    const ver = await currentVersion();
+    const page = await memo(ver?.id ?? 0, ['coupa-invoices', await coupaFingerprint(true)], async () => {
+      const kpisQ = query<Record<string, unknown>>(
+        `SELECT count(*)::int AS invoices,
+                count(*) FILTER (WHERE i.paid)::int AS paid_count,
+                count(*) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft'))::int AS open_count,
+                sum(${INV_USD('i')}) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft')) AS open_usd,
+                sum(${INV_IDR('i')}) FILTER (WHERE NOT i.paid AND i.status NOT IN ('voided','draft')) AS open_idr,
+                sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
+                sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr,
+                sum(${INV_USD('i', 'tax_amount')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS tax_usd,
+                sum(${INV_IDR('i', 'tax_amount')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS tax_idr,
+                count(*) FILTER (WHERE i.status NOT IN ('voided','draft') AND i.gross_total IS NOT NULL
+                                   AND ${INV_USD('i')} IS NULL)::int AS unrated,
+                count(DISTINCT i.currency)::int AS currencies,
+                avg((i.payment_date::date - i.invoice_date)::numeric)
+                  FILTER (WHERE i.paid AND i.payment_date IS NOT NULL AND i.invoice_date IS NOT NULL) AS avg_days_to_pay
+           FROM ops.v_coupa_invoice i`,
+      );
+      const payQ = query<Record<string, unknown>>(
+        `SELECT count(*)::int AS payments,
+                sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr,
+                count(*) FILTER (WHERE p.sap_payment_doc IS NOT NULL)::int AS with_sap_doc
+           FROM ops.coupa_payment p
+           JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id`,
+      );
+      const invoicesByMonthQ = query(
+        `SELECT to_char(i.invoice_date,'YYYY-MM') AS mk, count(*)::int AS invoices,
+                count(*) FILTER (WHERE i.paid)::int AS paid,
+                sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
+                sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr
+           FROM ops.v_coupa_invoice i WHERE i.invoice_date IS NOT NULL
+          GROUP BY 1 ORDER BY 1`,
+      );
+      const paymentsByMonthQ = query(
+        `SELECT to_char(p.payment_date,'YYYY-MM') AS mk, count(*)::int AS payments,
+                sum(${PAY_USD}) AS paid_usd, sum(${PAY_IDR}) AS paid_idr
+           FROM ops.coupa_payment p
+           JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
+          WHERE p.payment_date IS NOT NULL
+          GROUP BY 1 ORDER BY 1`,
+      );
+      const statusMixQ = query(
+        `SELECT status, count(*)::int AS n FROM ops.v_coupa_invoice GROUP BY 1 ORDER BY 2 DESC`,
+      );
+      // Open payables by days past due (23 Nov 2026); each bucket opens its invoices.
+      const agingRowsQ = query<{ bucket: string; invoices: number; gross_usd: number | null; gross_idr: number | null; unrated: number }>(
+        `SELECT ${BUCKET_SQL('i')} AS bucket, count(*)::int AS invoices,
+                sum(${INV_USD('i')}) AS gross_usd, sum(${INV_IDR('i')}) AS gross_idr,
+                count(*) FILTER (WHERE i.gross_total IS NOT NULL AND ${INV_USD('i')} IS NULL)::int AS unrated
+           FROM ops.v_coupa_invoice i
+          WHERE NOT i.paid AND i.status NOT IN ('voided','draft')
+          GROUP BY 1`,
+      );
+      const topSuppliersQ = query(
+        `SELECT i.supplier_name, count(*)::int AS invoices,
+                sum(${INV_USD('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_usd,
+                sum(${INV_IDR('i')}) FILTER (WHERE i.status NOT IN ('voided','draft')) AS gross_idr,
+                count(*) FILTER (WHERE i.paid)::int AS paid,
+                count(*) FILTER (WHERE i.status NOT IN ('voided','draft') AND i.gross_total IS NOT NULL
+                                   AND ${INV_USD('i')} IS NULL)::int AS unrated
+           FROM ops.v_coupa_invoice i
+          WHERE i.supplier_name IS NOT NULL
+          GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 12`,
+      );
+      const recentInvoicesQ = query(
+        `SELECT i.id, i.invoice_number, i.invoice_date, i.status, i.paid, i.payment_date,
+                i.gross_total, i.tax_amount, i.currency, i.supplier_name, i.payment_term,
+                ${INV_USD('i')} AS gross_usd, ${INV_IDR('i')} AS gross_idr,
+                ${INV_PO_SQL('i')}, ${AGING_COLS('i')},
+                (SELECT count(*) FROM ops.v_coupa_invoice_line l WHERE l.invoice_id = i.id)::int AS lines
+           FROM ops.v_coupa_invoice i
+          ORDER BY i.invoice_date DESC NULLS LAST, i.id DESC LIMIT 50`,
+      );
+      const recentPaymentsQ = query(
+        `SELECT p.payment_date, p.amount_paid, p.sap_payment_doc, ${PAY_USD} AS amount_usd, ${PAY_IDR} AS amount_idr,
+                i.id AS invoice_id, i.invoice_number, i.supplier_name, i.currency, ${INV_PO_SQL('i')}
+           FROM ops.coupa_payment p
+           JOIN ops.v_coupa_invoice i ON i.id = p.invoice_id
+          ORDER BY p.payment_date DESC NULLS LAST LIMIT 50`,
+      );
+      const [[kpis], [pay], invoicesByMonth, paymentsByMonth, statusMix, agingRows, topSuppliers, recentInvoices, recentPayments] =
+        await Promise.all([kpisQ, payQ, invoicesByMonthQ, paymentsByMonthQ, statusMixQ, agingRowsQ, topSuppliersQ, recentInvoicesQ, recentPaymentsQ]);
+      const aging = AGING_BUCKETS
+        .map((b) => agingRows.find((r2) => r2.bucket === b) ?? { bucket: b, invoices: 0, gross_usd: null, gross_idr: null, unrated: 0 })
+        .filter((r2) => r2.invoices > 0);
+      return { kpis, pay, invoicesByMonth, paymentsByMonth, statusMix, aging, topSuppliers, recentInvoices, recentPayments };
+    });
     const wm = await query(
       `SELECT object, last_updated_at, last_run_at, last_status FROM ops.coupa_watermark
         WHERE object IN ('invoices') ORDER BY object`,
     );
-    res.json({
-      configured: coupaConfigured(), kpis, pay, invoicesByMonth, paymentsByMonth,
-      statusMix, aging, topSuppliers, recentInvoices, recentPayments, watermarks: wm,
-    });
+    res.json({ configured: coupaConfigured(), ...page, watermarks: wm });
   }));
 
   r.get('/api/v1/coupa/summary', role('analyst', async (_req, res) => {

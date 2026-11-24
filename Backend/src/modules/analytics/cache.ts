@@ -17,7 +17,9 @@
  *  - Hits return a deep copy, so a caller can never alter the cached value.
  */
 
-const MAX_ENTRIES = 600;
+// 24 Nov 2026: KPIs are cached one per entry (~65 per filter, each small), so
+// the bound grew with them; a few thousand small entries is a few MB.
+const MAX_ENTRIES = 4000;
 const store = new Map<string, Promise<unknown>>();
 let newestVersion = -1;
 let generation = 0;

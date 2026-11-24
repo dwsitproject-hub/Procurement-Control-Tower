@@ -1008,6 +1008,16 @@ const PR_FLOW_BASE = `WITH pr AS (
   )`;
 
 /**
+ * Charts whose series all begin with one shared base (24 Nov 2026). Under a
+ * filter the live path runs the base ONCE and every series' final SELECT
+ * against it in a single statement (live.ts), instead of re-reading the
+ * requisitions and their first PO month once per series: the PR flow chart's
+ * ten series took up to 4 s that way. Each series must be the base followed by
+ * a SELECT ordered by its bucket_key.
+ */
+export const SHARED_BASE_SQL: Readonly<Record<string, string>> = { pr_by_month: PR_FLOW_BASE };
+
+/**
  * One series of the flow chart: the spine, its phase, and its own drill. `band`
  * narrows the brought-forward stock to one age band (below).
  */

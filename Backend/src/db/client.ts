@@ -27,6 +27,21 @@ export const pool = new pg.Pool({
   connectionTimeoutMillis: 10_000,
 });
 
+/*
+ * JIT off for every session (24 Nov 2026, performance pass).
+ *
+ * The analytic queries here - a drill over 40k PR items with a correlated
+ * lookup per row, a live chart under a filter - cost above Postgres's
+ * jit_above_cost, so it compiled each one with LLVM before running it: 3.3 s of
+ * compile for a 0.4 s query (PR flow drill, measured locally on PG 16). The
+ * plans are re-made per request (parameters, filters), so the compile was paid
+ * every time. Set per connection, it needs no database or server setting and
+ * applies on ApsaraDB the same as locally. A failure only loses the speed-up.
+ */
+pool.on('connect', (client) => {
+  client.query('SET jit = off').catch(() => undefined);
+});
+
 export type Row = Record<string, unknown>;
 
 export async function query<T extends Row = Row>(sql: string, params: unknown[] = []): Promise<T[]> {

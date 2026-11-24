@@ -67,7 +67,8 @@ async function warmOnce(log: (m: string) => void): Promise<void> {
       }
     };
     await step(['filters'], () => globalFilterOptions(id));
-    await step(['kpi', gf], () => computeLiveKpis(id, gf));
+    // Every KPI, each into its own cache entry (computeLiveKpis memoises per id).
+    await step(['kpi-warm', gf], async () => { await computeLiveKpis(id, gf); return null; });
     for (const c of CHART_META) {
       if (liveChartAvailable(c.chartId)) {
         await step(['chart', c.chartId, gf], () => computeLiveChartSeries(id, c.chartId, gf));

@@ -751,6 +751,32 @@ What changed for users:
   change. Its figures are still computed, and those used elsewhere (Retro POs on Approvals, the
   Executive Summary cards) are unchanged.
 
+### 10p. Production rollout of 10h–10o together (24 Nov 2026, `acd62eb`)
+
+`main` is fast-forwarded to `sit2` at `acd62eb`. One migration, **049** (`app.ui_layout`, the shared page
+layouts). It only creates a table in schema `app`, where 039 already created `app.ui_label` on production,
+so the `pct` account can create there. Check it read-only from the running API before the update:
+
+**PuTTY on 172.28.80.51 (BE):**
+
+```bash
+docker exec pct-api node -e 'const {Client}=require("pg");const c=new Client({connectionString:process.env.DATABASE_URL});c.connect().then(()=>c.query("select current_user as me, has_schema_privilege($1,$2) as can_create, to_regclass($3) as already",["app","CREATE","app.ui_layout"])).then(r=>{console.table(r.rows);return c.end()}).catch(e=>{console.error(e.message);process.exit(1)})'
+```
+
+Expect `me` = `pct`, `can_create` = `true`, `already` = `null`. If `can_create` is false, stop: the
+privileged account must `GRANT CREATE ON SCHEMA app TO pct` in DMS first.
+
+Then the usual §10 steps 2-4 (BE, then FE). No new environment variables, and no files under
+`deploy/production/` changed.
+
+After the update:
+- **Rebuild** once (Admin → SAP Data Sync → Rebuild). 10h, 10k, 10l and 10o store their drills and
+  the new Approvals chart in the mart.
+- **Page layouts** (10j): every user now sees one shared layout per page, which only an Admin arranges.
+  Layouts users arranged for themselves are no longer read (they are kept, not deleted). Until an
+  Admin arranges a page, it shows the built-in layout.
+- The Governance page is gone from the menu (10o).
+
 ## 11. Rollback
 
 **On the affected server:**

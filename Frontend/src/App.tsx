@@ -907,8 +907,8 @@ export default function App() {
                   .filter((f) => (TAB_FINDINGS[tab] ?? []).includes(f.ruleId))
                   .filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT')
                   .slice(0, 3)
-                  .map((f) => (
-                    <p key={f.ruleId} className="anomaly">
+                  .map((f, i) => (
+                    <p key={`${f.ruleId}-${i}`} className="anomaly">
                       <span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.message}
                     </p>
                   ))}
@@ -1427,8 +1427,8 @@ function DataCheck({ versionId }: { versionId: number }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {group.map((f) => (
-                    <tr key={f.ruleId}>
+                  {group.map((f, i) => (
+                    <tr key={`${f.ruleId}-${i}`}>
                       <td><code>{f.ruleId}</code></td>
                       <td>{f.feed ?? '—'}</td>
                       <td className="num">

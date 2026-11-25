@@ -25,7 +25,9 @@ export const COUPA_OBJECTS = [
   'purchase_orders',
   'receiving_transactions',
   'invoices',
-  'exchange_rates',
+  // 'exchange_rates' left on 23 Oct 2026: exchange rates now come from Data Hub
+  // (modules/dhm/fx.ts, 040). ops.coupa_exchange_rate keeps what was synced,
+  // and Coupa's rows in ops.fx_rate_source stay until a DHM rate covers them.
   // Supplier master (payload doc §1.8) — master data rather than transactions,
   // so it is small and changes rarely, but it carries the PO email address that
   // Vendor 360 shows.
@@ -141,23 +143,7 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
   const nestedCounts = await mapLimit(eventsWithResponses, 6, async (r) => {
     try {
       const responses = arr(await coupaGet(`/api/quote_requests/${Number(r['id'])}/quote_responses`));
-      return await upsert(
-        'ops.coupa_supplier_response',
-        ['id','quote_request_id','supplier_name','submitted_at','state','awarded','total_amount','currency','line_count','updated_at'],
-        responses.map((resp) => {
-          const lines = arr(resp['lines']);
-          const total = lines.reduce((acc, l) => acc + (n(l['price-amount']) ?? 0) * (n(l['quantity']) ?? 0), 0);
-          return [
-            Number(resp['id']), Number(resp['quote-request-id'] ?? r['id']),
-            s(obj(resp['quote-supplier'])['name']),
-            s(resp['submitted-at']), s(resp['state']), b(resp['awarded']),
-            lines.length > 0 ? total : null,
-            s(obj(arr(resp['lines'])[0]?.['price-currency'])['code']),
-            lines.length, s(resp['updated-at']),
-          ];
-        }),
-        'id',
-      );
+      return await storeQuoteResponses(Number(r['id']), responses);
     } catch {
       // A single event's responses failing must not sink the whole sync;
       // the raw event row is already stored and the next run retries.
@@ -165,6 +151,77 @@ async function projectQuoteRequests(rows: Row[]): Promise<number> {
     }
   });
   count += nestedCounts.reduce((a, x) => a + x, 0);
+  return count;
+}
+
+/**
+ * Store one event's supplier responses AND their lines (19 Nov 2026).
+ *
+ * The lines - price, quantity, lead time, the item the supplier offered,
+ * shipping term - are what the Sourcing page's comparison shows. They used to
+ * be summed into total_amount and dropped. Exported because the comparison
+ * fetches an event on demand when its lines predate this change, and the two
+ * paths must store the same thing.
+ */
+export async function storeQuoteResponses(eventId: number, responses: Row[]): Promise<number> {
+  const now = new Date().toISOString();
+  const count = await upsert(
+    'ops.coupa_supplier_response',
+    ['id','quote_request_id','supplier_name','submitted_at','state','awarded','total_amount','currency',
+     'line_count','updated_at','supplier_email','comments','lines_fetched_at'],
+    responses.map((resp) => {
+      const lines = arr(resp['lines']);
+      const total = lines.reduce((acc, l) => acc + (n(l['price-amount']) ?? 0) * (n(l['quantity']) ?? 0), 0);
+      const supplier = obj(resp['quote-supplier']);
+      return [
+        Number(resp['id']), Number(resp['quote-request-id'] ?? eventId),
+        s(supplier['name']),
+        s(resp['submitted-at']), s(resp['state']), b(resp['awarded']),
+        lines.length > 0 ? total : null,
+        s(obj(arr(resp['lines'])[0]?.['price-currency'])['code']),
+        lines.length, s(resp['updated-at']),
+        s(supplier['email']), typeof resp['comments'] === 'string' ? s(resp['comments']) : null, now,
+      ];
+    }),
+    'id',
+  );
+  const lineRows: unknown[][] = [];
+  for (const resp of responses) {
+    for (const l of arr(resp['lines'])) {
+      const lead = n(l['lead-time']);
+      lineRows.push([
+        Number(l['id']), Number(resp['id']), Number(resp['quote-request-id'] ?? eventId),
+        n(l['quote-request-line-id']),
+        n(l['price-amount']), n(l['adjusted-price-amount']),
+        s(obj(l['price-currency'])['code']),
+        n(l['quantity']), b(l['awarded']), n(l['line-awarded-allocation-quantity']),
+        lead === null ? null : Math.round(lead),
+        s(l['supplier-item-name']), s(l['item-description']), s(l['item-part-number']),
+        s(obj(l['shipping-term'])['code']),
+        arr(l['attachments']).length,
+        s(l['updated-at']),
+      ]);
+    }
+  }
+  // Chunked: an event with many suppliers and lines can exceed the bind limit.
+  for (let i = 0; i < lineRows.length; i += 400) {
+    await upsert(
+      'ops.coupa_quote_response_line',
+      ['id','response_id','quote_request_id','request_line_id','price','adjusted_price','currency',
+       'quantity','awarded','awarded_quantity','lead_time_days','supplier_item_name','item_description',
+       'part_number','shipping_term','attachment_count','updated_at'],
+      lineRows.slice(i, i + 400),
+      'id',
+    );
+  }
+  // The supplier's SAP vendor type (Local / Import), resolved through the
+  // supplier master the moment the response lands (046).
+  await query(
+    `UPDATE ops.coupa_supplier_response
+        SET vendor_type = ops.coupa_vendor_type(supplier_name, supplier_email)
+      WHERE quote_request_id = $1`,
+    [eventId],
+  );
   return count;
 }
 
@@ -314,46 +371,8 @@ const PROJECT: Record<CoupaObject, (rows: Row[]) => Promise<number>> = {
   purchase_orders: projectPurchaseOrders,
   receiving_transactions: projectReceipts,
   invoices: projectInvoices,
-  exchange_rates: projectExchangeRates,
   suppliers: projectSuppliers,
 };
-
-async function projectExchangeRates(rows: Row[]): Promise<number> {
-  const n2 = await upsert(
-    'ops.coupa_exchange_rate',
-    ['id', 'rate', 'rate_date', 'from_currency', 'to_currency', 'created_at', 'updated_at'],
-    rows
-      .filter((r) => s(obj(r['from-currency'])['code']) !== null && s(obj(r['to-currency'])['code']) !== null)
-      .map((r) => [
-        Number(r['id']), n(r['rate']), d(r['rate-date']),
-        s(obj(r['from-currency'])['code']), s(obj(r['to-currency'])['code']),
-        s(r['created-at']), s(r['updated-at']),
-      ]),
-    'id',
-  );
-  // Refresh the shared FX pair store (010): month-latest Coupa rate per pair,
-  // taking a slot only when more recently updated than what sits there.
-  await query(
-    `INSERT INTO ops.fx_rate_source
-       (from_currency, to_currency, period_year, period_month, rate, source, source_updated_at)
-     SELECT DISTINCT ON (upper(btrim(from_currency)), upper(btrim(to_currency)),
-                         date_part('year', rate_date)::int, date_part('month', rate_date)::int)
-            upper(btrim(from_currency)), upper(btrim(to_currency)),
-            date_part('year', rate_date)::int, date_part('month', rate_date)::smallint,
-            rate, 'coupa', updated_at
-       FROM ops.coupa_exchange_rate
-      WHERE rate_date IS NOT NULL AND rate > 0
-      ORDER BY upper(btrim(from_currency)), upper(btrim(to_currency)),
-               date_part('year', rate_date)::int, date_part('month', rate_date)::int,
-               rate_date DESC, updated_at DESC NULLS LAST
-     ON CONFLICT (from_currency, to_currency, period_year, period_month)
-     DO UPDATE SET rate = EXCLUDED.rate, source = 'coupa',
-                   source_updated_at = EXCLUDED.source_updated_at, updated_at = now()
-      WHERE fx_rate_source.source_updated_at IS NULL
-         OR EXCLUDED.source_updated_at > fx_rate_source.source_updated_at`,
-  );
-  return n2;
-}
 
 /**
  * Bounded-concurrency map. The nested quote-responses fetch is one HTTPS round

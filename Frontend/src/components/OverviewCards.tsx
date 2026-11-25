@@ -1,5 +1,6 @@
 import type { Kpi } from '../lib/api';
 import { DASH, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
 
 /**
  * v1's wide Overview cards: value + label on the left, a right-hand column of
@@ -39,7 +40,7 @@ export function OverviewCard({
     <>
       <div className="ovc-main">
         <div className="v">{kpi.value === null ? DASH : formatNumber(Number(kpi.value))}</div>
-        <div className="l">{kpi.title}</div>
+        <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
         {kpi.sampleSize !== null && <div className="s">n = {formatNumber(kpi.sampleSize)}</div>}
       </div>
       <div className="ovc-rows" title="Quantity compare raw-sums across units of measure — indicative only">

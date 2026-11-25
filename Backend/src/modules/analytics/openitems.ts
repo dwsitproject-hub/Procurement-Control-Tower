@@ -45,7 +45,7 @@ import {
 import {
   AGE_BANDS, AGE_LATE_DAYS, ageBandPredicateSql, ageLatePredicateSql,
 } from '@pct/rules';
-import { MONEY_STATE_SQL } from './detail.js';
+import { MONEY_STATE_SQL, PAID_STATE_SQL } from './detail.js';
 import { OPEN_STATUSES, type GlobalFilter } from './globalfilter.js';
 
 /** The age boundary this page reads "past SLA" at. See the header. */
@@ -201,7 +201,7 @@ export interface OpenItemsSummary {
    */
   categoryFilter: {
     applied: CategorySectionFilter;
-    options: Record<keyof CategorySectionFilter, { value: string; count: number }[]>;
+    options: Record<keyof CategorySectionFilter, { value: string; count: number; label?: string }[]>;
   };
   money: MoneyCards;
   totalOpen: number;
@@ -288,6 +288,7 @@ function detailFilterClause(
   // 030 put spend_category on the view, so this one IS applied now.
   add('d.spend_category', f.spendCategory);
   if ((f.sizeBand?.length ?? 0) > 0) ignored.push('PO size band');
+  if ((f.managedBy?.length ?? 0) > 0) ignored.push('HO/Site');
   // Both mean "delivered vs not", and every stage this page counts is already
   // not delivered: honouring them would either change nothing or empty the
   // page, and neither is what the reader asked for.
@@ -348,16 +349,28 @@ export interface CategorySectionFilter {
   plant: string[];
   prType: string[];
   poType: string[];
+  /**
+   * The cards of "Where the backlog sits" (19 Oct 2026): an open stage's
+   * STATUS ('Unapproved PR'...) or one of the two after-delivery states
+   * ('deliveredNotInvoiced', 'invoicedNotPaid'). Empty = the open stages, as
+   * the table has always counted.
+   */
+  stage: string[];
 }
 
-const SECTION_COL: Record<keyof CategorySectionFilter, string> = {
+/** The two after-delivery cards, which are states rather than statuses. */
+const MONEY_STAGES = ['deliveredNotInvoiced', 'invoicedNotPaid'] as const;
+
+type ColumnFilter = Exclude<keyof CategorySectionFilter, 'stage'>;
+
+const SECTION_COL: Record<ColumnFilter, string> = {
   plant: 'd.plant',
   prType: 'd.pr_doc_type',
   poType: 'd.po_doc_type',
 };
 
 /** The Detail Table parameter each section filter maps to (detail.ts). */
-const SECTION_DETAIL_PARAM: Record<keyof CategorySectionFilter, string> = {
+const SECTION_DETAIL_PARAM: Record<ColumnFilter, string> = {
   plant: 'plant',
   prType: 'prDocType',
   poType: 'poDocType',
@@ -368,7 +381,7 @@ export async function openItemsSummary(
   asOfDate: string,
   scope: readonly ScopeEntry[],
   filter: GlobalFilter,
-  section: CategorySectionFilter = { plant: [], prType: [], poType: [] },
+  section: CategorySectionFilter = { plant: [], prType: [], poType: [], stage: [] },
 ): Promise<OpenItemsSummary> {
   const w = buildWhere(versionId, scope, filter);
 
@@ -403,6 +416,46 @@ export async function openItemsSummary(
     };
   });
 
+  /*
+   * "PO not delivered" as two cards (19 Nov 2026): ordered and not received,
+   * split by whether the PO has a payment - a Coupa payment, or since 25 Nov
+   * 2026 an SAP down payment (the "DP All" export, 051). Before the SAP file
+   * the split was structurally near zero: Coupa holds almost no DPs.
+   * The two cards add up to the one they replace, so every total on the page
+   * (and the category table's Stage filter, which keeps the one status) is
+   * unchanged.
+   */
+  const splitRows = await query<Record<string, unknown>>(
+    `SELECT (${PAID_STATE_SQL['paid']}) AS k, ${MEASURES}, count(DISTINCT d.po_no)::int AS pos
+       FROM core.v_detail d WHERE ${w.sql} AND d.status = 'PO-No GR' GROUP BY 1`,
+    w.params,
+  );
+  const cardStages: StageRow[] = stages.flatMap((st) => {
+    if (st.detailFilter['status'] !== 'PO-No GR') return [st];
+    return [false, true].map((paid) => {
+      const r = splitRows.find((x) => Boolean(x['k']) === paid);
+      const n = (k: string): number => Number(r?.[k] ?? 0);
+      return {
+        ...st,
+        key: paid ? 'po_not_delivered_paid' : 'po_not_delivered_no_dp',
+        name: paid ? 'PO not delivered — paid / DP' : 'PO not delivered — no DP',
+        sub: `${n('pos').toLocaleString('en-GB')} POs · `
+          + (paid ? 'SAP down payment or Coupa payment, no goods receipt'
+            : 'no SAP down payment or Coupa payment, no goods receipt'),
+        count: n('n'),
+        bands: AGE_BANDS.map((_b, i) => n(`b${i}`)),
+        pastSla: n('past_sla'),
+        overLate: n('over_late'),
+        oldest: r && r['oldest'] !== null && r['oldest'] !== undefined ? Number(r['oldest']) : null,
+        emergency: n('emergency'),
+        urgent: n('urgent'),
+        standard: n('standard'),
+        prioUnset: n('prio_unset'),
+        detailFilter: { status: 'PO-No GR', paidState: paid ? 'paid' : 'unpaid' },
+      };
+    });
+  });
+
   // ── material categories ──────────────────────────────────────────────
   //
   // Purchasing group until 22 Sep 2026, changed on request. It is what a buyer
@@ -419,7 +472,7 @@ export async function openItemsSummary(
   const dw = buildWhere(versionId, scope, filter);
   // The options are counted before the section's own filters are added.
   const sectionOptions = {} as OpenItemsSummary['categoryFilter']['options'];
-  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+  for (const k of Object.keys(SECTION_COL) as ColumnFilter[]) {
     sectionOptions[k] = (await query<{ value: string; n: number }>(
       `SELECT ${SECTION_COL[k]} AS value, count(*)::int AS n
          FROM core.v_detail d WHERE ${dw.sql} AND ${SECTION_COL[k]} IS NOT NULL
@@ -427,9 +480,25 @@ export async function openItemsSummary(
       dw.params,
     )).map((x) => ({ value: x.value, count: x.n }));
   }
-  const catParams = [...dw.params];
-  let catSql = dw.sql;
-  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+  // Stages: chosen cards replace the default "every open stage". The two
+  // after-delivery cards count DELIVERED lines, so the base then widens to the
+  // page's whole population and the cards themselves select the rows.
+  const stageStatuses = section.stage.filter((x) => OPEN_STAGES.some((s2) => s2.status === x));
+  const stageMoney = section.stage.filter((x) => (MONEY_STAGES as readonly string[]).includes(x));
+  const stageOn = stageStatuses.length + stageMoney.length > 0;
+  const cw = stageOn ? buildWhere(versionId, scope, filter, false) : dw;
+  const catParams = [...cw.params];
+  let catSql = cw.sql;
+  if (stageOn) {
+    const ors: string[] = [];
+    if (stageStatuses.length > 0) {
+      catParams.push(stageStatuses);
+      ors.push(`d.status = ANY($${catParams.length})`);
+    }
+    for (const m of stageMoney) ors.push(`(${MONEY_STATE_SQL[m]})`);
+    catSql += ` AND (${ors.join(' OR ')})`;
+  }
+  for (const k of Object.keys(SECTION_COL) as ColumnFilter[]) {
     if (section[k].length === 0) continue;
     catParams.push(section[k]);
     catSql += ` AND ${SECTION_COL[k]} = ANY($${catParams.length})`;
@@ -447,9 +516,14 @@ export async function openItemsSummary(
   // Carried into every click from the table, so the rows opened are the rows
   // the table counted.
   const sectionDetail: Record<string, string> = {};
-  for (const k of Object.keys(SECTION_COL) as (keyof CategorySectionFilter)[]) {
+  for (const k of Object.keys(SECTION_COL) as ColumnFilter[]) {
     if (section[k].length > 0) sectionDetail[SECTION_DETAIL_PARAM[k]] = section[k].join(',');
   }
+  // With stages chosen, a click opens THOSE stages' rows: the Detail Table's
+  // oiStage filter reads the same values with the same OR.
+  const stageDetail: Record<string, string> = stageOn
+    ? { oiStage: [...stageStatuses, ...stageMoney].join(',') }
+    : { status: ALL_STAGE_STATUSES };
 
   // ── after delivery: money still in flight ────────────────────────────
   //
@@ -555,7 +629,7 @@ export async function openItemsSummary(
     pastSlaDays: PAST_SLA_DAYS,
     lateDays: AGE_LATE_DAYS,
     bands: AGE_BANDS.map((b) => ({ key: b.key, label: b.label })),
-    stages,
+    stages: cardStages,
     categories: categories.map((r) => ({
       desk: String(r['desk']),
       label: String(r['label']),
@@ -567,9 +641,22 @@ export async function openItemsSummary(
       // with no material category is reported and left unclickable.
       detailFilter: (r['desk'] === '(none)'
         ? {}
-        : { status: ALL_STAGE_STATUSES, spendCategory: String(r['desk']), ...sectionDetail }) as Record<string, string>,
+        : { ...stageDetail, spendCategory: String(r['desk']), ...sectionDetail }) as Record<string, string>,
     })),
-    categoryFilter: { applied: section, options: sectionOptions },
+    categoryFilter: {
+      applied: section,
+      options: {
+        ...sectionOptions,
+        // The eight cards, in their order on the page, with the card's count.
+        stage: [
+          ...stages.map((s2) => ({ value: s2.detailFilter['status']!, label: s2.name, count: s2.count })),
+          { value: 'deliveredNotInvoiced', label: moneyCard('deliveredNotInvoiced').name,
+            count: moneyCard('deliveredNotInvoiced').count },
+          { value: 'invoicedNotPaid', label: moneyCard('invoicedNotPaid').name,
+            count: moneyCard('invoicedNotPaid').count },
+        ],
+      },
+    },
     money: {
       deliveredNotInvoiced: moneyCard('deliveredNotInvoiced'),
       invoicedNotPaid: moneyCard('invoicedNotPaid'),

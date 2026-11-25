@@ -11,25 +11,24 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "ingest": "tsx src/cli/ingest.ts",
-    "sweep": "tsx src/cli/sweep.ts",
-    "test:golden": "tsx src/cli/golden.ts"
+    "sweep": "tsx src/cli/sweep.ts"
   },
   "dependencies": {
     "@pct/contracts": "*",
     "@pct/rules": "*",
     "argon2": "0.41.1",
     "cookie-parser": "1.4.7",
-    "express": "4.21.1",
+    "express": "^4.22.3",
     "helmet": "8.0.0",
     "jose": "5.9.6",
     "multer": "1.4.5-lts.1",
-    "nodemailer": "^9.0.4",
+    "nodemailer": "^10.5.0",
     "pg": "8.13.1",
     "pino": "9.5.0",
     "pino-http": "10.3.0",
     "redis": "4.7.0",
-    "xlsx": "0.18.5",
-    "zod": "3.23.8"
+    "xlsx": "file:../vendor/xlsx-0.20.3.tgz",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/cookie-parser": "1.4.7",

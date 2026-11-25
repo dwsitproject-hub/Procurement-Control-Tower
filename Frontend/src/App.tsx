@@ -1,15 +1,15 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, type DatasetCurrent, type Finding, type Kpi, type Me } from './lib/api';
-import { formatNumber } from './lib/format';
+import { formatKpi, formatMoney, formatNumber } from './lib/format';
+import { PageIntro, type Takeaway } from './components/PageIntro';
 import { FreshnessBanner } from './components/FreshnessBanner';
-import { KpiCard } from './components/KpiCard';
+import { KpiCard, KpiSummaryCard } from './components/KpiCard';
 import { ChartPanel } from './components/Chart';
 import { DrillModal } from './components/DrillModal';
 import { DetailTable } from './components/DetailTable';
 import {
   EMPTY_FILTER, GlobalFilterBar, globalFilterQuery, type GlobalFilterState,
 } from './components/GlobalFilterBar';
-import { SavedViews } from './components/SavedViews';
 import { PrTables } from './components/PrTables';
 import { PoTables } from './components/PoTables';
 import {
@@ -26,6 +26,9 @@ import {
  * the first paint, and deferring them would only add a round trip.
  */
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { BrandMark } from './components/BrandMark';
+import { Lbl, LabelProvider } from './lib/labels';
+import { hubIdentify, hubReset, hubTrack } from './lib/hub';
 
 const ExecSummaryTab = lazy(() => import('./components/ExecSummaryTab').then((m) => ({ default: m.ExecSummaryTab })));
 const OpenItemsTab = lazy(() => import('./components/OpenItemsTab').then((m) => ({ default: m.OpenItemsTab })));
@@ -43,50 +46,94 @@ const CoupaSourcingTab = lazy(() => import('./components/CoupaPages').then((m) =
 const CoupaInvoicesTab = lazy(() => import('./components/CoupaPages').then((m) => ({ default: m.CoupaInvoicesTab })));
 import { OverviewCard } from './components/OverviewCards';
 import {
-  LayoutControls, LayoutEditBar, applyLayout, useTabLayout, type TabLayout,
+  LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
 } from './components/LayoutEdit';
 
-// v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
-const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: string }[] }[] = [
+// Sidebar: grouped nav (.sb / .nsec / .ni). Each item carries a two-letter code
+// (drawn as a chip) and a plain-language line, so someone outside procurement
+// can tell "PO Analysis" means "orders placed" without asking.
+const NAV_GROUPS: { section: string; items: { id: Tab; label: string; code: string; desc: string }[] }[] = [
   {
     section: 'Main',
     items: [
       // First in the menu: it is the page an executive opens and the only one
       // that states a conclusion rather than presenting a measurement.
-      { id: 'execsummary', label: 'Executive Summary', icon: '🎯' },
-      { id: 'executive', label: 'Overview', icon: '📊' },
-      { id: 'openitems', label: 'Open Items', icon: '🔥' },
+      { id: 'execsummary', label: 'Executive Summary', code: 'ES', desc: 'the big picture' },
+      { id: 'executive', label: 'Overview', code: 'OV', desc: 'health at a glance' },
+      { id: 'openitems', label: 'Open Items', code: 'OI', desc: 'work still waiting' },
     ],
   },
   {
     // Menu order per user decision 5 Aug 2026 (follows the procure-to-pay flow).
     section: 'Analysis',
     items: [
-      { id: 'pr', label: 'PR Analysis', icon: '📋' },
-      { id: 'coupa_src', label: 'Sourcing', icon: '🛒' },
-      { id: 'po', label: 'PO Analysis', icon: '📦' },
-      { id: 'delivery', label: 'Delivery', icon: '🚚' },
-      { id: 'coupa_inv', label: 'Invoicing & Payment', icon: '💳' },
-      { id: 'approvals', label: 'Approvals', icon: '✅' },
-      { id: 'materials', label: 'Material Group', icon: '🧱' },
-      { id: 'vendors', label: 'Vendor 360', icon: '🏆' },
-      { id: 'governance', label: 'Governance', icon: '🏛️' },
+      { id: 'pr', label: 'PR Analysis', code: 'PR', desc: 'requests to buy' },
+      { id: 'coupa_src', label: 'Sourcing', code: 'SO', desc: 'supplier bidding' },
+      { id: 'po', label: 'PO Analysis', code: 'PO', desc: 'orders placed' },
+      { id: 'delivery', label: 'Delivery', code: 'DL', desc: 'goods arriving' },
+      { id: 'coupa_inv', label: 'Invoicing & Payment', code: 'IP', desc: 'bills and payments' },
+      { id: 'approvals', label: 'Approvals', code: 'AP', desc: 'who signs off' },
+      { id: 'materials', label: 'Material Group', code: 'MG', desc: 'what we buy' },
+      { id: 'vendors', label: 'Vendor 360', code: 'VN', desc: 'who we buy from' },
     ],
   },
   {
     section: 'Data',
     items: [
-      { id: 'detail', label: 'Detail Table', icon: '🧾' },
-      { id: 'master', label: 'Master', icon: '📚' },
-      { id: 'custom', label: 'Custom', icon: '🧮' },
-      { id: 'admin', label: 'Admin', icon: '⚙️' },
-      { id: 'datacheck', label: 'Data Quality', icon: '✔️' },
+      { id: 'detail', label: 'Detail Table', code: 'DT', desc: 'every line' },
+      { id: 'master', label: 'Master', code: 'MS', desc: 'reference lists' },
+      { id: 'custom', label: 'Custom', code: 'CU', desc: 'build your own' },
+      { id: 'admin', label: 'Admin', code: 'AD', desc: 'settings and uploads' },
+      { id: 'datacheck', label: 'Data Quality', code: 'DQ', desc: 'data checks' },
     ],
   },
 ];
 
 /** Tabs that own their own second path segment (/admin/exclusions, /master/vendors). */
 const SUBPATH_TABS = new Set<Tab>(['admin', 'master']);
+
+/**
+ * Combined cards: one slot, several figures, not clickable (21 Nov 2026).
+ * The slot id is not a server KPI; the page asks for the parts instead.
+ */
+const SUMMARY_CARDS: Record<string, { title: string; items: { id: string; label: string }[] }> = {
+  pr_approval_summary: {
+    title: 'PR Approval & Value',
+    items: [
+      { id: 'cycle_pr_approval', label: 'Avg PR approval' },
+      { id: 'median_pr_approval', label: 'Median PR approval' },
+      { id: 'pr_approval_lead_time', label: 'Approval lead time (SAP, median)' },
+      { id: 'avg_pr_line_value_idr', label: 'Avg PR line value' },
+    ],
+  },
+  // Approvals (23 Nov 2026): the two approval cycles and the oldest wait, one card.
+  approvals_summary: {
+    title: 'Approval Cycle',
+    items: [
+      { id: 'cycle_pr_approval', label: 'Avg PR approval' },
+      { id: 'cycle_po_approval', label: 'Avg PO approval' },
+      { id: 'oldest_unreleased', label: 'Oldest unreleased PR' },
+    ],
+  },
+  // Delivery (21 Nov 2026): the two lead-time cards in one, each line keeping
+  // its Local / Import split.
+  delivery_lt_summary: {
+    title: 'Delivery Lead Time',
+    items: [
+      { id: 'cycle_delivery', label: 'Avg delivery LT (GR vs plan)' },
+      { id: 'cycle_e2e', label: 'End to end (median, PR → GR)' },
+    ],
+  },
+  // PO Analysis (21 Nov 2026): three "how long / how much on average" cards in one.
+  po_cycle_value_summary: {
+    title: 'Sourcing, Approval & PO Value',
+    items: [
+      { id: 'cycle_sourcing', label: 'Avg sourcing lead time' },
+      { id: 'cycle_po_approval', label: 'Avg PO approval' },
+      { id: 'avg_po_value_idr', label: 'Avg PO value' },
+    ],
+  },
+};
 
 const TAB_KPIS: Record<Tab, string[]> = {
   /**
@@ -124,38 +171,39 @@ const TAB_KPIS: Record<Tab, string[]> = {
     'commitment_over_60d',
   ],
   pr: [
-    'cycle_pr_approval', 'median_pr_approval', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
+    // pr_approval_summary is ONE card for four figures (21 Nov 2026):
+    // cycle_pr_approval, median_pr_approval, pr_approval_lead_time and
+    // avg_pr_line_value_idr - see SUMMARY_CARDS.
+    'pr_approval_summary', 'max_pr_approval', 'unreleased_items', 'total_pr_items',
     'pr_to_po_conversion', 'approved_within_3d', 'oldest_unreleased',
     // pr_cancellation_rate and pr_deleted left this page on 7 Oct 2026: deleted
     // documents are excluded at load (exclusions.deleted_docs), so both could
     // only ever read 0 - a figure that says nothing was deleted.
-    'emergency_urgent_share', 'pr_approval_lead_time', 'at_risk_demand',
+    'emergency_urgent_share', 'at_risk_demand',
     'wbs_compliance', 'demand_realism', 'expedite_effectiveness', 'pending_pr_approvals',
-    'valuation_coverage_pct', 'unique_requisitioners', 'avg_pr_line_value_idr',
+    'valuation_coverage_pct', 'unique_requisitioners',
   ],
   po: [
-    'total_po_amount', 'total_po_count', 'cycle_sourcing', 'cycle_po_approval',
+    // po_cycle_value_summary = cycle_sourcing + cycle_po_approval +
+    // avg_po_value_idr on one card (21 Nov 2026, SUMMARY_CARDS).
+    'total_po_amount', 'total_po_count', 'po_cycle_value_summary',
     'po_line_items', 'unique_suppliers', 'grir_over_60d', 'commitment_over_60d',
     'lines_pending_po_approval', 'hold_po_lines', 'gr_coverage_pct',
     'pending_po_approvals', 'pr_po_price_variance', 'tail_spend_pct',
     'direct_po_share', 'sto_share', 'split_sourcing', 'po_irc',
-    'tail_spend_po_pct', 'avg_po_value_idr', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
+    'tail_spend_po_pct', 'avg_value_per_po_usd', 'foreign_ccy_po_share',
   ],
   delivery: [
-    'cycle_delivery', 'cycle_e2e', 'delivered_gr', 'reversal_rate',
+    // delivery_lt_summary = cycle_delivery + cycle_e2e (21 Nov 2026).
+    'delivery_lt_summary', 'delivered_gr', 'reversal_rate',
     'otd_vs_requested',
   ],
   approvals: [
-    'pending_pr_approvals', 'pending_po_approvals', 'cycle_pr_approval',
-    'cycle_po_approval', 'approved_within_3d', 'oldest_unreleased', 'retro_po_rate',
+    // approvals_summary = cycle_pr_approval + cycle_po_approval +
+    // oldest_unreleased on one card (23 Nov 2026, SUMMARY_CARDS).
+    'approvals_summary', 'pending_pr_approvals', 'pending_po_approvals',
+    'approved_within_3d', 'retro_po_rate',
     'worst_approver_gap', 'auto_release_share_pct',
-  ],
-  governance: [
-    'wbs_compliance', 'open_pr_no_wbs', 'retro_po_rate', 'sto_share',
-    'direct_po_share', 'sole_source_materials', 'tail_spend_pct',
-    'emergency_pct_value',
-    'single_source_spend_idr', 'top_vendor_share_pct', 'top5_vendor_share_pct',
-    'avg_suppliers_per_material',
   ],
   vendors: [],
   materials: [],
@@ -192,8 +240,7 @@ const TAB_CHARTS: Record<Tab, string[]> = {
     'delivery_ordered_vs_received', 'delivery_by_category', 'delivery_by_priority',
     'delivery_distribution', 'e2e_by_month', 'e2e_by_category', 'movement_mix',
   ],
-  approvals: ['pending_pr_by_pic'],
-  governance: ['wbs_by_plant', 'unapproved_by_category'],
+  approvals: ['pending_pr_by_pic', 'pending_po_by_pic'],
   vendors: [],
   materials: [],
   coupa_src: [],
@@ -308,27 +355,29 @@ export default function App() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [editing, setEditing] = useState(false);
   const { layout, update: updateLayout } = useTabLayout(tab);
-  /**
-   * Replace the working layout outright — what applying a saved view does.
-   * Expressed through the same update() so it persists by the same path a hand
-   * edit does; a view that applied only in memory would vanish on reload.
-   */
-  const replaceLayout = useCallback(
-    (next: TabLayout) => updateLayout(() => next),
-    [updateLayout],
-  );
   const [savedCustom, setSavedCustom] = useState<{ kpis: any[]; charts: any[] }>({ kpis: [], charts: [] });
   const [chartCatalog, setChartCatalog] = useState<{ chartId: string; title?: string }[]>([]);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try { return (localStorage.getItem('pct_theme') as ThemeMode) ?? 'auto'; } catch { return 'auto'; }
   });
   useEffect(() => { applyTheme(theme); }, [theme]);
+  /** An Admin's title-edit mode (23 Oct 2026): every title shows a ✎. */
+  const [titleEdit, setTitleEdit] = useState(false);
   const [currency, setCurrency] = useState<'USD' | 'IDR'>(() => {
     try { return (localStorage.getItem('pct_currency') as 'USD' | 'IDR') ?? 'USD'; } catch { return 'USD'; }
   });
   useEffect(() => { try { localStorage.setItem('pct_currency', currency); } catch { /* private mode */ } }, [currency]);
 
   const onDrill = useCallback((token: string, label: string) => setDrill({ token, label }), []);
+  // Plain-language help layer (page intros, key terms, "in plain words" lines,
+  // takeaways). On by default for newcomers; experts can switch it off and the
+  // choice is remembered on this browser.
+  const [help, setHelp] = useState<boolean>(() => {
+    try { return localStorage.getItem('pct_help') !== 'off'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('pct_help', help ? 'on' : 'off'); } catch { /* private mode */ }
+  }, [help]);
 
   useEffect(() => {
     api
@@ -337,6 +386,10 @@ export default function App() {
       .catch(() => setMe(null))
       .finally(() => setAuthChecked(true));
   }, []);
+
+  // Tell the Hub SDK who is signed in - on sign-in, after the SSO callback and
+  // on a restored session alike, since all three arrive here as `me`.
+  useEffect(() => { if (me) hubIdentify(me); }, [me]);
 
   useEffect(() => {
     if (!me) return;
@@ -391,7 +444,14 @@ export default function App() {
       .catch(() => setFindings([]));
   }, [me, dataset]);
 
-  const gfQuery = globalFilterQuery(gf);
+  /**
+   * The Delivery page's own Vendor Type filter (21 Nov 2026): Local = vendor
+   * code LN..., Import = IN.... Page-local on purpose - kept in the global bar it
+   * would silently narrow every other page, none of which shows the control.
+   */
+  const [deliveryVt, setDeliveryVt] = useState<'' | 'local' | 'import'>('');
+  const gfQuery = [globalFilterQuery(gf), tab === 'delivery' && deliveryVt ? `vendorType=${deliveryVt}` : '']
+    .filter((x) => x !== '').join('&');
 
   /**
    * KPIs are fetched PER PAGE, and again on every page change.
@@ -416,6 +476,8 @@ export default function App() {
   // Items badge are chrome, and would otherwise be blank until their own page
   // was opened.
   const CHROME_KPIS = ['total_pr_items', 'pr_not_approved', 'pr_no_po', 'open_items'];
+  /** A slot that is a combined card asks for its parts. */
+  const partsOf = (slot: string): string[] => SUMMARY_CARDS[slot]?.items.map((x) => x.id) ?? [slot];
 
   /**
    * The id list as a STRING, deliberately — the effect below keys on its
@@ -431,7 +493,7 @@ export default function App() {
   const neededKey = useMemo(() => {
     const slots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
     // Layout can swap a slot for a different KPI — ask for what is shown.
-    return [...new Set([...slots.map((sl) => layout.replaced[sl] ?? sl), ...CHROME_KPIS])].join(',');
+    return [...new Set([...slots.flatMap((sl) => partsOf(layout.replaced[sl] ?? sl)), ...CHROME_KPIS])].join(',');
   }, [tab, layout]);
 
   useEffect(() => {
@@ -541,7 +603,9 @@ export default function App() {
   const kpiSlots = applyLayout(TAB_KPIS[tab], layout, 'kpi');
   const chartSlots = applyLayout(TAB_CHARTS[tab], layout, 'chart');
   const visibleKpis = kpiSlots
-    .map((slot) => ({ slot, kpi: kpis.find((k) => k.kpiId === (layout.replaced[slot] ?? slot)) }))
+    // A combined card is shown once its first part has arrived; it renders
+    // its own lines (KpiSummaryCard), so this kpi is only the presence check.
+    .map((slot) => ({ slot, kpi: kpis.find((k) => k.kpiId === partsOf(layout.replaced[slot] ?? slot)[0]) }))
     .filter((x): x is { slot: string; kpi: Kpi } => x.kpi !== undefined);
   const shownCustomKpis = savedCustom.kpis.filter((k) => layout.customKpis.includes(k.title));
   const shownCustomCharts = savedCustom.charts.filter((c) => layout.customCharts.includes(c.title));
@@ -552,12 +616,17 @@ export default function App() {
   })();
   const dataCheckCount = findings.filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT' || f.severity === 'BLOCKER').length;
 
+  const isAdmin = me.roles.includes('admin');
+  const pageTitle = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === tab)?.label ?? '';
+  const takeaways = takeawaysFor(tab, kpis, findings, currency, onDrill);
+
   return (
-    <div className="app">
+    <LabelProvider page={tab} editing={isAdmin && titleEdit}>
+    <div className={help ? 'app' : 'app hide-help'}>
       {/* v1's .bar: navy sticky header */}
       <div className="topbar">
-        <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>🏭</span>
-        <h1>Procurement Control Tower</h1>
+        <span className="brand-tile"><BrandMark size={20} /></span>
+        <h1>Procurement <span className="grad-text">Control Tower</span></h1>
         {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
         {dataCheckCount > 0 && (
           <button className="hdr-chip" onClick={() => navigate('datacheck')} title="Open Data Quality">
@@ -579,10 +648,19 @@ export default function App() {
           className="tbtn"
           href="/api/v1/snapshot"
           download
+          onClick={() => hubTrack('snapshot_downloaded')}
           title="Download a static HTML snapshot of the current dashboard (frozen figures, your data scope)"
         >
           ⤓ Snapshot
         </a>
+        <button
+          className="tbtn"
+          aria-pressed={help}
+          title="Plain-language help: page intros, key terms, 'in plain words' lines and takeaways"
+          onClick={() => setHelp(!help)}
+        >
+          ? Help{help ? ': on' : ': off'}
+        </button>
         <button
           className="tbtn"
           title="Theme: auto follows your system"
@@ -590,10 +668,28 @@ export default function App() {
         >
           {theme === 'auto' ? '◑ Auto' : theme === 'light' ? '☀ Light' : '☾ Dark'}
         </button>
+        {isAdmin && (
+          <button
+            className="tbtn"
+            aria-pressed={titleEdit}
+            title="Rename section and card titles - a rename applies to every user"
+            style={titleEdit ? { background: 'var(--accent)', borderColor: 'var(--accent)' } : undefined}
+            onClick={() => setTitleEdit(!titleEdit)}
+          >
+            ✎ Titles{titleEdit ? ': on' : ''}
+          </button>
+        )}
         <button className="tbtn" onClick={() => void logout()}>
           Sign out
         </button>
       </div>
+      {isAdmin && titleEdit && (
+        <div className="lbl-bar" role="status">
+          <strong>Title editing is on.</strong> Click ✎ beside any section or card title to rename it —
+          the new name applies to every user straight away. A solid ✎ marks a title already renamed;
+          open it to reset it. Click <em>✎ Titles: on</em> again to finish.
+        </div>
+      )}
 
       {dataset && dataset.datasetVersionId !== null ? (
         <FreshnessBanner data={dataset} />
@@ -634,8 +730,8 @@ export default function App() {
                     aria-current={tab === t.id ? 'page' : undefined}
                     onClick={linkHandler(t.id)}
                   >
-                    <span className="ic" aria-hidden="true">{t.icon}</span>
-                    {t.label}
+                    <span className="ic" aria-hidden="true">{t.code}</span>
+                    <span className="ni-l">{t.label}<span className="ni-d">{t.desc}</span></span>
                     {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
                   </a>
                 );
@@ -652,12 +748,33 @@ export default function App() {
           datasetVersionId={dataset.datasetVersionId}
         />}
       <main>
-        {dataset?.datasetVersionId == null ? (
+        <PageIntro tab={tab} title={pageTitle} takeaways={dataset?.datasetVersionId != null ? takeaways : undefined} />
+        {/*
+          Admin first, ahead of the no-dataset gate: it is where the first
+          dataset is loaded, so a brand-new installation (production, 12 Nov
+          2026) could not reach it at all. It needs no dataset of its own.
+        */}
+        {tab === 'admin' ? (
+          <PageChunk tab={tab}>
+            <AdminTab
+              isAdmin={me.roles.includes('admin')}
+              canIngest={me.capabilities.includes('ingest')}
+              section={route.sub}
+              onSection={(id) => navigate('admin', id)}
+            />
+          </PageChunk>
+        ) : dataset?.datasetVersionId == null ? (
           <div className="panel">
             <h2>No data yet</h2>
-            <p className="note">
-              Publish a dataset first: <code>npm run ingest -w @pct/backend</code>
-            </p>
+            {me.capabilities.includes('ingest') ? (
+              <p className="note">
+                Load the SAP exports first:{' '}
+                <a href={hrefFor('admin')} onClick={linkHandler('admin')}>Admin → SAP Data Upload</a>
+                {' '}(upload the files, or <b>Sync now</b> in SAP Data Sync).
+              </p>
+            ) : (
+              <p className="note">The SAP data has not been loaded yet. Ask a PCT administrator.</p>
+            )}
           </div>
         ) : tab === 'execsummary' ? (
           <>
@@ -667,12 +784,9 @@ export default function App() {
               pickers would be empty dropdowns inviting a click that does
               nothing. Hide, move, restore and reset all still apply.
             */}
-            <SavedViews
-              tab={tab}
-              layout={layout}
-              applyToWorking={replaceLayout}
-              editing={editing}
-            />
+            {/* Admin only (21 Nov 2026): the layout is one per page for every
+                user (049), so only an Admin arranges it. */}
+            {isAdmin && (
             <LayoutEditBar
               editing={editing}
               setEditing={setEditing}
@@ -683,6 +797,7 @@ export default function App() {
               customOptions={{ kpis: [], charts: [] }}
               showAdders={false}
             />
+            )}
             <PageChunk tab={tab}>
             <ExecSummaryTab
               kpis={kpis}
@@ -725,18 +840,18 @@ export default function App() {
         ) : tab === 'coupa_src' ? (
           <PageChunk tab={tab}><CoupaSourcingTab /></PageChunk>
         ) : tab === 'coupa_inv' ? (
-          <PageChunk tab={tab}><CoupaInvoicesTab /></PageChunk>
-        ) : tab === 'custom' ? (
-          <PageChunk tab={tab}><CustomTab onDrill={onDrill} currency={currency} /></PageChunk>
-        ) : tab === 'admin' ? (
           <PageChunk tab={tab}>
-            <AdminTab
-              isAdmin={me.roles.includes('admin')}
-              canIngest={me.capabilities.includes('ingest')}
-              section={route.sub}
-              onSection={(id) => navigate('admin', id)}
+            <CoupaInvoicesTab
+              currency={currency}
+              layout={layout}
+              updateLayout={updateLayout}
+              editing={editing}
+              setEditing={setEditing}
+              isAdmin={isAdmin}
             />
           </PageChunk>
+        ) : tab === 'custom' ? (
+          <PageChunk tab={tab}><CustomTab onDrill={onDrill} currency={currency} /></PageChunk>
         ) : tab === 'master' ? (
           <PageChunk tab={tab}>
             <MasterTab
@@ -755,12 +870,27 @@ export default function App() {
           <DataCheck versionId={dataset.datasetVersionId} />
         ) : (
           <>
-            <SavedViews
-              tab={tab}
-              layout={layout}
-              applyToWorking={replaceLayout}
-              editing={editing}
-            />
+            {tab === 'delivery' && (
+              <div className="gf-bar" style={{ marginBottom: '.6rem' }}>
+                <span className="gf-label">Filter</span>
+                <label className="ms-filter" title="Local = SAP vendor code LN…, Import = IN… - applies to every card, chart and drill on this page">
+                  <span className="gf-label">Vendor Type</span>
+                  <select className="dt-search" value={deliveryVt} aria-label="Vendor Type"
+                    onChange={(e) => setDeliveryVt(e.target.value as '' | 'local' | 'import')}>
+                    <option value="">All</option>
+                    <option value="local">Local</option>
+                    <option value="import">Import</option>
+                  </select>
+                </label>
+                {deliveryVt !== '' && (
+                  <button className="gf-btn gf-clear" onClick={() => setDeliveryVt('')}>Clear</button>
+                )}
+              </div>
+            )}
+            {/* Admin only, and shared by every user (049). Custom items stay out
+                of the adders: they belong to whoever saved them, so a shared
+                layout could not show them to anyone else. */}
+            {isAdmin && (
             <LayoutEditBar
               editing={editing}
               setEditing={setEditing}
@@ -768,19 +898,17 @@ export default function App() {
               update={updateLayout}
               kpiOptions={kpis.map((k) => ({ id: k.kpiId, title: k.title })).sort((a, b) => a.title.localeCompare(b.title))}
               chartOptions={chartCatalog.map((c) => ({ id: c.chartId, title: c.title ?? c.chartId }))}
-              customOptions={{
-                kpis: savedCustom.kpis.map((k) => k.title),
-                charts: savedCustom.charts.map((c) => c.title),
-              }}
+              customOptions={{ kpis: [], charts: [] }}
             />
+            )}
             {(TAB_FINDINGS[tab] ?? []).length > 0 && findings.length > 0 && (
               <div className="anomaly-strip">
                 {findings
                   .filter((f) => (TAB_FINDINGS[tab] ?? []).includes(f.ruleId))
                   .filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT')
                   .slice(0, 3)
-                  .map((f) => (
-                    <p key={f.ruleId} className="anomaly">
+                  .map((f, i) => (
+                    <p key={`${f.ruleId}-${i}`} className="anomaly">
                       <span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.message}
                     </p>
                   ))}
@@ -806,7 +934,7 @@ export default function App() {
                   return (
                     <div key={sec.title}>
                       <h2 className="sec-h">
-                        {sec.title}
+                        <Lbl k={`sec:${sec.title}`}>{sec.title}</Lbl>
                         {isOverviewSec && dataset?.prDateRange && (
                           <span className="sec-sub">
                             PR Date: {dataset.prDateRange.from} → {dataset.prDateRange.to}
@@ -864,7 +992,7 @@ export default function App() {
                   );
                 })()}
                 {/* v1's 🔥 Open Items — Action Required strip */}
-                <h2 className="sec-h">🔥 Open Items — Action Required <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
+                <h2 className="sec-h">🔥 <Lbl>Open Items — Action Required</Lbl> <span className="sec-sub">click a card to see the rows · full page under Open Items</span></h2>
                 <div className="act-grid">
                   {([
                     ['pr_not_approved', 'Unapproved PRs', 'var(--crit)', 'avg_wait', 'Avg wait'],
@@ -882,7 +1010,7 @@ export default function App() {
                         onClick={() => k.drillToken && onDrill(k.drillToken, k.title)}
                       >
                         <span className="act-v">{formatNumber(Number(k.value))}</span>
-                        <span className="act-l">{label}</span>
+                        <span className="act-l"><Lbl>{label}</Lbl></span>
                         {wait !== null && wait !== undefined && (
                           <span className="act-wait">{waitLabel}: {formatNumber(Number(wait))} days</span>
                         )}
@@ -929,7 +1057,18 @@ export default function App() {
                         swapOptions={kpis.map((x) => ({ id: x.kpiId, title: x.title })).sort((a, b) => a.title.localeCompare(b.title))}
                       />
                     )}
-                    <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
+                    {SUMMARY_CARDS[slot] ? (
+                      <KpiSummaryCard
+                        id={slot}
+                        title={SUMMARY_CARDS[slot]!.title}
+                        currency={currency}
+                        items={SUMMARY_CARDS[slot]!.items.map((x) => ({
+                          label: x.label, kpi: kpis.find((kk) => kk.kpiId === x.id),
+                        }))}
+                      />
+                    ) : (
+                      <KpiCard kpi={k} onDrill={onDrill} currency={currency} />
+                    )}
                   </div>
                 ))}
                 {shownCustomKpis.map((spec) => (
@@ -1023,10 +1162,12 @@ export default function App() {
         />
       )}
     </div>
+    </LabelProvider>
   );
 }
 
 async function logout(): Promise<void> {
+  hubReset();
   await api.post('/auth/logout').catch(() => undefined);
   window.location.reload();
 }
@@ -1136,7 +1277,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
   return (
     <div className="login-wrap">
       <form className="login" onSubmit={submit}>
-        <h1>Procurement Control Tower</h1>
+        <h1>Procurement <span className="grad-text">Control Tower</span></h1>
         <p className="sub">Sign in to continue</p>
 
         {ssoEnabled && (
@@ -1179,6 +1320,76 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
 
 // ─────────────────────────────────────────────────────────────── data check
 
+/**
+ * "Read this first" takeaways for the page intro. Each one restates a KPI the
+ * page already shows — same figure, same currency handling as its card, same
+ * drill — so a takeaway can never disagree with the card beneath it. A KPI
+ * that is missing, disabled or empty is skipped, never shown as zero.
+ */
+const TAKEAWAYS: Partial<Record<Tab, [kpiId: string, title: string, text: string][]>> = {
+  executive: [
+    ['open_po_commitment', 'Money still on order', 'Ordered from suppliers but not yet delivered.'],
+    ['otd_vs_requested', 'Deliveries on time', 'Arrived by the date promised on the purchase order.'],
+    ['pr_pipeline_value', 'Requests with no order yet', 'Value of requests to buy that no purchase order covers yet.'],
+    ['cycle_e2e', 'A typical purchase takes', 'From the request being raised to the goods arriving (median).'],
+  ],
+  pr: [
+    ['cycle_pr_approval', 'Average sign-off time', 'Days from a request being raised to its approval.'],
+    ['approved_within_3d', 'Approved within policy', 'Requests signed off within the 3-day policy.'],
+    ['pr_to_po_conversion', 'Requests that became orders', 'Share of requests that turned into a purchase order.'],
+    ['at_risk_demand', 'Needed already, no order', 'Requests past their required date with no purchase order.'],
+  ],
+  po: [
+    ['total_po_amount', 'Total ordered', 'Net value of purchase orders in the period.'],
+    ['unique_suppliers', 'Suppliers used', 'Different suppliers on the period’s orders.'],
+    ['direct_po_share', 'Orders without a request', 'Share of order lines raised with no requisition behind them.'],
+    ['commitment_over_60d', 'Old open orders', 'Share of open commitment more than 60 days old.'],
+  ],
+  delivery: [
+    ['otd_vs_requested', 'Deliveries on time', 'Arrived by the date promised on the purchase order.'],
+    ['cycle_delivery', 'Typical delay vs plan', 'Days between the planned delivery date and the goods receipt.'],
+    ['cycle_e2e', 'Request to receipt', 'From the request being raised to the goods arriving (median).'],
+    ['reversal_rate', 'Receipts reversed', 'Goods receipts that were later cancelled.'],
+  ],
+  approvals: [
+    ['pending_pr_approvals', 'Requests waiting', 'Request lines in an approver’s queue now.'],
+    ['pending_po_approvals', 'Orders waiting', 'Order lines in an approver’s queue now.'],
+    ['approved_within_3d', 'Within policy', 'Requests signed off within the 3-day policy.'],
+    ['worst_approver_gap', 'Slowest approver', 'Typical wait at the slowest approver.'],
+  ],
+};
+
+/** The card's headline value, with the card's own currency rule. */
+function kpiValueText(k: Kpi, currency: 'USD' | 'IDR'): string {
+  const twinIdr = k.detail?.['value_idr'];
+  const twinUsd = k.detail?.['value_usd'];
+  if (currency === 'IDR' && k.unit === 'usd' && twinIdr !== null && twinIdr !== undefined) return formatMoney(Number(twinIdr), 'IDR');
+  if (currency === 'USD' && k.unit === 'idr' && twinUsd !== null && twinUsd !== undefined) return formatMoney(Number(twinUsd), 'USD');
+  return formatKpi(k.value, k.unit);
+}
+
+function takeawaysFor(
+  tab: Tab, kpis: Kpi[], findings: Finding[], currency: 'USD' | 'IDR',
+  onDrill: (token: string, label: string) => void,
+): Takeaway[] {
+  if (tab === 'datacheck') {
+    const n = (s: Finding['severity']) => findings.filter((f) => f.severity === s).length;
+    return [
+      { title: 'Blocking', value: formatNumber(n('BLOCKER')), text: 'Findings that stop a dataset version from publishing.' },
+      { title: 'Figures switched off', value: formatNumber(n('CAVEAT')), text: 'Caveats: a figure stays off until the source data is fixed.' },
+      { title: 'Read with care', value: formatNumber(n('WARNING')), text: 'Warnings: figures are shown, with a known limit.' },
+    ];
+  }
+  const spec = TAKEAWAYS[tab];
+  if (!spec) return [];
+  return spec.flatMap(([id, title, text]) => {
+    const k = kpis.find((x) => x.kpiId === id);
+    if (!k || k.status !== 'ok' || k.value === null) return [];
+    const token = k.drillToken;
+    return [{ title, value: kpiValueText(k, currency), text, onOpen: token ? () => onDrill(token, k.title) : undefined }];
+  });
+}
+
 function DataCheck({ versionId }: { versionId: number }) {
   const [findings, setFindings] = useState<Finding[] | null>(null);
 
@@ -1216,8 +1427,8 @@ function DataCheck({ versionId }: { versionId: number }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {group.map((f) => (
-                    <tr key={f.ruleId}>
+                  {group.map((f, i) => (
+                    <tr key={`${f.ruleId}-${i}`}>
                       <td><code>{f.ruleId}</code></td>
                       <td>{f.feed ?? '—'}</td>
                       <td className="num">

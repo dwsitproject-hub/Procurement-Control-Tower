@@ -15,7 +15,6 @@
     "build": "npm run build -w @pct/rules && npm run build -w @pct/contracts && npm run build -w @pct/backend && npm run build -w @pct/frontend",
     "build:packages": "npm run build -w @pct/rules && npm run build -w @pct/contracts",
     "test": "npm run test -w @pct/rules",
-    "test:golden": "npm run test:golden -w @pct/backend",
     "typecheck": "npm run typecheck -w @pct/rules && npm run typecheck -w @pct/contracts && npm run typecheck -w @pct/backend",
     "db:migrate": "npm run db:migrate -w @pct/backend",
     "db:seed": "npm run db:seed -w @pct/backend",

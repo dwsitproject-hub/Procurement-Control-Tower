@@ -20,7 +20,7 @@ import { useEffect, useState } from 'react';
  */
 
 export type Tab =
-  | 'execsummary' | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'governance' | 'openitems'
+  | 'execsummary' | 'executive' | 'pr' | 'po' | 'delivery' | 'approvals' | 'openitems'
   | 'vendors' | 'materials' | 'coupa_src' | 'coupa_inv' | 'detail' | 'master' | 'custom' | 'admin'
   | 'datacheck';
 
@@ -41,7 +41,6 @@ export const TAB_PATH: Record<Tab, string> = {
   approvals: '/approvals',
   materials: '/material-group',
   vendors: '/vendor-360',
-  governance: '/governance',
   detail: '/detail-table',
   master: '/master',
   custom: '/custom',

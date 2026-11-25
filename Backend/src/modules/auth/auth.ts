@@ -16,7 +16,7 @@ import type { Role } from '@pct/contracts';
 import { exec, query, queryOne } from '../../db/client.js';
 import { isOidcConfigured, loadEnv } from '../../config/env.js';
 import { recordAudit } from '../audit/audit.js';
-import { createSession } from './session.js';
+import { createSession, putEphemeral, revokeAllSessions, takeEphemeral } from './session.js';
 
 const env = loadEnv();
 
@@ -81,6 +81,7 @@ export async function changeLocalPassword(
   userId: string,
   currentPassword: string,
   newPassword: string,
+  keepSid?: string,
 ): Promise<void> {
   if (newPassword.length < 12) {
     throw new AuthError('invalid-credentials', 'The new password must be at least 12 characters.');
@@ -104,6 +105,19 @@ export async function changeLocalPassword(
     [userId, hash],
   );
   await exec(`UPDATE app.app_user SET must_change_password = false WHERE id = $1`, [userId]);
+  // A changed password ends every OTHER session: whoever knew the old one is out
+  // now, not when their session expires. The caller stays signed in.
+  await revokeAllSessions(userId, keepSid);
+}
+
+/**
+ * What a failed sign-in records as the attempted address. People type
+ * passwords into the e-mail box; storing that verbatim would put a password in
+ * the audit log (security review SEC-S-28). Only an e-mail-shaped value is kept.
+ */
+function auditableEmail(input: string): string {
+  const v = String(input ?? '').trim().toLowerCase().slice(0, 254);
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v) ? v : `(not an e-mail address, ${v.length} chars)`;
 }
 
 // ─────────────────────────────────────────────────────────── local accounts
@@ -163,7 +177,7 @@ export async function localLogin(
 
   if (row?.locked_until && new Date(row.locked_until) > new Date()) {
     await recordAudit({
-      action: 'auth.login', actorEmail: email, outcome: 'denied',
+      action: 'auth.login', actorEmail: auditableEmail(email), outcome: 'denied',
       detail: { method: 'local', reason: 'locked' }, ip: req.ip,
     });
     throw new AuthError('account-locked', 'account is temporarily locked');
@@ -205,7 +219,7 @@ export async function localLogin(
       );
     }
     await recordAudit({
-      action: 'auth.login', actorEmail: email, outcome: 'failure',
+      action: 'auth.login', actorEmail: auditableEmail(email), outcome: 'failure',
       detail: { method: 'local' }, ip: req.ip,
     });
     throw new AuthError('invalid-credentials', 'invalid email or password');
@@ -291,21 +305,17 @@ export async function initOidc(): Promise<{ ok: boolean; error?: string }> {
 
 const b64url = (b: Buffer) => b.toString('base64url');
 
-/** Short-lived PKCE/state store. In production this belongs in Redis. */
-const flowStore = new Map<string, { nonce: string; verifier: string; returnTo: string; exp: number }>();
+/**
+ * Short-lived PKCE/state record, single use, 10 minutes. Kept in the session
+ * store (Redis in every deployed environment) rather than an in-process Map:
+ * bounded by TTL, shared by every API instance, and a login that spans a
+ * restart still completes (security review SEC-S-20).
+ */
+interface FlowRecord { nonce: string; verifier: string; returnTo: string }
+const putFlow = (state: string, v: FlowRecord) => putEphemeral(`oidc:${state}`, v, 600);
+const takeFlow = (state: string) => takeEphemeral<FlowRecord>(`oidc:${state}`);
 
-function putFlow(state: string, v: { nonce: string; verifier: string; returnTo: string }): void {
-  flowStore.set(state, { ...v, exp: Date.now() + 600_000 });
-  for (const [k, x] of flowStore) if (x.exp < Date.now()) flowStore.delete(k);
-}
-
-function takeFlow(state: string) {
-  const v = flowStore.get(state);
-  flowStore.delete(state); // single use
-  return v && v.exp >= Date.now() ? v : null;
-}
-
-export function buildAuthorizeUrl(returnTo: string | undefined): string {
+export async function buildAuthorizeUrl(returnTo: string | undefined): Promise<string> {
   if (!discovery) throw new Error('OIDC not initialised');
 
   const state = b64url(randomBytes(32));
@@ -313,7 +323,7 @@ export function buildAuthorizeUrl(returnTo: string | undefined): string {
   const verifier = b64url(randomBytes(32));
   const challenge = b64url(createHash('sha256').update(verifier).digest());
 
-  putFlow(state, { nonce, verifier, returnTo: safeReturnTo(returnTo) });
+  await putFlow(state, { nonce, verifier, returnTo: safeReturnTo(returnTo) });
 
   const url = new URL(discovery.authorization_endpoint);
   url.searchParams.set('client_id', env.OIDC_CLIENT_ID!);
@@ -327,10 +337,24 @@ export function buildAuthorizeUrl(returnTo: string | undefined): string {
   return url.toString();
 }
 
-/** Open-redirect guard: only same-origin relative paths are honoured. */
-function safeReturnTo(v: string | undefined): string {
-  if (!v || !v.startsWith('/') || v.startsWith('//')) return '/';
-  return v;
+/**
+ * Open-redirect guard: only a same-origin path is honoured.
+ *
+ * Browsers treat a backslash as a slash, so "/\evil.example" is a
+ * protocol-relative URL to another host even though it starts with a single
+ * "/" (security review SEC-S-09). Anything with a backslash or a control
+ * character is refused outright, and the rest is resolved against a dummy
+ * origin: if it lands anywhere else, it is not a path on this site.
+ */
+export function safeReturnTo(v: string | undefined): string {
+  if (!v || v.length > 2048 || !v.startsWith('/') || /[\\\u0000-\u001f\u007f]/.test(v)) return '/';
+  try {
+    const u = new URL(v, 'http://pct.invalid');
+    if (u.origin !== 'http://pct.invalid') return '/';
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return '/';
+  }
 }
 
 export interface OidcCallbackResult {
@@ -367,7 +391,7 @@ export async function handleOidcCallback(
   } else {
     flow = 'sp';
     if (!params.state) throw new AuthError('invalid-credentials', 'missing state');
-    const stored = takeFlow(params.state);
+    const stored = await takeFlow(params.state);
     if (!stored) throw new AuthError('invalid-credentials', 'unknown or expired state');
     verifier = stored.verifier;
     expectedNonce = stored.nonce;
@@ -420,8 +444,12 @@ export async function handleOidcCallback(
   if (!sub) throw new AuthError('invalid-credentials', 'invalid token payload (no subject)');
   const email = String(payload.email ?? '').trim().toLowerCase();
   const name = String(payload.name ?? email);
+  // The Hub sends email_verified (confirmed 13 Nov 2026). Only a verified
+  // address may be used to find an existing account to link.
+  const emailVerified = payload.email_verified === true;
 
-  const userId = await upsertSsoUser(sub, email, name);
+  const userId = await upsertSsoUser(sub, email, name, emailVerified);
+  await retireTemporaryPassword(userId, email);
   const principal = await loadPrincipal(userId);
   if (!principal) throw new AuthError('disabled', 'account is disabled');
 
@@ -444,7 +472,35 @@ export async function handleOidcCallback(
  * data scope: they can sign in and see the shell, and no procurement data at all,
  * until an administrator grants scope. Nothing is inferred from an email domain.
  */
-async function upsertSsoUser(sub: string, email: string, name: string): Promise<string> {
+/**
+ * Someone who signs in through the DWS Hub has proved who they are without
+ * PCT's password. If an administrator had issued a TEMPORARY password for the
+ * account (still unchanged - must_change_password set), it is now pointless and
+ * a liability: it would keep working for password sign-in although its owner
+ * never chose it. Remove it and clear the flag, so the Hub user is never sent to
+ * the "change your temporary password" screen (16 Nov 2026). A password the
+ * user CHOSE (flag already clear) is left alone - two routes in, by design.
+ */
+async function retireTemporaryPassword(userId: string, email: string): Promise<void> {
+  const r = await queryOne<{ had_temp: boolean }>(
+    `WITH u AS (
+       UPDATE app.app_user SET must_change_password = false
+        WHERE id = $1 AND must_change_password RETURNING id
+     ), d AS (
+       DELETE FROM app.local_credential c USING u WHERE c.user_id = u.id RETURNING c.user_id
+     )
+     SELECT EXISTS (SELECT 1 FROM u) AS had_temp`,
+    [userId],
+  );
+  if (r?.had_temp) {
+    await recordAudit({
+      action: 'auth.temp_password_retired', actorUserId: userId, actorEmail: email, outcome: 'success',
+      detail: { reason: 'signed in through the DWS Hub; the unchanged temporary password was removed' },
+    });
+  }
+}
+
+async function upsertSsoUser(sub: string, email: string, name: string, emailVerified: boolean): Promise<string> {
   const existing = await queryOne<{ id: string }>(
     `SELECT id FROM app.app_user WHERE sso_subject = $1`,
     [sub],
@@ -455,6 +511,55 @@ async function upsertSsoUser(sub: string, email: string, name: string): Promise<
       [existing.id, email, name],
     );
     return existing.id;
+  }
+
+  // An account the administrator already made for this address (set-password
+  // --create-admin, or the User Access page) and that has no Hub identity yet:
+  // link it rather than INSERT, which would hit the unique email and fail the
+  // sign-in with a 500. The account keeps its roles, scope and password - one
+  // person, two routes in. One already linked to ANOTHER subject is never taken
+  // over; that stays a refusal. is_active is left as it is (loadPrincipal checks).
+  //
+  // Linking trusts the e-mail claim to say WHO this is, so it requires the Hub
+  // to vouch for it: email_verified must be true. An unverified claim never
+  // links to (and so can never take over) an existing account, admins included
+  // (security review SEC-S-03).
+  if (email) {
+    const existingByEmail = await queryOne<{ id: string; sso_subject: string | null }>(
+      `SELECT id, sso_subject FROM app.app_user WHERE email = $1`, [email],
+    );
+    if (existingByEmail && existingByEmail.sso_subject === null && !emailVerified) {
+      await recordAudit({
+        action: 'auth.sso_link_refused', actorUserId: existingByEmail.id, actorEmail: email, outcome: 'denied',
+        detail: { reason: 'Hub did not assert email_verified for this address' },
+      });
+      throw new AuthError(
+        'invalid-credentials',
+        'The DWS Hub has not verified this e-mail address, so it cannot be linked to the existing PCT account. '
+          + 'Ask the Hub administrator to verify it, then sign in again.',
+      );
+    }
+    const linked = await queryOne<{ id: string }>(
+      `UPDATE app.app_user SET sso_subject = $1, display_name = $3, last_login_at = now()
+        WHERE email = $2 AND sso_subject IS NULL RETURNING id`,
+      [sub, email, name],
+    );
+    if (linked) {
+      await recordAudit({
+        action: 'auth.sso_linked', actorUserId: linked.id, actorEmail: email, outcome: 'success',
+        detail: { reason: 'existing account with this email had no Hub identity' },
+      });
+      return linked.id;
+    }
+    const taken = await queryOne<{ id: string }>(
+      `SELECT id FROM app.app_user WHERE email = $1`, [email],
+    );
+    if (taken) {
+      throw new AuthError(
+        'invalid-credentials',
+        'this email belongs to an account linked to a different Hub identity - ask an administrator',
+      );
+    }
   }
 
   const ins = await queryOne<{ id: string }>(

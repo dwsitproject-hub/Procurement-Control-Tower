@@ -4,6 +4,8 @@ import { ScrollFrame } from './ScrollFrame';
 import {
   FLAG_META, STATUS_PILL, agingClass, formatCell, formatNumber, moneyCellText, rowClass,
 } from '../lib/format';
+import { Lbl } from '../lib/labels';
+import { hubTrack } from '../lib/hub';
 
 /** v1's AW per-column aging warn thresholds (amber above, red above 2x). */
 const AGE_WARN: Record<string, number> = {
@@ -97,6 +99,18 @@ const GLOBAL_LABELS: Record<(typeof GLOBAL_KEYS)[number], string> = {
 
 const NUMERIC = new Set(['int', 'number', 'money', 'pct']);
 
+/** The Open Items card names, for the Stages chip. */
+const STAGE_LABEL: Record<string, string> = {
+  'Unapproved PR': 'PR not approved',
+  'PR Approved-No PO': 'PR approved, no PO',
+  'PO-Not Approved': 'PO pending approval',
+  'HOLD PO': 'PO on hold',
+  'PO-No GR': 'PO not delivered',
+  'Partially Delivered': 'PO partly delivered',
+  deliveredNotInvoiced: 'PO delivered, not invoiced',
+  invoicedNotPaid: 'PO invoiced, not paid',
+};
+
 export function DetailTable({
   initial,
   initialLabel,
@@ -153,6 +167,14 @@ export function DetailTable({
    * every row in the dataset.
    */
   const [moneyState, setMoneyState] = useState(init['moneyState'] ?? '');
+  /** Open Items' split "PO not delivered" cards (19 Nov 2026): 'paid' | 'unpaid'. */
+  const [paidState, setPaidState] = useState(init['paidState'] ?? '');
+  /**
+   * Open Items stages, from the backlog table's Stages filter (19 Oct 2026):
+   * open statuses and/or after-delivery states, OR'd by the server. Carried
+   * as it arrives - a chip shows it and clears it.
+   */
+  const [oiStage, setOiStage] = useState(init['oiStage'] ?? '');
   const [excludeSto, setExcludeSto] = useState(init['excludeSto'] === 'true');
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [onlyOpen, setOnlyOpen] = useState(init['onlyOpen'] === 'true');
@@ -222,6 +244,8 @@ export function DetailTable({
     if (debounced.trim() !== '') q.set('q', debounced.trim());
     if (ageBand) q.set('ageBand', ageBand);
     if (moneyState) q.set('moneyState', moneyState);
+    if (paidState) q.set('paidState', paidState);
+    if (oiStage) q.set('oiStage', oiStage);
     if (excludeSto) q.set('excludeSto', 'true');
     if (includeDeleted) q.set('includeDeleted', 'true');
     if (onlyOpen) q.set('onlyOpen', 'true');
@@ -230,7 +254,7 @@ export function DetailTable({
       q.set('dir', sort.dir);
     }
     return q.toString();
-  }, [globalParams, filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, paidState, oiStage, excludeSto, includeDeleted, onlyOpen, sort]);
 
   const queryString = useMemo(
     () => `${filterQuery}${filterQuery ? '&' : ''}limit=${pageSize}&facets=true`,
@@ -240,7 +264,7 @@ export function DetailTable({
   // Any filter/sort/page-size change restarts at page 1.
   useEffect(() => {
     setPage(0);
-  }, [globalParams, filters, debounced, ageBand, moneyState, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
+  }, [globalParams, filters, debounced, ageBand, moneyState, paidState, oiStage, excludeSto, includeDeleted, onlyOpen, sort, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -331,6 +355,7 @@ export function DetailTable({
       q.set('cols', cols.join(','));
       const r = await downloadFile(`/api/v1/detail/export.xlsx?${q.toString()}`, 'pct-detail.xlsx');
       const rows = r.rows ?? 0;
+      hubTrack('report_exported', { source: 'detail_table', format: 'xlsx', rows });
       setExportNote(
         r.total !== null && r.total > rows
           ? `Downloaded ${r.filename} — ${formatNumber(rows)} of ${formatNumber(r.total)} rows. `
@@ -356,6 +381,7 @@ export function DetailTable({
     setFilters({});
     setSearch('');
     setAgeBand('');
+    setOiStage('');
     setExcludeSto(false);
     setIncludeDeleted(false);
     setOnlyOpen(false);
@@ -366,6 +392,8 @@ export function DetailTable({
     (debounced.trim() ? 1 : 0) +
     (ageBand ? 1 : 0) +
     (moneyState ? 1 : 0) +
+    (paidState ? 1 : 0) +
+    (oiStage ? 1 : 0) +
     (excludeSto ? 1 : 0) +
     (includeDeleted ? 1 : 0) +
     (onlyOpen ? 1 : 0);
@@ -379,7 +407,7 @@ export function DetailTable({
   if (error) {
     return (
       <div className="panel">
-        <h2>Detail table</h2>
+        <h2><Lbl>Detail table</Lbl></h2>
         <p className="err">{error}</p>
       </div>
     );
@@ -458,6 +486,13 @@ export function DetailTable({
           </p>
         )}
 
+        {oiStage && (
+          <p className="note dt-agechip">
+            Stages: <strong>{oiStage.split(',').map((v) => STAGE_LABEL[v] ?? v).join(', ')}</strong>{' '}
+            <button className="dt-btn" onClick={() => setOiStage('')}>clear</button>
+          </p>
+        )}
+
         {moneyState && (
           <p className="note dt-agechip">
             State: <strong>
@@ -466,6 +501,15 @@ export function DetailTable({
                 : 'invoiced in Coupa, not paid'}
             </strong>{' '}
             <button className="dt-btn" onClick={() => setMoneyState('')}>clear</button>
+          </p>
+        )}
+
+        {paidState && (
+          <p className="note dt-agechip">
+            Payment: <strong>
+              {paidState === 'paid' ? 'paid or DP recorded in Coupa' : 'no payment or DP in Coupa'}
+            </strong>{' '}
+            <button className="dt-btn" onClick={() => setPaidState('')}>clear</button>
           </p>
         )}
 

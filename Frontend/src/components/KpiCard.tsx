@@ -1,5 +1,7 @@
 import type { Kpi } from '../lib/api';
 import { DASH, formatKpi, formatMoney, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
+import { PLAIN_WORDS } from '../lib/plainWords';
 
 /**
  * KPI card — the honesty rule in the UI.
@@ -11,12 +13,17 @@ import { DASH, formatKpi, formatMoney, formatNumber } from '../lib/format';
  */
 // v1's card palette (each .kc carries a --c accent). Severity still wins:
 // a critical figure is red and a warning amber regardless of the decoration.
-const CARD_PALETTE = ['#1F3864', '#2E75B6', '#0D9488', '#7C3AED', '#ED7D31', '#4CAF50'];
+// The first slot is the theme's heading colour, not the literal navy: the same
+// #1F3864 in light mode, but readable in dark mode, where navy is the card
+// background family and the value disappeared (functional test FT-40).
+// Theme tokens (Nov 2026 redesign), so each accent has a dark and a light value
+// with enough contrast on its surface; the meaning per slot is unchanged.
+const CARD_PALETTE = ['var(--heading)', 'var(--blue)', 'var(--teal)', 'var(--purple)', 'var(--orange)', 'var(--good)'];
 
 function accentFor(kpi: Kpi): string {
-  if (kpi.severity === 'critical') return '#C0392B';
-  if (kpi.severity === 'warning') return '#F59E0B';
-  if (kpi.severity === 'good') return '#4CAF50';
+  if (kpi.severity === 'critical') return 'var(--crit)';
+  if (kpi.severity === 'warning') return 'var(--warn)';
+  if (kpi.severity === 'good') return 'var(--good)';
   // Stable per-KPI decoration: hash the id into the palette.
   let h = 0;
   for (const ch of kpi.kpiId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -37,8 +44,9 @@ export function KpiCard({
     return (
       <div className="kpi kpi--muted" title={kpi.statusReason ?? ''}>
         <div className="v">{DASH}</div>
-        <div className="l">{kpi.title}</div>
+        <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
         <div className="s">{kpi.statusReason ?? 'Not available'}</div>
+        {PLAIN_WORDS[kpi.kpiId] && <div className="pw help-only">{PLAIN_WORDS[kpi.kpiId]}</div>}
       </div>
     );
   }
@@ -83,11 +91,39 @@ export function KpiCard({
       </span>
     ) : null;
 
+  /*
+   * Local / Import split (19 Nov 2026): Local = vendor code LN…, Import = IN….
+   * Values are in the card's own unit; a type with no observation shows "—".
+   */
+  const vtFmt = (v: unknown): string => {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
+    const n = Number(v);
+    if (kpi.unit === 'percent') return `${n.toFixed(1)}%`;
+    if (kpi.unit === 'days') return `${n.toFixed(1)} d`;
+    return formatNumber(n);
+  };
+  const vendorSplit = kpi.detail && kpi.detail['vt_local'] !== undefined ? (
+    <span className="kpi-chips kpi-vt">
+      <span className="chip chip-vt-local"
+        title={`Local suppliers (vendor code LN…): ${formatNumber(Number(kpi.detail['vt_local_n'] ?? 0))} observations`}>
+        Local {vtFmt(kpi.detail['vt_local'])}
+      </span>
+      <span className="chip chip-vt-import"
+        title={`Import suppliers (vendor code IN…): ${formatNumber(Number(kpi.detail['vt_import_n'] ?? 0))} observations`}>
+        Import {vtFmt(kpi.detail['vt_import'])}
+      </span>
+    </span>
+  ) : null;
+
   const body = (
     <>
       <div className="v">{headline}</div>
-      <div className="l">{kpi.title}</div>
-      <div className="s">{basisNote ? `${basisNote} · ` : ''}{sub}{chips}</div>
+      <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
+      <div className={vendorSplit ? 's s1' : 's'}>{basisNote ? `${basisNote} · ` : ''}{sub}{chips}</div>
+      {/* Its own line (21 Nov 2026): inside the two-line subtitle the Local /
+          Import row was clamped away on Delivered (GR). */}
+      {vendorSplit && <div className="kpi-vt-row">{vendorSplit}</div>}
+      {PLAIN_WORDS[kpi.kpiId] && <div className="pw help-only">{PLAIN_WORDS[kpi.kpiId]}</div>}
     </>
   );
 
@@ -167,6 +203,11 @@ function subtitle(kpi: Kpi): string {
     parts.push(`${formatNumber(Number(kpi.numerator ?? 0))} PRs · ${(Number(kpi.detail['chip_value_idr']) / 1e9).toFixed(1)} B IDR`);
   }
 
+  // Its drill opens the items that MADE it (23 Nov 2026), so say how many.
+  if (kpi.kpiId === 'approved_within_3d' && kpi.numerator !== null && kpi.denominator !== null) {
+    parts.push(`${formatNumber(Number(kpi.numerator))} of ${formatNumber(Number(kpi.denominator))} approved items`);
+  }
+
   if (kpi.detail && kpi.detail['entityUnit']) {
     // The figure counts entities; the drill opens the rows behind them.
     parts.push('distinct ' + String(kpi.detail['entityUnit']) + ' — drill opens the lines');
@@ -188,6 +229,70 @@ function subtitle(kpi: Kpi): string {
   else if (kpi.currencyBasis === 'usd_strict') parts.push('USD, all currencies rated');
   else if (kpi.currencyBasis === 'per_currency') parts.push('per currency — not summed');
 
-  if (parts.length === 0 && kpi.sampleSize !== null) parts.push(`n = ${formatNumber(kpi.sampleSize)}`);
+  // Not on a maximum (21 Nov 2026): "n = 13,200" under "Max PR Approval" read
+  // as how many items took that long. The drill lists exactly those items.
+  if (parts.length === 0 && kpi.sampleSize !== null && !NO_SAMPLE_KPIS.has(kpi.kpiId)) {
+    parts.push(`n = ${formatNumber(kpi.sampleSize)}`);
+  }
   return parts.join(' · ');
+}
+
+const NO_SAMPLE_KPIS = new Set(['max_pr_approval', 'oldest_unreleased']);
+
+/** A Local / Import value in the card's own unit. */
+function splitText(k: Kpi, v: unknown): string {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return DASH;
+  const n = Number(v);
+  if (k.unit === 'days') return `${n.toLocaleString('en-GB', { maximumFractionDigits: 1 })} d`;
+  if (k.unit === 'percent') return `${n.toFixed(1)}%`;
+  return formatNumber(n);
+}
+
+/**
+ * Several related figures on ONE card, not clickable (21 Nov 2026, PR
+ * Analysis): four cards that each answered "how long / how much on average"
+ * were simplified into one. Each line keeps its own unit, and the display
+ * currency switch applies to a money line exactly as on a single card.
+ */
+export function KpiSummaryCard({
+  id, title, items, currency = 'USD',
+}: {
+  id: string;
+  title: string;
+  items: { kpi: Kpi | undefined; label: string }[];
+  currency?: 'USD' | 'IDR';
+}) {
+  const line = (k: Kpi | undefined): string => {
+    if (!k || k.status !== 'ok' || k.value === null) return DASH;
+    if (currency === 'USD' && k.unit === 'idr' && k.detail?.['value_usd'] !== null && k.detail?.['value_usd'] !== undefined) {
+      return formatMoney(Number(k.detail['value_usd']), 'USD');
+    }
+    if (currency === 'IDR' && k.unit === 'usd' && k.detail?.['value_idr'] !== null && k.detail?.['value_idr'] !== undefined) {
+      return formatMoney(Number(k.detail['value_idr']), 'IDR');
+    }
+    // One decimal for days here: side by side, "3 d / 3 d / 3 d" hid that the
+    // average is 3.2 while both medians are 3.
+    if (k.unit === 'days') return `${Number(k.value).toLocaleString('en-GB', { maximumFractionDigits: 1 })} d`;
+    return formatKpi(k.value, k.unit);
+  };
+  return (
+    <div className="kpi kpi-multi" style={{ ['--c' as string]: 'var(--heading)' }}>
+      <div className="l kpi-multi-h"><Lbl k={`kpi:${id}`}>{title}</Lbl></div>
+      <dl className="kpi-multi-list">
+        {items.map(({ kpi, label }) => (
+          <div key={label} className="kpi-multi-item">
+            <div className="kpi-multi-row" title={kpi?.statusReason ?? undefined}>
+              <dt>{label}</dt>
+              <dd>{line(kpi)}</dd>
+            </div>
+            {kpi?.detail && kpi.detail['vt_local'] !== undefined && (
+              <div className="kpi-multi-vt">
+                Local {splitText(kpi, kpi.detail['vt_local'])} · Import {splitText(kpi, kpi.detail['vt_import'])}
+              </div>
+            )}
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
 }

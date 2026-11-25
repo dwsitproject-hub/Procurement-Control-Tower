@@ -11,6 +11,7 @@
  */
 
 import { prSpendCategoryMatchSql } from '@pct/rules';
+import { parseVendorType, vendorTypePredicate, type VendorType } from './vendortype.js';
 
 export interface GlobalFilter {
   companyCode?: string[];
@@ -50,6 +51,19 @@ export interface GlobalFilter {
    * behind it would not tie out. One extra field is cheaper than that.
    */
   delivered?: boolean;
+  /**
+   * Who RAISED the order: 'HO', 'Unit' (Site) or '(unmapped)', from created_by
+   * through the business file - the Manage by HO or Site panel's bands. Added
+   * 16 Nov 2026: a click on that panel used to carry the month only, so a panel
+   * titled "HO - Jan 2026" showed HO and Site together.
+   */
+  managedBy?: string[];
+  /**
+   * Local (vendor code LN...) or Import (IN...) - vendortype.ts. Added 21 Nov
+   * 2026 for the Delivery page. A property of the ORDER's vendor: a requisition
+   * matches through its PO lines, a goods receipt through its PO line.
+   */
+  vendorType?: VendorType;
 }
 
 /** The status set v1 (and the drill `open` filter) treat as open. */
@@ -67,6 +81,8 @@ export function isEmptyFilter(f: GlobalFilter): boolean {
     (f.spendCategory?.length ?? 0) === 0 &&
     (f.sizeBand?.length ?? 0) === 0 &&
     f.delivered === undefined &&
+    (f.managedBy?.length ?? 0) === 0 &&
+    f.vendorType === undefined &&
     f.scope === undefined
   );
 }
@@ -155,6 +171,20 @@ export function dimPredicate(kind: FactKind, dim: Dim, alias: string, placeholde
   return `EXISTS (SELECT 1 FROM core.fact_po_line _gd
                    WHERE _gd.dataset_version_id = ${outer}dataset_version_id
                      AND ${lineMatch} AND _gd.${col} = ANY(${placeholder}))`;
+}
+
+/**
+ * `<the order's creator is in one of these HO/Site bands>`, as SQL. One
+ * definition for the filter and the drill (createdByHoUnitIn), and the same
+ * min(ho_unit) lookup the exec_ho_site chart buckets by, so a figure under
+ * this filter and the rows behind it cannot disagree. A creator who is not in
+ * the business file is the band '(unmapped)', as on the panel.
+ *
+ * `t` is the PO-line alias with its trailing dot ('pol.', '_xs.') or ''.
+ */
+export function managedBySql(t: string, placeholder: string): string {
+  return `COALESCE((SELECT min(hu_.ho_unit) FROM core.dim_user_purch_org hu_
+                     WHERE hu_.user_id = ${t}created_by), '(unmapped)') = ANY(${placeholder})`;
 }
 
 export interface Clause {
@@ -264,6 +294,32 @@ export function buildFilterClause(
     const i = n;
     poScoped((t) => `${t}size_band = ANY($${i})`);
     n += 1;
+  }
+
+  if (f.managedBy && f.managedBy.length > 0) {
+    params.push(f.managedBy);
+    const i = n;
+    // A property of the ORDER (its creator), so PO-scoped like size band.
+    poScoped((t) => managedBySql(t, `$${i}`));
+    n += 1;
+  }
+
+  if (f.vendorType !== undefined) {
+    // The vendor lives on the PO line. Unlike the Executive Summary dimensions a
+    // goods receipt DOES have one - through the line it was posted against - so
+    // the GR grain is resolved rather than refused; the release tables are not.
+    const pred = (t: string) => vendorTypePredicate(`${t}vendor_code`, f.vendorType!);
+    if (kind === 'gr_posting') {
+      const outer = alias !== '' ? alias : 'core.fact_gr_posting.';
+      parts.push(
+        `EXISTS (SELECT 1 FROM core.fact_po_line _vt
+                  WHERE _vt.dataset_version_id = ${outer}dataset_version_id
+                    AND _vt.po_no = ${outer}po_no AND _vt.po_item = ${outer}po_item
+                    AND ${pred('_vt.')})`,
+      );
+    } else {
+      poScoped(pred);
+    }
   }
 
   if (f.delivered !== undefined) {
@@ -401,6 +457,12 @@ export function mergeIntoPredicate(
   if (f.sizeBand?.length) {
     filters['sizeBandIn'] = f.sizeBand;
   }
+  if (f.managedBy?.length) {
+    filters['createdByHoUnitIn'] = f.managedBy;
+  }
+  if (f.vendorType !== undefined) {
+    filters['vendorType'] = f.vendorType;
+  }
   if (f.delivered !== undefined) {
     // A DISTINCT key from the `delivered` a chart series sets for itself:
     // `filters` is an object, so reusing the key would overwrite the spec's
@@ -436,6 +498,8 @@ export function parseGlobalFilter(q: Record<string, unknown>): GlobalFilter {
     spendCategory: list('spendCategory'),
     sizeBand: list('sizeBand'),
     delivered: rawLifecycle === 'closed' ? true : rawLifecycle === 'open' ? false : undefined,
+    managedBy: list('managedBy'),
+    vendorType: parseVendorType(q['vendorType']) ?? undefined,
   };
 }
 
@@ -451,5 +515,7 @@ export function describeFilter(f: GlobalFilter): Record<string, unknown> {
   if (f.spendCategory?.length) out['spendCategory'] = f.spendCategory;
   if (f.sizeBand?.length) out['sizeBand'] = f.sizeBand;
   if (f.delivered !== undefined) out['lifecycle'] = f.delivered ? 'closed' : 'open';
+  if (f.managedBy?.length) out['managedBy'] = f.managedBy;
+  if (f.vendorType) out['vendorType'] = f.vendorType;
   return out;
 }

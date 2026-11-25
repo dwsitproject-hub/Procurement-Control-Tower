@@ -165,6 +165,12 @@ export interface ReleaseFillResult {
   readonly l2BeforeL1: number;
   /** Continuation rows that could not be attached to any parent. */
   readonly unattached: number;
+  /**
+   * With `setAsideBad`, the rows the two V-R04 guards caught, taken OUT of
+   * `rows` instead of kept (5 Nov 2026: a bad row is set aside, the rest of the
+   * file still loads). Empty without it, when the guards only count.
+   */
+  readonly setAside: { rowNumber: number; ruleId: 'V-R04' | 'V-R04a'; reason: string }[];
 }
 
 export function isContinuationRow(r: ReleaseRowRaw): boolean {
@@ -172,9 +178,14 @@ export function isContinuationRow(r: ReleaseRowRaw): boolean {
   return r.prNo === null && (r.prItem === null || r.prItem === 0);
 }
 
-export function fillReleaseContinuations(raw: readonly ReleaseRowRaw[]): ReleaseFillResult {
+export function fillReleaseContinuations(
+  raw: readonly ReleaseRowRaw[],
+  opts: { setAsideBad?: boolean } = {},
+): ReleaseFillResult {
   const rows: ReleaseRowFilled[] = [];
   const seen = new Set<string>();
+  const setAside: { rowNumber: number; ruleId: 'V-R04' | 'V-R04a'; reason: string }[] = [];
+  const drop = opts.setAsideBad === true;
 
   let lastPrNo: string | null = null;
   let lastPrItem: number | null = null;
@@ -198,7 +209,19 @@ export function fillReleaseContinuations(raw: readonly ReleaseRowRaw[]): Release
       continuationCount += 1;
 
       // GUARD V-R04: a continuation row must immediately follow a seq-1 row.
-      if (prevSeq !== 1) orderViolations += 1;
+      if (prevSeq !== 1) {
+        orderViolations += 1;
+        // Its parent cannot be told from the row above, so filling it would
+        // guess. Set aside, it is reported instead of misattributed.
+        if (drop && lastPrNo !== null && lastPrItem !== null) {
+          setAside.push({
+            rowNumber: r.rowNumber, ruleId: 'V-R04',
+            reason: 'Continuation row not directly below a sequence-1 row: its PR cannot be told from the row above, so it was not attached to one.',
+          });
+          prevSeq = r.relSeq;
+          continue;
+        }
+      }
 
       if (lastPrNo === null || lastPrItem === null) {
         unattached += 1;
@@ -223,7 +246,17 @@ export function fillReleaseContinuations(raw: readonly ReleaseRowRaw[]): Release
       };
 
       const k = `${filled.prNo}|${filled.prItem}|${filled.relSeq}`;
-      if (seen.has(k)) duplicateKeys += 1;
+      if (seen.has(k)) {
+        duplicateKeys += 1;
+        if (drop) {
+          setAside.push({
+            rowNumber: r.rowNumber, ruleId: 'V-R04a',
+            reason: `Repeats PR ${filled.prNo} item ${filled.prItem} release step ${filled.relSeq}, already given by an earlier row; the earlier row was kept.`,
+          });
+          prevSeq = r.relSeq;
+          continue;
+        }
+      }
       seen.add(k);
       rows.push(filled);
     } else {
@@ -238,14 +271,24 @@ export function fillReleaseContinuations(raw: readonly ReleaseRowRaw[]): Release
       if (r.relSeq === 1) lastSeq1ApproveDate = r.approveDate;
 
       const k = `${r.prNo}|${r.prItem}|${r.relSeq}`;
-      if (seen.has(k)) duplicateKeys += 1;
+      if (seen.has(k)) {
+        duplicateKeys += 1;
+        if (drop) {
+          setAside.push({
+            rowNumber: r.rowNumber, ruleId: 'V-R04a',
+            reason: `Repeats PR ${r.prNo} item ${r.prItem} release step ${r.relSeq}, already given by an earlier row; the earlier row was kept.`,
+          });
+          prevSeq = r.relSeq;
+          continue;
+        }
+      }
       seen.add(k);
       rows.push({ ...r, wasContinuation: false });
     }
     prevSeq = r.relSeq;
   }
 
-  return { rows, continuationCount, orderViolations, duplicateKeys, l2BeforeL1, unattached };
+  return { rows, continuationCount, orderViolations, duplicateKeys, l2BeforeL1, unattached, setAside };
 }
 
 /**

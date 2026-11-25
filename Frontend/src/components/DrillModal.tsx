@@ -5,6 +5,8 @@ import { ScrollFrame } from './ScrollFrame';
 import {
   ColumnChooser, SortButton, useColumnLayout, useHeaderDrag, type SortState,
 } from './TableTools';
+import { FloatControls } from './FloatControls';
+import { hubTrack } from '../lib/hub';
 
 /** v1's aging colour rule: > 30 days red, > 14 amber, both bold. */
 function agingStyle(days: number): React.CSSProperties | undefined {
@@ -49,7 +51,7 @@ export function DrillModal({
   const sortQs = sort ? `&sort=${encodeURIComponent(sort.key)}&dir=${sort.dir}` : '';
   // Column choice and order, remembered per grain: a PO-line drill and a GR
   // drill have different columns, and choosing for one must not hide the other's.
-  const layout = useColumnLayout(page ? `drill_layout_${page.grain}` : null, page?.columns ?? null);
+  const layout = useColumnLayout(page ? `drill_layout_${page.grain}${page.view ? `_${page.view}` : ''}` : null, page?.columns ?? null);
   const thProps = useHeaderDrag(layout.reorder);
   const byKey = new Map((page?.columns ?? []).map((c) => [c.key, c]));
   const shownCols = layout.visible
@@ -121,6 +123,7 @@ export function DrillModal({
         'pct-drill.xlsx',
       );
       const n = r.rows ?? 0;
+      hubTrack('report_exported', { source: 'drill', format: 'xlsx', rows: n });
       setExportNote(
         r.total !== null && r.total > n
           ? `Downloaded ${r.filename} \u2014 ${formatNumber(n)} of ${formatNumber(r.total)} rows. `
@@ -161,6 +164,7 @@ export function DrillModal({
         <header>
           <h3 id="drill-title">{'\u{1F50D} '}{label || page?.label}</h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {page && !error && page.totalCount > 0 && (
             <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} />
           )}
@@ -216,10 +220,15 @@ export function DrillModal({
           {page && !error && (
             <>
               <p className="count">
-                <strong>{formatNumber(page.totalCount)}</strong> rows
+                <strong>{formatNumber(page.totalCount)}</strong>{page.view === 'by_purch_group' ? ' purchasing groups' : ' rows'}
                 {/* v1's dd-modal header: value totals over the whole population. */}
                 {page.totals?.idrSum !== null && page.totals?.idrSum !== undefined && (
                   <> · Σ {(page.totals.idrSum / 1e9).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} B IDR</>
+                )}
+                {/* Say what the sums are when they are not order value, so a
+                    "still to deliver" header is not read as the PO amount. */}
+                {page.totals?.basis && page.totals.basis !== 'value' && (
+                  <> {page.totals.basis === 'still_to_deliver' ? 'still to deliver' : 'still to invoice'}</>
                 )}
                 {page.totals && page.totals.usdSum !== null && (
                   <> · ≈ ${formatNumber(Math.round(page.totals.usdSum))} USD</>

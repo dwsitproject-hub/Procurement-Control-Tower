@@ -83,6 +83,11 @@ export const EnvSchema = z
     STORAGE_DEPLOYMENT: optional(z.enum(['dev', 'prod']).optional()),
     STORAGE_PROJECT_SLUG: optional(z.string().min(1).optional()),
     STORAGE_LOCAL_PATH: optional(z.string().optional()),
+    // With STORAGE_LOCAL_PATH: the path is a NAS mount, so check it is one at
+    // boot (12 Nov 2026). Production reads APPs/PCT at the share root, which the
+    // composed root/deployment/slug form cannot express ('prod' would add a
+    // folder), so it uses an explicit path - and keeps the missing-mount check.
+    STORAGE_EXPECT_MOUNT: bool.default(false),
 
     // Fallback share folder, and the local stand-in for the NAS in dev: any
     // readable directory holding the six SAP exports.
@@ -110,6 +115,17 @@ export const EnvSchema = z
           // the client is granted this scope, the app simply never asked.
           'core.supplier.read core.common.read',
       ),
+
+    // Data Hub Management (DHM), the master-data hub (040, 23 Oct 2026):
+    // exchange rates come from its `exchange_rate` master. All optional, like
+    // Coupa's: without them the poller stays off and the Admin FX page says
+    // "not configured". The private key is a secret - env only, never the DB.
+    // DHM_BASE_URL is the API root, e.g. http://test-datahub.kpndomain.com/api
+    DHM_BASE_URL: z.string().url().optional(),
+    DHM_PUBLIC_KEY: z.string().optional(),
+    DHM_PRIVATE_KEY: z.string().optional(),
+    DHM_FX_ENTITY: z.string().regex(/^[a-z][a-z0-9_]*$/).default('exchange_rate'),
+    DHM_FX_SYNC_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
 
     SMTP_HOST: z.string().default('mailhog'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),

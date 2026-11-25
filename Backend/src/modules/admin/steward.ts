@@ -51,11 +51,20 @@ export interface Exclusions {
    * would mean an admin choosing from a list that cannot express what they need.
    */
   coupaPurchGroups: string[];
+  /**
+   * Coupa plant-code PREFIXES excluded from the Coupa store (047), e.g. 'TH'.
+   *
+   * Coupa is shared with business units outside this dashboard (Upstream's
+   * 11…/12… POs and their sourcing events). A plant is what every Coupa PO line
+   * and event carries, so it reaches the Sourcing page as well, which a PO
+   * number cannot. Applied by the same views as coupaPurchGroups: live on save.
+   */
+  coupaPlants: string[];
 }
 
 export const EXCLUSION_KEYS = [
   'exclusions.doc_types', 'exclusions.purch_groups', 'exclusions.purch_orgs',
-  'exclusions.coupa_purch_groups',
+  'exclusions.coupa_purch_groups', 'exclusions.coupa_plants',
   'exclusions.hold_pos', 'exclusions.interco_vendor_prefixes',
 ] as const;
 
@@ -77,6 +86,7 @@ export async function loadExclusions(): Promise<Exclusions> {
     purchGroups: get('exclusions.purch_groups'),
     purchOrgs: get('exclusions.purch_orgs'),
     coupaPurchGroups: get('exclusions.coupa_purch_groups'),
+    coupaPlants: get('exclusions.coupa_plants'),
     holdPos: rawHold === true || rawHold === 'true',
     intercoVendorPrefixes: get('exclusions.interco_vendor_prefixes'),
   };
@@ -89,6 +99,9 @@ export async function saveExclusions(e: Exclusions, userId: string | null): Prom
     ['exclusions.purch_groups', e.purchGroups],
     ['exclusions.purch_orgs', e.purchOrgs],
     ['exclusions.coupa_purch_groups', e.coupaPurchGroups],
+    // Uppercased, letters and digits only: the view compares a plain prefix,
+    // and a lower-case or padded value would silently match nothing.
+    ['exclusions.coupa_plants', normalisePlantPrefixes(e.coupaPlants)],
     // Uppercased on the way in: the transform compares uppercased codes, and a
     // prefix typed in lower case would otherwise silently match nothing.
     ['exclusions.interco_vendor_prefixes',
@@ -219,6 +232,80 @@ export async function coupaExclusionOptions(): Promise<CoupaExclusionOption[]> {
     receipts: r.receipts,
     count: r.po_lines + r.sourcing_events,
     excluded: current.coupaPurchGroups.includes(r.value),
+  }));
+}
+
+/** Upper-case, keep [A-Z0-9], drop empties and duplicates. */
+export function normalisePlantPrefixes(values: string[]): string[] {
+  const out: string[] = [];
+  for (const v of values) {
+    const x = String(v).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+    if (x !== '' && !out.includes(x)) out.push(x);
+  }
+  return out;
+}
+
+/** A Coupa plant group (first two characters of the plant code). */
+export interface CoupaPlantOption {
+  value: string;
+  /** The plant codes seen under this group, e.g. "TH01, TH3T". */
+  plants: string;
+  poLines: number;
+  sourcingEvents: number;
+  count: number;
+  /** True when the group has a plant in the SAP files (core.dim_plant). */
+  inSap: boolean;
+  excluded: boolean;
+}
+
+/**
+ * Plant groups present in the Coupa store, with what excluding each removes.
+ *
+ * Grouped by the first two characters because that is the site: TH01, TH3T and
+ * TH00 are one place, and an admin scoping out a business unit thinks in sites.
+ * RAW-table counts, as for purchasing groups, so an excluded group still shows
+ * its true size and can be re-included. `inSap` is the signal the 047 seed was
+ * built on: a group with no plant in the SAP files is outside this dashboard.
+ * A saved value that is a full plant code (or no longer in Coupa) is listed
+ * too, so the control to clear it never disappears.
+ */
+export async function coupaPlantOptions(): Promise<CoupaPlantOption[]> {
+  const current = await loadExclusions();
+  const rows = await query<{
+    value: string; plants: string | null; po_lines: number; sourcing_events: number; in_sap: boolean;
+  }>(
+    `WITH pol AS (
+       SELECT left(upper(plant), 2) AS value, count(*)::int AS n,
+              string_agg(DISTINCT upper(plant), ', ' ORDER BY upper(plant)) AS plants
+         FROM ops.coupa_po_line WHERE COALESCE(btrim(plant), '') <> '' GROUP BY 1
+     ), se AS (
+       SELECT left(upper(plant), 2) AS value, count(*)::int AS n,
+              string_agg(DISTINCT upper(plant), ', ' ORDER BY upper(plant)) AS plants
+         FROM ops.coupa_sourcing_event WHERE COALESCE(btrim(plant), '') <> '' GROUP BY 1
+     ), v AS (
+       SELECT value FROM pol UNION SELECT value FROM se UNION SELECT unnest($1::text[])
+     )
+     SELECT v.value,
+            COALESCE(pol.plants, se.plants) AS plants,
+            COALESCE(pol.n, 0) AS po_lines,
+            COALESCE(se.n, 0) AS sourcing_events,
+            EXISTS (SELECT 1 FROM core.dim_plant d
+                     WHERE left(upper(d.plant), length(v.value)) = v.value) AS in_sap
+       FROM v
+       LEFT JOIN pol ON pol.value = v.value
+       LEFT JOIN se  ON se.value  = v.value
+      WHERE v.value IS NOT NULL AND v.value <> ''
+      ORDER BY (COALESCE(pol.n, 0) + COALESCE(se.n, 0)) DESC, v.value`,
+    [current.coupaPlants],
+  );
+  return rows.map((r) => ({
+    value: r.value,
+    plants: r.plants ?? '',
+    poLines: r.po_lines,
+    sourcingEvents: r.sourcing_events,
+    count: r.po_lines + r.sourcing_events,
+    inSap: r.in_sap,
+    excluded: current.coupaPlants.includes(r.value),
   }));
 }
 

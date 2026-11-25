@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../lib/api';
 import { DASH, formatDateTime, formatNumber } from '../lib/format';
+import { Lbl } from '../lib/labels';
+import { hubTrack } from '../lib/hub';
 
 /**
  * SAP Data Upload — the manual fallback for when the share-folder sync is not
@@ -66,6 +68,12 @@ const EXPECTED = [
   { feed: 'porg', label: 'Purchasing Orgs', hint: 'P Org — purchasing org master', optional: true },
   { feed: 'matm', label: 'Material Master', hint: 'Mat group — material code, description, SAP category', optional: true },
   { feed: 'zuser', label: 'SAP Users', hint: 'zuser — user id to name', optional: true },
+  {
+    feed: 'dp',
+    label: 'Down Payments',
+    hint: 'DP All — vendor line items on the down-payment accounts (empty clearing date = DP outstanding)',
+    optional: true,
+  },
 ];
 
 /**
@@ -408,6 +416,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
       : 'Reading the folders and ingesting…');
     try {
       const out = await api.post<Record<string, any>>('/api/v1/ingest/sync', force ? { force: true } : {});
+      hubTrack(force ? 'sap_rebuild' : 'sap_sync_now', { outcome: String(out['outcome'] ?? '') });
       setSyncSummary(
         Array.isArray(out.rowSummary) && out.rowSummary.length > 0
           ? { batchId: typeof out.batchId === 'number' ? out.batchId : null, rows: out.rowSummary }
@@ -459,7 +468,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   };
 
   if (!cfg) {
-    return <div className="panel"><h2>🔁 SAP Data Sync</h2><div className="spinner" /></div>;
+    return <div className="panel"><h2>🔁 <Lbl>SAP Data Sync</Lbl></h2><div className="spinner" /></div>;
   }
 
   const scanOf = (feed: string) => scan?.feeds.find((f) => f.feed === feed);
@@ -473,7 +482,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
   return (
     <div className="panel">
       <h2>
-        🔁 SAP Data Sync{' '}
+        🔁 <Lbl>SAP Data Sync</Lbl>{' '}
         <span className="muted">— per file: folder, name pattern, 3 pickup times ({cfg.timezone})</span>
       </h2>
       <p className="note" style={{ marginTop: 0 }}>
@@ -502,7 +511,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
         up front.
       */}
       <h3 className="pr-tbl-h">
-        📁 After a run <span className="muted">— move the files aside</span>
+        📁 <Lbl>After a run</Lbl> <span className="muted">— move the files aside</span>
       </h3>
       <p className="note">
         With this on, the files a run consumed are moved out of the pickup folder: into{' '}
@@ -831,7 +840,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
 
       {scan?.feeds.some((f) => f.others.length > 0 || !f.readable) && (
         <>
-          <h3 className="pr-tbl-h">Files that would not be used</h3>
+          <h3 className="pr-tbl-h"><Lbl>Files that would not be used</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -879,7 +888,7 @@ function SapSyncSection({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boole
 
       {cfg.recentRuns.length > 0 && (
         <>
-          <h3 className="pr-tbl-h">Recent pickups</h3>
+          <h3 className="pr-tbl-h"><Lbl>Recent pickups</Lbl></h3>
           <div className="table-wrap" style={{ maxHeight: 220, overflowY: 'auto' }}>
             <table className="data dd-tbl">
               <thead>
@@ -962,6 +971,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
     try {
       const fd = new FormData();
       for (const f of files) fd.append('files', f, f.name);
+      hubTrack('sap_upload', { files: files.length, publish });
       // FormData must NOT go through the JSON helper: the browser has to set
       // its own multipart boundary.
       const res = await fetch(`/api/v1/ingest/upload?publish=${publish ? 'true' : 'false'}`, {
@@ -995,7 +1005,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
     <SapSyncSection canEdit={canUpload} isAdmin={isAdmin} />
 
     <div className="panel">
-      <h2>⬆️ SAP Data Upload</h2>
+      <h2>⬆️ <Lbl>SAP Data Upload</Lbl></h2>
       <p className="note" style={{ marginTop: 0 }}>
         Manual fallback for when the share-folder sync is not running. Uploaded files go through the
         <strong> same pipeline</strong> as the automatic sync — same validations, same transform,
@@ -1019,7 +1029,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
         </p>
       ) : (
         <>
-          <h3 className="pr-tbl-h">1. Choose the SAP exports</h3>
+          <h3 className="pr-tbl-h"><Lbl>1. Choose the SAP exports</Lbl></h3>
           <div className="table-wrap" style={{ marginBottom: '.6rem' }}>
             <table className="data dd-tbl">
               <thead>
@@ -1057,12 +1067,8 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
                       <td><code>{e.feed}</code></td>
                       <td>
                         {e.label}{' '}
-                        {'optional' in e && e.optional && (
-                          // Stated on the row so nobody concludes a bundle now
-                          // needs ten files: the six transactional exports are
-                          // still all-or-nothing, these four are not.
-                          <span className="bs sl">optional</span>
-                        )}
+                        {/* No "optional" badge since 11 Nov 2026: every export
+                            is optional now - one file is a valid upload. */}
                       </td>
                       <td className="muted">{e.hint}</td>
                       <td>
@@ -1124,16 +1130,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
             return (
               <>
                 <p className="note">
-                  <span className={files.length < REQUIRED_FEED_IDS.length ? 'bs sa' : 'bs sl'}>
-                    {files.length} file(s) chosen
-                  </span>{' '}
-                  {files.length < REQUIRED_FEED_IDS.length && (
-                    <>
-                      <strong>
-                        Fewer than the {REQUIRED_FEED_IDS.length} required exports.
-                      </strong>{' '}
-                    </>
-                  )}
+                  <span className="bs sl">{files.length} file(s) chosen</span>{' '}
                   {files.map((f) => f.name).join(' · ')}
                 </p>
                 {unmatched.length > 0 && (
@@ -1152,12 +1149,14 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
             );
           })()}
           <p className="note">
-            A complete bundle needs all {REQUIRED_FEED_IDS.length} of{' '}
-            <strong>{REQUIRED_FEED_IDS.join(', ')}</strong> — an incomplete set is rejected rather
-            than published half-loaded. Only the four marked <em>optional</em> may be left out;
-            Rate Conversion (<code>fx</code>) is <strong>not</strong> one of them. Which feed a file
-            is comes from its column headers, never its name, so a correctly-named file can still be
-            classified as something else — and a file named nothing like its feed still lands
+            <strong>One file is enough.</strong> Upload any of the exports above, alone or together:
+            each merges into what is already loaded — new records are added, changed ones updated —
+            and everything you leave out stays exactly as it was. A reference file on its own
+            (SAP Users, Purchasing Groups, Purchasing Orgs, Material Master) refreshes just that list;
+            a Rate Conversion file on its own refreshes the rates. Only the very first load, or a
+            load with merging switched off, needs all {REQUIRED_FEED_IDS.length} of{' '}
+            <strong>{REQUIRED_FEED_IDS.join(', ')}</strong>. Which feed a file is comes from its
+            column headers, never its name, so a file named nothing like its feed still lands
             correctly. Leave <em>Publish immediately</em> unticked to validate and stage only, then
             publish from the dataset history. Ingest can take a minute or two; the page waits for
             the result.
@@ -1169,7 +1168,7 @@ export function SapUploadTab({ canUpload, isAdmin }: { canUpload: boolean; isAdm
 
       {result && (
         <>
-          <h3 className="pr-tbl-h">Result</h3>
+          <h3 className="pr-tbl-h"><Lbl>Result</Lbl></h3>
           {result.outcome === 'published' && (
             <p className="note">
               <span className="bs sd">published</span>{' '}

@@ -13,9 +13,18 @@
 
 import { AGE_BANDS as SHARED_AGE_BANDS, ageBandPredicateSql } from '@pct/rules';
 import { query, queryOne } from '../../db/client.js';
+import { memo } from './cache.js';
 import {
   DETAIL_SCOPE_COLUMNS, mintScopedQuery, scopeSql, type ScopeEntry,
 } from '../authz/scope.js';
+
+/**
+ * A free-text search as an ILIKE argument: % _ and the escape character are
+ * matched literally, and the term is capped (security review SEC-S-38).
+ */
+function likeArg(term: string): string {
+  return `%${term.slice(0, 100).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
 
 export interface DetailColumn {
   key: string;
@@ -105,7 +114,8 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   // would read as rupiah.
   { key: 'poValueIdr',      label: 'PO Value IDR',           sql: 'po_value_idr',        type: 'money',  currency: 'IDR', default: false, sortable: true },
   { key: 'prValueIdr',      label: 'PR Value IDR',           sql: 'pr_value_idr',        type: 'money',  currency: 'IDR', default: false, sortable: true },
-  { key: 'purchOrg',        label: 'Purch Org',              sql: 'purch_org',           type: 'string', default: false, sortable: true },
+  // Shown by default since 19 Nov 2026 (requested), labelled like the drill's.
+  { key: 'purchOrg',        label: 'Purchasing Organization', sql: 'purch_org',          type: 'string', default: true,  sortable: true },
   { key: 'purchGroup',      label: 'Purch Grp',              sql: 'purch_group',         type: 'string', default: false, sortable: true },
   { key: 'requisitioner',   label: 'Requisitioner',          sql: 'requisitioner',       type: 'string', default: false, sortable: true },
   // 028. The age of the row in the stage it is in — a PR still waiting ages on
@@ -220,6 +230,12 @@ export interface DetailFilters {
   /** The requisition's / the order's SAP document type (037). */
   prDocType?: string[];
   poDocType?: string[];
+  /**
+   * Open Items stages (19 Oct 2026): open statuses and/or the after-delivery
+   * states 'deliveredNotInvoiced' / 'invoicedNotPaid', OR'd - the backlog
+   * table's Stages filter, so a click opens the rows it counted.
+   */
+  oiStage?: string[];
   search?: string;
   /**
    * One of the four age bands, or 'past-sla' for everything beyond the first.
@@ -238,6 +254,13 @@ export interface DetailFilters {
    * more.
    */
   moneyState?: string;
+  /**
+   * 'paid' | 'unpaid' (19 Nov 2026): whether the line's SAP PO has a payment
+   * recorded in Coupa (ops.v_coupa_paid_sap_po) or, since 25 Nov 2026, a down
+   * payment in SAP (ops.v_sap_dp_line). The Open Items "PO not delivered" cards
+   * split on it. Whitelisted like moneyState.
+   */
+  paidState?: string;
   excludeSto?: boolean;
   includeDeleted?: boolean;
   onlyOpen?: boolean;
@@ -254,7 +277,7 @@ export interface DetailFilters {
  */
 export const DETAIL_QUERY_PARAMS = [
   'status', 'matCat', 'spendCategory', 'matGroup', 'plant', 'company', 'purchOrg', 'purchGroup',
-  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'q', 'ageBand', 'moneyState', 'excludeSto', 'includeDeleted', 'onlyOpen',
+  'priority', 'monthKey', 'year', 'prDocType', 'poDocType', 'oiStage', 'q', 'ageBand', 'moneyState', 'paidState', 'excludeSto', 'includeDeleted', 'onlyOpen',
   'onlyDirectPo', 'onlyReleaseExempt', 'sort', 'dir',
 ] as const;
 
@@ -302,15 +325,35 @@ const DELIVERED_NOT_INVOICED =
  *   Invoicing and Payment page rather than quietly counting more.
  *
  * 'voided' and 'draft' are excluded because neither is a debt.
+ *
+ * Written as an UNCORRELATED row IN (19 Oct 2026), not a correlated EXISTS:
+ * the same rows, but Postgres builds the set once and hashes it. Under the
+ * Open Items Stages filter this predicate is OR'd with a status test, and an
+ * OR'd correlated EXISTS ran once per row - 11.5 s for one category against
+ * well under one. The NULL guards keep IN from answering NULL where EXISTS
+ * answered false.
  */
-const INVOICED_NOT_PAID = `EXISTS (
-  SELECT 1 FROM ops.coupa_invoice_line il
+const INVOICED_NOT_PAID = `(d.po_no, d.po_item) IN (
+  SELECT cpl.sap_po_no, cpl.sap_po_item FROM ops.coupa_invoice_line il
     JOIN ops.coupa_po_line cpl ON cpl.order_line_id = il.order_line_id
     JOIN ops.v_coupa_invoice i ON i.id = il.invoice_id
-   WHERE cpl.sap_po_no = d.po_no AND cpl.sap_po_item = d.po_item
+   WHERE cpl.sap_po_no IS NOT NULL AND cpl.sap_po_item IS NOT NULL
      AND NOT i.paid AND i.status NOT IN ('voided', 'draft'))`;
 
 /** Exported so the Open Items cards count exactly what the table will show. */
+/**
+ * paidState's whitelist: the SAP PO has (not) a Coupa payment or an SAP down
+ * payment. A DP counts when money was advanced (a positive DP row), whether
+ * still outstanding or since settled; a Coupa invoice that is an SAP DP keyed
+ * into Coupa is already left out of the Coupa side (051), so nothing counts twice.
+ */
+const HAS_PAYMENT = `(EXISTS (SELECT 1 FROM ops.v_coupa_paid_sap_po pp WHERE pp.po_no = d.po_no)
+   OR EXISTS (SELECT 1 FROM ops.v_sap_dp_line dp WHERE dp.po_no = d.po_no AND dp.amount > 0))`;
+export const PAID_STATE_SQL: Record<string, string> = {
+  paid: HAS_PAYMENT,
+  unpaid: `NOT ${HAS_PAYMENT}`,
+};
+
 export const MONEY_STATE_SQL: Record<string, string> = {
   deliveredNotInvoiced: DELIVERED_NOT_INVOICED,
   invoicedNotPaid: INVOICED_NOT_PAID,
@@ -376,9 +419,11 @@ export function parseDetailQuery(q: Record<string, unknown>): {
     year: list('year')?.filter((y) => /^\d{4}$/.test(y)),
     prDocType: list('prDocType'),
     poDocType: list('poDocType'),
+    oiStage: list('oiStage'),
     search: q['q'] === undefined ? undefined : String(q['q']),
     ageBand: q['ageBand'] === undefined ? undefined : String(q['ageBand']),
     moneyState: q['moneyState'] === undefined ? undefined : String(q['moneyState']),
+    paidState: q['paidState'] === undefined ? undefined : String(q['paidState']),
     excludeSto: flag('excludeSto'),
     includeDeleted: flag('includeDeleted'),
     onlyOpen: flag('onlyOpen'),
@@ -419,6 +464,7 @@ export function describeDetailFilters(
     ['year', 'Year'],
     ['prDocType', 'PR Type'],
     ['poDocType', 'PO Type'],
+    ['oiStage', 'Stage'],
   ];
   for (const [key, label] of listLabels) {
     const v = filters[key] as string[] | undefined;
@@ -431,6 +477,8 @@ export function describeDetailFilters(
   if (filters.moneyState === 'deliveredNotInvoiced') {
     out.push(['State', 'delivered, not invoiced']);
   }
+  if (filters.paidState === 'paid') out.push(['Payment', 'paid or DP recorded in Coupa']);
+  if (filters.paidState === 'unpaid') out.push(['Payment', 'no payment or DP in Coupa']);
   if (filters.moneyState === 'invoicedNotPaid') {
     // Named as Coupa's, in the export's own filter list, because the rows came
     // from a store the dataset version does not pin.
@@ -534,6 +582,21 @@ function buildDetailWhere(
     where.push(`to_char(COALESCE(d.po_date, d.req_date), 'YYYY') = ANY($${params.length})`);
   }
   // prDocType / poDocType are FACETS (above), which applies them.
+  if (filters.oiStage && filters.oiStage.length > 0) {
+    const OPEN = ['Unapproved PR', 'PR Approved-No PO', 'PO-Not Approved', 'HOLD PO', 'PO-No GR', 'Partially Delivered'];
+    const statuses = filters.oiStage.filter((x) => OPEN.includes(x));
+    const ors: string[] = [];
+    if (statuses.length > 0) {
+      params.push(statuses);
+      ors.push(`d.status = ANY($${params.length})`);
+    }
+    for (const m of filters.oiStage) {
+      if (MONEY_STATE_SQL[m]) ors.push(`(${MONEY_STATE_SQL[m]})`);
+    }
+    // Only known values are honoured; none known matches nothing rather than
+    // silently widening to every row.
+    where.push(ors.length > 0 ? `(${ors.join(' OR ')})` : 'false');
+  }
 
   // Toggles are NOT omitted for any facet: they narrow the population the
   // reader is looking at rather than one dimension of it, so a facet count
@@ -554,15 +617,64 @@ function buildDetailWhere(
   if (filters.moneyState && MONEY_STATE_SQL[filters.moneyState]) {
     where.push(`(${MONEY_STATE_SQL[filters.moneyState]})`);
   }
+  if (filters.paidState && PAID_STATE_SQL[filters.paidState]) {
+    where.push(`(${PAID_STATE_SQL[filters.paidState]})`);
+  }
 
   const search = (filters.search ?? '').trim();
   if (search !== '') {
-    params.push(`%${search}%`);
+    params.push(likeArg(search));
     const ph = `$${params.length}`;
-    where.push(`(${SEARCH_COLUMNS.map((c) => `d.${c} ILIKE ${ph}`).join(' OR ')})`);
+    where.push(`(${SEARCH_COLUMNS.map((c) => `d.${c} ILIKE ${ph} ESCAPE '\\'`).join(' OR ')})`);
   }
 
   return { sql: where.join(' AND '), params };
+}
+
+/**
+ * Facets power the filter dropdowns. Each is computed from the same predicate
+ * MINUS its own column - see buildDetailWhere. Before that omission the list
+ * collapsed to whatever was already selected, which made it impossible to pick
+ * a second value in any filter. Four at a time (24 Nov 2026); the result keeps
+ * FACETS' order.
+ */
+async function detailFacets(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  filters: DetailFilters,
+): Promise<DetailPage['facets']> {
+  const lists = new Array<{ value: string; count: number }[]>(FACETS.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < FACETS.length) {
+      const i = next++;
+      const { name, col } = FACETS[i]!;
+      const w = buildDetailWhere(versionId, scope, filters, name);
+      const f = await query<{ value: string | null; n: number }>(
+        `SELECT d.${col} AS value, count(*)::int AS n
+           FROM core.v_detail d WHERE ${w.sql}
+          GROUP BY 1 ORDER BY 2 DESC LIMIT 200`,
+        w.params,
+      );
+      const opts = f
+        .filter((x) => x.value !== null)
+        .map((x) => ({ value: x.value as string, count: x.n }));
+      // A value the reader has already selected must appear in the list even
+      // if this dataset no longer offers it - otherwise the only way to clear
+      // it is the "Clear filters" button, and the tick it came from is gone
+      // from the screen while still filtering the rows.
+      const chosen = (filters[name] as string[] | undefined) ?? [];
+      const present = new Set(opts.map((o) => o.value));
+      for (const v of chosen) {
+        if (!present.has(v)) opts.push({ value: v, count: 0 });
+      }
+      lists[i] = opts;
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  const facets: DetailPage['facets'] = {};
+  FACETS.forEach(({ name }, i) => { facets[name] = lists[i]!; });
+  return facets;
 }
 
 export async function queryDetail(
@@ -584,11 +696,22 @@ export async function queryDetail(
 ): Promise<DetailPage> {
   const { sql: whereSql, params } = buildDetailWhere(versionId, scope, filters);
 
-  const countRow = await queryOne<{ n: number }>(
-    `SELECT count(*)::int AS n FROM core.v_detail d WHERE ${whereSql}`,
-    params,
-  );
-  const total = countRow?.n ?? 0;
+  /*
+   * Performance pass (24 Nov 2026): the count, the page and the facets used to
+   * run one after another - 11 facet scans of v_detail at ~0.26 s each, 2.7 s
+   * for Open Items' first paint. They now run together, the facets four at a
+   * time, and the count and facets are cached for the version (immutable), the
+   * reader's scope and the filters: paging, sorting and coming back to the page
+   * reuse them. The page of rows itself is always read fresh.
+   */
+  const countP = memo(versionId, ['detail-count', scope, filters], async () =>
+    (await queryOne<{ n: number }>(
+      `SELECT count(*)::int AS n FROM core.v_detail d WHERE ${whereSql}`,
+      params,
+    ))?.n ?? 0);
+  const facetsP = includeFacets
+    ? memo(versionId, ['detail-facets', scope, filters], () => detailFacets(versionId, scope, filters))
+    : Promise.resolve({} as DetailPage['facets']);
 
   // Sort column is looked up in the whitelist, never interpolated from input.
   const sortCol = sort ? COLUMN_BY_KEY.get(sort.key) : undefined;
@@ -614,7 +737,7 @@ export async function queryDetail(
    * Sorting BY a Coupa column has to look up every row to know the order, so
    * that one case still joins first.
    */
-  const rows = await query<Record<string, unknown>>(
+  const rowsP = query<Record<string, unknown>>(
     sortCol?.coupa && sortCol.sortable
       ? `SELECT ${select}, ${flagCols}
            FROM core.v_detail d${coupaJoin}
@@ -629,6 +752,7 @@ export async function queryDetail(
           ORDER BY ${orderBy}`,
     pageParams,
   );
+  const [total, rows, facets] = await Promise.all([countP, rowsP, facetsP]);
 
   const decorated = rows.map((r) => {
     const flags: string[] = [];
@@ -642,37 +766,6 @@ export async function queryDetail(
     for (const k of ['_sto', '_exempt', '_token', '_link', '_direct', '_wbs', '_retro']) delete r[k];
     return { ...r, flags };
   });
-
-  // Facets power the filter dropdowns. Each is computed from the same predicate
-  // MINUS its own column — see buildDetailWhere. Before that omission the list
-  // collapsed to whatever was already selected, which made it impossible to
-  // pick a second value in any filter.
-  const facets: DetailPage['facets'] = {};
-  if (includeFacets) {
-    for (const { name, col } of FACETS) {
-      const w = buildDetailWhere(versionId, scope, filters, name);
-      const f = await query<{ value: string | null; n: number }>(
-        `SELECT d.${col} AS value, count(*)::int AS n
-           FROM core.v_detail d WHERE ${w.sql}
-          GROUP BY 1 ORDER BY 2 DESC LIMIT 200`,
-        w.params,
-      );
-      const opts = f
-        .filter((x) => x.value !== null)
-        .map((x) => ({ value: x.value as string, count: x.n }));
-
-      // A value the reader has already selected must appear in the list even
-      // if this dataset no longer offers it — otherwise the only way to clear
-      // it is the "Clear filters" button, and the tick it came from is gone
-      // from the screen while still filtering the rows.
-      const chosen = (filters[name] as string[] | undefined) ?? [];
-      const present = new Set(opts.map((o) => o.value));
-      for (const v of chosen) {
-        if (!present.has(v)) opts.push({ value: v, count: 0 });
-      }
-      facets[name] = opts;
-    }
-  }
 
   return {
     datasetVersionId: versionId,

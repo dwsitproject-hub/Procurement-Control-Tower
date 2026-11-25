@@ -159,12 +159,17 @@ export const PARITY_KPIS: KpiSpec[] = [
     sql: `SELECT count(*)::int AS value,
                  count(*) FILTER (WHERE status = 'Delivered')::int AS gr_complete,
                  count(*) FILTER (WHERE status = 'Partially Delivered')::int AS gr_partial,
+                 -- Local / Import split (19 Nov 2026), vendortype.ts's rule.
+                 count(*) FILTER (WHERE vendor_code LIKE 'LN%')::int AS vt_local,
+                 count(*) FILTER (WHERE vendor_code LIKE 'LN%')::int AS vt_local_n,
+                 count(*) FILTER (WHERE vendor_code LIKE 'IN%')::int AS vt_import,
+                 count(*) FILTER (WHERE vendor_code LIKE 'IN%')::int AS vt_import_n,
                  sum(receipt_qty_net) AS qty_gr,
                  (SELECT sum(qty_requested) FROM ${PRI}
                    WHERE dataset_version_id = $1 AND NOT is_deleted) AS qty_pr
             FROM ${POL}
            WHERE dataset_version_id = $1/*F*/ AND receipt_date IS NOT NULL`,
-    drill: { grain: 'po_line', filters: { hasReceipt: true } },
+    drill: { grain: 'po_line', columns: 'delivery', filters: { hasReceipt: true } },
   },
 
   // ── Open Items ──
@@ -248,7 +253,8 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'days',
     sql: `SELECT max(aging_days) AS value, count(*)::int AS sample FROM ${PRI}
            WHERE dataset_version_id = $1 AND release_final_date IS NULL AND NOT is_deleted`,
-    drill: { grain: 'pr_item', filters: { unreleased: true, notDeleted: true } },
+    // The item(s) AT the oldest age, not every unreleased item (21 Nov 2026).
+    drill: { grain: 'pr_item', atMax: 'pr_unreleased_age', filters: { unreleased: true, notDeleted: true } },
     worseWhenHigh: { warn: 90, crit: 180 },
   },
   {
@@ -290,7 +296,8 @@ export const PARITY_KPIS: KpiSpec[] = [
     unit: 'days',
     sql: `SELECT max(release_final_date - requisition_date) AS value, count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1 AND release_final_date IS NOT NULL`,
-    drill: { grain: 'pr_item', filters: { released: true } },
+    // The item(s) that took exactly that long, not every released item (21 Nov 2026).
+    drill: { grain: 'pr_item', atMax: 'pr_approval_days', filters: { released: true } },
   },
   {
     id: 'pr_to_po_conversion',
@@ -310,7 +317,10 @@ export const PARITY_KPIS: KpiSpec[] = [
                  count(*) FILTER (WHERE release_final_date - requisition_date <= 3)::int AS numerator,
                  count(*)::int AS denominator, count(*)::int AS sample
             FROM ${PRI} WHERE dataset_version_id = $1 AND release_final_date IS NOT NULL`,
-    drill: { grain: 'pr_item', filters: { released: true } },
+    // The items that WERE approved within 3 days, with their approval days
+    // (23 Nov 2026): the drill opened every approved item, so a reader saw
+    // items that took 300+ days under a "within 3 days" figure.
+    drill: { grain: 'pr_item', columns: 'pr_approval', filters: { released: true, prApprovalLte: 3 } },
     worseWhenLow: { warn: 70, crit: 50 },
   },
   {
@@ -420,15 +430,32 @@ export const PARITY_KPIS: KpiSpec[] = [
     id: 'pr_po_price_variance',
     unit: 'percent',
     // PR valuation price vs PO unit price on the same item. Only rows where both
-    // are present and positive contribute; the rest are excluded, not zeroed.
-    sql: `SELECT 100.0 * avg((pol.unit_price - pri.valuation_price) / NULLIF(pri.valuation_price, 0)) AS value,
+    // are present contribute; the rest are excluded, not zeroed.
+    //
+    // 19 Nov 2026: a PR valued at 1 (or less) is a TOKEN price - the requester
+    // typed 1 because the form demanded a number - and a PO line at 0 is a free
+    // item. Either turns the ratio into thousands of percent and says nothing
+    // about negotiation, so both leave the count.
+    //
+    // 21 Nov 2026: still 150,979% after that, for two more reasons, so two more
+    // conditions (the same population in the drill, priceVarianceEvaluable):
+    //   * IDR lines only. The PR valuation is always IDR; a USD or CNY PO price
+    //     against it reads as -99.99% (1,326 such lines, median -79.8%).
+    //   * no unit mismatch: a PO price 10x or more above, or a tenth or less of,
+    //     the estimate is a per-1,000 vs per-unit pricing difference, not a
+    //     price change (360 of 19,048 IDR lines; one at +99,900% outweighs
+    //     thousands of real ones). Local, all years: 7.5% (2026: 8.4%).
+    sql: `SELECT 100.0 * avg(pol.unit_price / pri.valuation_price - 1) AS value,
                  count(*)::int AS sample
             FROM ${POL} pol
             JOIN ${PRI} pri ON pri.dataset_version_id = pol.dataset_version_id
                            AND pri.pr_no = pol.pr_no AND pri.pr_item = pol.pr_item
            WHERE pol.dataset_version_id = $1 AND NOT pol.is_sto
-             AND pri.valuation_price > 0 AND pol.unit_price > 0`,
-    drill: { grain: 'po_line', filters: { notSto: true, hasPr: true } },
+             AND pri.valuation_price > 1 AND pol.unit_price > 0
+             AND pol.currency_code = 'IDR'
+             AND pol.unit_price / pri.valuation_price > 0.1
+             AND pol.unit_price / pri.valuation_price < 10`,
+    drill: { grain: 'po_line', filters: { notSto: true, priceVarianceEvaluable: true } },
     worseWhenHigh: { warn: 10, crit: 25 },
   },
   {
@@ -472,12 +499,16 @@ export const PARITY_KPIS: KpiSpec[] = [
   // disagree about what "committed value" counts.
   {
     id: 'active_purch_groups',
-    entityUnit: 'desks',
     unit: 'count',
     sql: `SELECT count(DISTINCT purch_group)::int AS value FROM ${POL}
            WHERE dataset_version_id = $1 AND NOT is_sto AND NOT is_deleted
              AND purch_group IS NOT NULL AND btrim(purch_group) <> ''`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    // One row per desk (20 Nov 2026): the drill IS the count, so the card's old
+    // "distinct desks - drill opens the lines" caveat (entityUnit) is gone.
+    drill: {
+      grain: 'po_line', view: 'by_purch_group',
+      filters: { notSto: true, notDeleted: true, hasPurchGroup: true },
+    },
   },
   {
     // How few desks hold most of the value. This replaces the reference design's
@@ -487,7 +518,6 @@ export const PARITY_KPIS: KpiSpec[] = [
     // truth. Desk concentration carries the same strategic point — a few desks
     // control the money, many run the paperwork — and is measurable.
     id: 'desks_for_80pct_value',
-    entityUnit: 'desks',
     unit: 'count',
     sql: `WITH d AS (
             SELECT purch_group, sum(net_order_value_idr) AS v FROM ${POL}
@@ -502,7 +532,12 @@ export const PARITY_KPIS: KpiSpec[] = [
           )
           SELECT (count(*) FILTER (WHERE cum < 0.8) + 1)::int AS value,
                  count(*)::int AS sample FROM c`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    // Exactly the desks counted: ranked by IDR value, those before the 80% line
+    // plus the one that crosses it (drill.ts topShare).
+    drill: {
+      grain: 'po_line', view: 'by_purch_group', topShare: 0.8,
+      filters: { notSto: true, notDeleted: true, hasPurchGroup: true },
+    },
   },
   {
     id: 'vendors_for_80pct_value',
@@ -590,7 +625,12 @@ export const PARITY_KPIS: KpiSpec[] = [
             FROM ${POL} f
             LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
            WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    // The Head Office part, per desk (20 Nov 2026): the lines raised under an HQ
+    // purchasing organisation, summed per purchasing group.
+    drill: {
+      grain: 'po_line', view: 'by_purch_group',
+      filters: { notSto: true, notDeleted: true, purchOrgIsHo: true },
+    },
   },
   {
     id: 'ho_share_lines_pct',
@@ -600,7 +640,10 @@ export const PARITY_KPIS: KpiSpec[] = [
             FROM ${POL} f
             LEFT JOIN core.dim_purch_org o ON o.code = f.purch_org
            WHERE f.dataset_version_id = $1 AND NOT f.is_sto AND NOT f.is_deleted`,
-    drill: { grain: 'po_line', filters: { notSto: true, notDeleted: true } },
+    drill: {
+      grain: 'po_line', view: 'by_purch_group',
+      filters: { notSto: true, notDeleted: true, purchOrgIsHo: true },
+    },
   },
 
   // ── G6.3: the v1-only registry KPIs, promoted (decision 3 Aug 2026) ──
@@ -963,6 +1006,16 @@ const PR_FLOW_BASE = `WITH pr AS (
     UNION
     SELECT pm      FROM pr WHERE pm IS NOT NULL
   )`;
+
+/**
+ * Charts whose series all begin with one shared base (24 Nov 2026). Under a
+ * filter the live path runs the base ONCE and every series' final SELECT
+ * against it in a single statement (live.ts), instead of re-reading the
+ * requisitions and their first PO month once per series: the PR flow chart's
+ * ten series took up to 4 s that way. Each series must be the base followed by
+ * a SELECT ordered by its bucket_key.
+ */
+export const SHARED_BASE_SQL: Readonly<Record<string, string>> = { pr_by_month: PR_FLOW_BASE };
 
 /**
  * One series of the flow chart: the spine, its phase, and its own drill. `band`
@@ -2000,7 +2053,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  spend_category AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY delivery_days)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('spendCategory', min(spend_category),'hasReceipt',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND delivery_days IS NOT NULL
               AND spend_category IS NOT NULL
@@ -2012,7 +2065,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  COALESCE(priority_label,'(unlabelled)') AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY delivery_days)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('priorityLabel', min(priority_label),'hasReceipt',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND delivery_days IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
@@ -2021,7 +2074,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
     chartId: 'delivery_distribution', seriesKey: 'lines', seriesLabel: 'PO lines', unit: 'count',
     sql: `SELECT ${DIST_BUCKETS} AS bucket_key, ${DIST_BUCKETS} || ' days' AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('hasReceipt',true,'distBucket',
                      jsonb_build_object('measure','delivery','bucket', ${DIST_BUCKETS}))) AS drill
             FROM (SELECT delivery_days AS d FROM ${POL}
@@ -2034,7 +2087,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  to_char(pol.document_date,'Mon YYYY') AS bucket_label,
                  percentile_cont(0.5) WITHIN GROUP (ORDER BY pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('monthKey', to_char(pol.document_date,'YYYY-MM'),
                                       'hasReceipt',true,'hasPr',true)) AS drill
             FROM ${POL} pol JOIN ${PRI} pri
@@ -2176,21 +2229,21 @@ export const PARITY_CHARTS: ChartSpec[] = [
            GROUP BY 1, 2 ORDER BY 1`,
   },
   {
-    chartId: 'open_backlog_by_month', seriesKey: 'over150', seriesLabel: 'Of those, over 150 days', unit: 'count',
-    // The same population narrowed by age, so the second series is always a
-    // subset of the first and the two can be read against each other.
+    chartId: 'open_backlog_by_month', seriesKey: 'raised', seriesLabel: 'PR items raised', unit: 'count',
+    // Was "Of those, over 150 days" until 11 Nov 2026 - nearly implied by the
+    // first series, since age runs from the raise date. Replaced on request by
+    // every PR item raised in the same month, open or not: the first series is
+    // a subset of this one, so each pair reads "raised that month, and how
+    // many of those are still open". Same grain, same month rule, same filter.
     sql: `SELECT to_char(requisition_date, 'YYYY-MM') AS bucket_key,
                  to_char(requisition_date, 'Mon YYYY') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
                    jsonb_build_object('monthKey', to_char(requisition_date, 'YYYY-MM'),
-                                      'statusIn', jsonb_build_array('Unapproved PR','PR Approved-No PO'),
-                                      'ageBand', '>150',
                                       'notDeleted', true)) AS drill
             FROM ${PRI}
            WHERE dataset_version_id = $1 AND NOT is_deleted /*F*/
-             AND status IN ('Unapproved PR','PR Approved-No PO')
-             AND requisition_date IS NOT NULL AND aging_days > 150
+             AND requisition_date IS NOT NULL
            GROUP BY 1, 2 ORDER BY 1`,
   },
   // ── "Item Category by Amount Spend" (Material Group page) ──
@@ -2250,7 +2303,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  COALESCE(pol.spend_category,'(unmapped)') AS bucket_label,
                  avg(pol.receipt_date - pri.requisition_date)::numeric AS value,
                  count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('ownSpendCategory', min(COALESCE(pol.spend_category,'(unmapped)')),
                                       'hasReceipt',true,'hasPr',true)) AS drill
             FROM ${POL} pol JOIN ${PRI} pri
@@ -2613,7 +2666,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
     sql: `SELECT to_char(document_date,'YYYY-MM') AS bucket_key,
                  to_char(document_date,'Mon YYYY') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
            GROUP BY 1,2 ORDER BY 1`,
@@ -2624,7 +2677,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
                  to_char(document_date,'Mon YYYY') AS bucket_label,
                  count(*) FILTER (WHERE receipt_date IS NOT NULL)::numeric AS value,
                  count(*) FILTER (WHERE receipt_date IS NOT NULL)::int AS row_count,
-                 jsonb_build_object('grain','po_line','filters',
+                 jsonb_build_object('grain','po_line','columns','delivery','filters',
                    jsonb_build_object('monthKey', to_char(document_date,'YYYY-MM'),
                                       'hasReceipt',true,'notDeleted',true)) AS drill
             FROM ${POL} WHERE dataset_version_id = $1 AND NOT is_deleted AND document_date IS NOT NULL
@@ -2633,16 +2686,63 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     // Pending release STEPS by the person they wait on. Filtered, like every
     // PR-release figure, by the year/month the requisition was raised.
+    // PR LINES pending approval by the person they wait on (23 Nov 2026):
+    // each pending PR item once, at its CURRENT approver (first open release
+    // step), so the bars add up to the card. It counted open release STEPS,
+    // so an item waiting on three approvers counted three times.
     chartId: 'pending_pr_by_pic', seriesKey: 'pending', seriesLabel: 'Pending', unit: 'count',
-    filterKind: 'pr_release',
-    sql: `SELECT COALESCE(pic_release, '?') AS bucket_key,
-                 COALESCE(pic_release, '(unknown)') AS bucket_label,
+    filterKind: 'pr_item',
+    sql: `WITH a AS (
+            SELECT (SELECT r.pic_release FROM core.fact_pr_release r
+                     WHERE r.dataset_version_id = core.fact_pr_item.dataset_version_id
+                       AND r.pr_no = core.fact_pr_item.pr_no AND r.pr_item = core.fact_pr_item.pr_item
+                       AND r.approve_date IS NULL
+                     ORDER BY r.rel_seq LIMIT 1) AS pic
+              FROM core.fact_pr_item
+             WHERE dataset_version_id = $1
+               AND EXISTS (SELECT 1 FROM core.fact_pr_release r2
+                            WHERE r2.dataset_version_id = core.fact_pr_item.dataset_version_id
+                              AND r2.pr_no = core.fact_pr_item.pr_no AND r2.pr_item = core.fact_pr_item.pr_item
+                              AND r2.approve_date IS NULL)
+          )
+          SELECT COALESCE(pic, '?') AS bucket_key, COALESCE(pic, '(unknown)') AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
-                 jsonb_build_object('grain','pr_release','filters',
-                   jsonb_build_object('picRelease', pic_release,'pending',true)) AS drill
-            FROM core.fact_pr_release WHERE dataset_version_id = $1 AND approve_date IS NULL
-           GROUP BY pic_release ORDER BY 3 DESC LIMIT 20`,
+                 jsonb_build_object('grain','pr_item','columns','approval_queue','filters',
+                   jsonb_build_object('releasePending', true, 'prCurrentApprover', pic)) AS drill
+            FROM a GROUP BY pic ORDER BY count(*) DESC, pic LIMIT 20`,
   },
+  // PO LINES pending approval by the person they wait on (23 Nov 2026): each
+  // pending line once, at its PO's CURRENT approver (first unapproved SAP
+  // release step), so the bars add up to the card. Split by origin: Coupa holds no PO
+  // approval queue - its POs are issued after the requisition is approved - so
+  // every PO approval waits in SAP's release strategy, and "via Coupa" marks the
+  // POs that were created in Coupa and integrated to SAP.
+  ...(['sap', 'coupa'] as const).map((src) => ({
+    chartId: 'pending_po_by_pic',
+    seriesKey: src,
+    seriesLabel: src === 'sap' ? 'Created in SAP' : 'Created in Coupa → SAP',
+    unit: 'count',
+    sql: `WITH l AS (
+            SELECT dataset_version_id, po_no FROM ${POL}
+             WHERE dataset_version_id = $1 AND po_release_state = 'pending'
+          ), p AS (
+            SELECT DISTINCT dataset_version_id, po_no FROM l
+          ), a AS (
+            SELECT p.po_no,
+                   (SELECT r.pic_release FROM core.fact_po_release r
+                     WHERE r.dataset_version_id = p.dataset_version_id AND r.po_no = p.po_no AND r.approve_date IS NULL
+                     ORDER BY r.rel_seq LIMIT 1) AS pic,
+                   EXISTS (SELECT 1 FROM ops.coupa_po_line c WHERE c.sap_po_no = p.po_no) AS via_coupa
+              FROM p
+          )
+          SELECT COALESCE(pic, '?') AS bucket_key, COALESCE(pic, '(unknown)') AS bucket_label,
+                 count(*) FILTER (WHERE ${src === 'coupa' ? '' : 'NOT '}via_coupa)::numeric AS value,
+                 count(*) FILTER (WHERE ${src === 'coupa' ? '' : 'NOT '}via_coupa)::int AS row_count,
+                 jsonb_build_object('grain','po_line','columns','approval_queue','filters',
+                   jsonb_build_object('poReleaseState','pending','poCurrentApprover', pic,
+                                      'poInCoupa', ${src === 'coupa' ? 'true' : 'false'})) AS drill
+            FROM l JOIN a USING (po_no) GROUP BY pic ORDER BY count(*) DESC, pic LIMIT 20`,
+  })),
   {
     chartId: 'wbs_by_plant', seriesKey: 'violations', seriesLabel: 'Violations', unit: 'count',
     sql: `SELECT plant AS bucket_key, plant AS bucket_label,

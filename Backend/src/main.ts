@@ -6,18 +6,20 @@
  * to every request is harder to diagnose than one that never came up.
  */
 
+import { warmDefaultView } from './modules/analytics/warm.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { randomUUID } from 'node:crypto';
 import { loadEnv, isOidcConfigured } from './config/env.js';
 import { storageHealth, storageSummary } from './config/storage.js';
 import { closePool, healthCheck } from './db/client.js';
 import { buildRouter, problemHandler } from './api/routes.js';
+import { apiNoStore, rateLimit, requestIdGuard, sameOriginWrites } from './api/guards.js';
 import { migrate } from './db/migrate.js';
 import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
 import { startCoupaPoller } from './modules/coupa/sync.js';
+import { startDhmFxPoller } from './modules/dhm/fx.js';
 import { startSharePoller } from './modules/ingest/share_poller.js';
 import { coupaConfigured } from './modules/coupa/client.js';
 
@@ -67,14 +69,18 @@ async function main(): Promise<void> {
       crossOriginEmbedderPolicy: false,
     }),
   );
+  // Request id first, so every response - a malformed-JSON 400 included -
+  // carries one that matches the log line.
+  app.use(requestIdGuard());
+  app.use(apiNoStore());
+  app.use(sameOriginWrites());
+  // Guessing passwords or hammering the SSO start: per client IP (TRUST_PROXY
+  // makes req.ip the real client behind nginx).
+  app.use('/auth/local/login', rateLimit({ name: 'sign-in', windowMs: 60_000, max: 10 }));
+  app.use('/auth/oidc', rateLimit({ name: 'SSO', windowMs: 60_000, max: 30 }));
+  app.use('/api/v1/detail/export', rateLimit({ name: 'exports', windowMs: 60_000, max: 20 }));
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
-
-  app.use((req, res, next) => {
-    req.requestId = (req.get('x-request-id') ?? randomUUID()).slice(0, 64);
-    res.setHeader('X-Request-Id', req.requestId);
-    next();
-  });
 
   app.use(buildRouter());
   app.use(problemHandler());
@@ -82,6 +88,9 @@ async function main(): Promise<void> {
   // Coupa poller: a 60s ticker that runs a sync when rule_config says it is
   // enabled and due. Without COUPA_* env vars this is a no-op.
   startCoupaPoller((msg) => process.stdout.write(`${msg}\n`));
+  // Data Hub exchange rates (040): every DHM_FX_SYNC_MINUTES, first run within
+  // a minute of boot. Without DHM_* env vars this is a no-op.
+  startDhmFxPoller((msg) => process.stdout.write(`${msg}\n`));
   // The scheduled share ingest (settings in rule_config; off until enabled).
   startSharePoller((msg) => process.stdout.write(`${msg}\n`));
 
@@ -106,6 +115,12 @@ async function main(): Promise<void> {
 `,
     );
   }
+
+  // Precompute the default view of the version being served, so the first
+  // visitor after a restart does not pay for every live query.
+  setTimeout(() => {
+    void warmDefaultView((m) => process.stdout.write(`${m}\n`)).catch(() => undefined);
+  }, 5_000).unref();
 
   const server = app.listen(env.PORT, () => {
     process.stdout.write(

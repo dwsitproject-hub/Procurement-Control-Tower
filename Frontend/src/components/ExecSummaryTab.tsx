@@ -3,6 +3,7 @@ import { api, type ChartResponse, type Kpi } from '../lib/api';
 import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
 import { LayoutControls, applyLayout, panelSpan, type TabLayout } from './LayoutEdit';
+import { Lbl } from '../lib/labels';
 
 /**
  * Executive Summary — the one page that states a conclusion rather than
@@ -406,6 +407,22 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
   }
   const legend = [...legendTotals.entries()].sort((a, b) => b[1] - a[1]);
 
+  /** The range the table spans, for the captions of its total cells. */
+  const span = months.length > 1
+    ? `${months[0]![1].label} – ${months[months.length - 1]![1].label}`
+    : months[0]![1].label;
+  /** One clickable figure in the table. Same handler as the bar segments. */
+  const fig = (shown: string, tip: string, title: string, subtitle: string, slice: string) => (
+    <button
+      type="button"
+      className="xs-mc-cell"
+      title={`${tip}. Click for the Overview of this slice.`}
+      onClick={() => onFocus(title, subtitle, slice)}
+    >
+      {shown}
+    </button>
+  );
+
   /** Q1..Q4 from the month number, printed once per quarter as in the design. */
   const quarterOf = (mk: string): string => `Q${Math.floor((Number(mk.slice(5, 7)) - 1) / 3) + 1}`;
 
@@ -496,23 +513,27 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
                   }
                   return (
                     <td key={mk} className="xs-mc-num">
-                      <button
-                        type="button"
-                        className="xs-mc-cell"
-                        title={`${m.label} — ${cat}: ${money(cell.value)}, ${formatNumber(cell.rowCount)} delivered PO lines`}
-                        onClick={() => onFocus(
-                          `${cat} — delivered in ${m.label}`,
-                          `${money(cell.value)} · ${formatNumber(cell.rowCount)} PO lines`,
-                          `spendCategory=${encodeURIComponent(cat)}`
-                          + `&monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
-                        )}
-                      >
-                        {money(cell.value)}
-                      </button>
+                      {fig(
+                        money(cell.value),
+                        `${m.label} — ${cat}: ${money(cell.value)}, ${formatNumber(cell.rowCount)} delivered PO lines`,
+                        `${cat} — delivered in ${m.label}`,
+                        `${money(cell.value)} · ${formatNumber(cell.rowCount)} PO lines`,
+                        `spendCategory=${encodeURIComponent(cat)}`
+                        + `&monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
+                      )}
                     </td>
                   );
                 })}
-                <td className="xs-mc-num xs-mc-tot">{money(catTotal)}</td>
+                <td className="xs-mc-num xs-mc-tot">
+                  {/* Every month the table shows, i.e. the page's own period. */}
+                  {fig(
+                    money(catTotal),
+                    `${cat}, ${span}: ${money(catTotal)} delivered`,
+                    `${cat} — delivered in ${span}`,
+                    money(catTotal),
+                    `spendCategory=${encodeURIComponent(cat)}&lifecycle=closed`,
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -520,10 +541,24 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
             <tr>
               <th scope="row" className="xs-mc-th-cat">All categories</th>
               {months.map(([mk, m]) => (
-                <td key={mk} className="xs-mc-num">{money(m.total)}</td>
+                <td key={mk} className="xs-mc-num">
+                  {fig(
+                    money(m.total),
+                    `${m.label}, all categories: ${money(m.total)} delivered`,
+                    `All categories — delivered in ${m.label}`,
+                    money(m.total),
+                    `monthKey=${encodeURIComponent(mk)}&lifecycle=closed`,
+                  )}
+                </td>
               ))}
               <td className="xs-mc-num xs-mc-tot">
-                {money(months.reduce((a, [, m]) => a + m.total, 0))}
+                {fig(
+                  money(months.reduce((a, [, m]) => a + m.total, 0)),
+                  `All categories, ${span}`,
+                  `All categories — delivered in ${span}`,
+                  money(months.reduce((a, [, m]) => a + m.total, 0)),
+                  'lifecycle=closed',
+                )}
               </td>
             </tr>
           </tfoot>
@@ -535,7 +570,7 @@ function MonthlyCategoryBars({ data, onFocus, currency }: {
         ordered. Every bar shares one scale — the widest month is the largest — and in-bar
         figures are {isIdr ? 'billions of rupiah' : 'millions of USD'}, printed only where
         the segment is wide enough to hold them. The table below carries every figure in
-        full, and its cells open the same slice the segments do.
+        full, and every figure in it, totals included, opens its slice as the segments do.
       </p>
     </div>
   );
@@ -712,6 +747,37 @@ function HoSiteBars({ data, onFocus, currency }: {
 
   const bandLabel = (b: string) => (b === 'Unit' ? 'Site' : b);
 
+  /**
+   * The slice for a band, optionally one month of it. managedBy is the band
+   * itself; before 16 Nov 2026 only the month was sent, so "HO — Jan 2026"
+   * opened HO and Site together and its cards did not match the bar.
+   */
+  const sliceOf = (band: string, mk?: string) =>
+    `managedBy=${encodeURIComponent(band)}`
+    + (mk ? `&monthKey=${encodeURIComponent(mk)}` : '');
+  const openBand = (band: string, mk?: string) => {
+    const m = bands.get(band);
+    const cell = mk ? m?.get(mk) : undefined;
+    const value = mk ? (cell?.value ?? 0) : totalOf(m ?? new Map(), 'value');
+    const lines = mk ? (cell?.lines ?? 0) : totalOf(m ?? new Map(), 'lines');
+    onFocus(
+      `${bandLabel(band)} — ${mk ? (cell?.label ?? mk) : 'all months'}`,
+      `${money(value)} · ${formatNumber(lines)} PO lines`,
+      sliceOf(band, mk),
+    );
+  };
+  /** One clickable figure in the table, opening what its segment opens. */
+  const fig = (shown: string, band: string, mk?: string) => (
+    <button
+      type="button"
+      className="xs-mc-cell"
+      title={`${bandLabel(band)} — ${mk ? (bands.get(band)?.get(mk)?.label ?? mk) : 'all months'}. Click for the Overview of this slice.`}
+      onClick={() => openBand(band, mk)}
+    >
+      {shown}
+    </button>
+  );
+
   const track = (
     band: string,
     m: Map<string, { value: number; lines: number; label: string }>,
@@ -732,11 +798,7 @@ function HoSiteBars({ data, onFocus, currency }: {
             className="xs-seg xs-mo-seg"
             style={{ width: `${w}%`, background: MONTH_COLORS[i % MONTH_COLORS.length] }}
             title={`${bandLabel(band)} — ${cell?.label ?? mk}: ${money(cell?.value ?? 0)}, ${formatNumber(cell?.lines ?? 0)} PO lines`}
-            onClick={() => onFocus(
-              `${bandLabel(band)} — ${cell?.label ?? mk}`,
-              `${money(cell?.value ?? 0)} · ${formatNumber(cell?.lines ?? 0)} PO lines`,
-              `monthKey=${encodeURIComponent(mk)}`,
-            )}
+            onClick={() => openBand(band, mk)}
           >
             {w >= 9 ? <span className="xs-mc-num">{shown}</span> : null}
           </button>
@@ -790,19 +852,19 @@ function HoSiteBars({ data, onFocus, currency }: {
                   <th scope="row" className="xs-mc-th-cat">{bandLabel(band)} <span className="muted">value</span></th>
                   {months.map((mk) => (
                     <td key={mk} className="xs-mc-num">
-                      {m.get(mk) ? money(m.get(mk)!.value) : <span className="muted">&mdash;</span>}
+                      {m.get(mk) ? fig(money(m.get(mk)!.value), band, mk) : <span className="muted">&mdash;</span>}
                     </td>
                   ))}
-                  <td className="xs-mc-num xs-mc-tot">{money(totalOf(m, 'value'))}</td>
+                  <td className="xs-mc-num xs-mc-tot">{fig(money(totalOf(m, 'value')), band)}</td>
                 </tr>
                 <tr>
                   <th scope="row" className="xs-mc-th-cat">{bandLabel(band)} <span className="muted">lines</span></th>
                   {months.map((mk) => (
                     <td key={mk} className="xs-mc-num">
-                      {m.get(mk) ? formatNumber(m.get(mk)!.lines) : <span className="muted">&mdash;</span>}
+                      {m.get(mk) ? fig(formatNumber(m.get(mk)!.lines), band, mk) : <span className="muted">&mdash;</span>}
                     </td>
                   ))}
-                  <td className="xs-mc-num xs-mc-tot">{formatNumber(totalOf(m, 'lines'))}</td>
+                  <td className="xs-mc-num xs-mc-tot">{fig(formatNumber(totalOf(m, 'lines')), band)}</td>
                 </tr>
               </Fragment>
             ))}
@@ -840,22 +902,31 @@ const PR_BANDS = [
   { key: '<7', label: '< 7', color: '#4CAF50' },
 ] as const;
 
-function PrOutstandingBars({ data, onFocus }: {
+function PrOutstandingBars({ data, onFocus, onDrill }: {
   data: ChartResponse;
   onFocus: (title: string, subtitle: string, slice: string) => void;
+  /**
+   * 20 Nov 2026: a segment opens ITS OWN requisitions. It opened the whole
+   * Overview (no slice at all), so the count just clicked appeared nowhere in
+   * the panel. Each point carries the drill of exactly the items it counts.
+   */
+  onDrill: (token: string, label: string) => void;
 }) {
   const series = data.series.find((x) => x.key === 'items') ?? data.series[0];
   if (!series) return <p className="muted">No data.</p>;
 
   const labelFor = new Map(data.buckets.map((b) => [b.key, b.label] as const));
-  const byDay = new Map<string, { label: string; bands: Map<string, number>; total: number }>();
+  const byDay = new Map<string, {
+    label: string; bands: Map<string, number>; tokens: Map<string, string>; total: number;
+  }>();
   for (const pt of series.points) {
     const day = pt.bucketKey.slice(0, 10);
     const band = pt.bucketKey.slice(11);
     const dayLabel = (labelFor.get(pt.bucketKey) ?? day).split('|')[0] ?? day;
     let d = byDay.get(day);
-    if (!d) { d = { label: dayLabel, bands: new Map(), total: 0 }; byDay.set(day, d); }
+    if (!d) { d = { label: dayLabel, bands: new Map(), tokens: new Map(), total: 0 }; byDay.set(day, d); }
     d.bands.set(band, (d.bands.get(band) ?? 0) + (pt.value ?? 0));
+    if (pt.drillToken) d.tokens.set(band, pt.drillToken);
     d.total += pt.value ?? 0;
   }
 
@@ -910,11 +981,11 @@ function PrOutstandingBars({ data, onFocus }: {
                     className="xs-pr-seg"
                     style={{ height: `${(n / max) * 100}%`, background: b.color }}
                     title={`${d.label} — ${b.label} days: ${formatNumber(n)} outstanding PR items`}
-                    onClick={() => onFocus(
-                      `Outstanding ${b.label} days — ${d.label}`,
-                      `${formatNumber(n)} PR items`,
-                      '',
-                    )}
+                    onClick={() => {
+                      const token = d.tokens.get(b.key);
+                      if (token) onDrill(token, `Outstanding ${b.label} days — ${d.label} (${formatNumber(n)} PR items)`);
+                      else onFocus(`Outstanding ${b.label} days — ${d.label}`, `${formatNumber(n)} PR items`, '');
+                    }}
                   />
                 );
               })}
@@ -948,6 +1019,7 @@ export function ExecSummaryTab({
    */
   const [focus, setFocus] = useState<{
     title: string; subtitle: string; slice: string; clicked?: string;
+    initialLifecycle?: '' | 'open' | 'closed';
     /** What to show inside. Absent means the Overview's own lists. */
     kpiIds?: string[]; chartIds?: string[];
     /** Offer All / Open / Closed inside the panel. */
@@ -981,14 +1053,17 @@ export function ExecSummaryTab({
   ]), []);
 
   /**
-   * A spend-category bar opens the category, not the segment.
+   * A spend-category bar opens the category, ON the clicked segment's state.
    *
-   * The clicked segment (Open or Closed) names the panel, but the slice itself
-   * carries no lifecycle — the panel's own toggle starts at All and the reader
-   * moves between states without reopening it.
+   * The slice keeps the category (or month, or band) and the lifecycle becomes
+   * the panel toggle's STARTING position rather than a fixed filter, so the
+   * reader can still widen to All without reopening. Until 20 Nov 2026 the
+   * toggle always started at All: a Monthly Spend cell of Rp 9 Bio delivered
+   * opened on IDR 12.16 B, and the first card contradicted the figure clicked.
    */
   const openAlignedFocus = useCallback(
     (title: string, subtitle: string, slice: string, clicked?: string) => {
+      const lc = (/(?:^|&)lifecycle=(open|closed)(?:&|$)/.exec(slice)?.[1] ?? '') as '' | 'open' | 'closed';
       setFocus({
         // The clicked segment named the click; it must not name the PANEL,
         // which opens on every lifecycle state. Leaving "METHANOL — Closed"
@@ -1000,8 +1075,11 @@ export function ExecSummaryTab({
         title: title
           .replace(/\s+—\s+(Not yet delivered|Delivered)$/, '')
           .replace(/\s+—\s+delivered in\s+/, ' — '),
-        subtitle: 'Delivered and not yet delivered together — use the toggle to narrow',
-        slice: slice.replace(/&?lifecycle=(open|closed)/g, ''),
+        subtitle: lc === ''
+          ? 'Delivered and not yet delivered together — use the toggle to narrow'
+          : `Opened on ${lc === 'closed' ? 'Delivered' : 'Not yet delivered'}, as clicked — the toggle switches state`,
+        slice: slice.replace(/&?lifecycle=(open|closed)/g, '').replace(/^&/, ''),
+        initialLifecycle: lc,
         /*
          * Committed value and line count FIRST, before the Overview's own list.
          *
@@ -1017,7 +1095,10 @@ export function ExecSummaryTab({
           ...overviewKpis.filter((id) => !SLICE_HIDDEN_KPIS.has(id)
             && id !== 'total_po_amount' && id !== 'po_line_items')],
         lifecycleToggle: true,
-        ...(clicked ? { clicked } : {}),
+        // The clicked figure as clicked: with the panel opening on the clicked
+        // state, that is what the first card measures. Without a state the
+        // caller's own caption (the whole bar) still describes the panel.
+        ...(lc !== '' ? { clicked: `${title}: ${subtitle}` } : clicked ? { clicked } : {}),
       });
     },
     [overviewKpis, SLICE_HIDDEN_KPIS],
@@ -1362,7 +1443,7 @@ export function ExecSummaryTab({
       id: 'panel:headline',
       node: (
               <div className="panel">
-                <h2>🎯 Executive Summary - Procurement Manage</h2>
+                <h2>🎯 <Lbl>Executive Summary - Procurement Manage</Lbl></h2>
                 {/*
                   Scope stated up front and read from the data rather than typed. The
                   reference design was headed "2025 / annual spend" over a part-year
@@ -1398,7 +1479,7 @@ export function ExecSummaryTab({
                       title={`Click for the figures behind ${t.label}`}
                     >
                       <span className="xs-tile-value">{t.value}</span>
-                      <span className="xs-tile-label">{t.label}</span>
+                      <span className="xs-tile-label"><Lbl>{t.label}</Lbl></span>
                       <span className="xs-tile-sub muted">{t.sub}</span>
                       {/* The period split. Shown under the headline figure rather
                           than replacing it: the tile's own number is the whole
@@ -1425,7 +1506,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Where the value is <span className="muted">— committed value by spend category</span>
+                  <Lbl>Where the value is</Lbl> <span className="muted">— committed value by spend category</span>
                 </h3>
                 {byCategory
                   ? <RankedBars data={byCategory} onFocus={openAlignedFocus} emphasiseTop={5} currency={currency} />
@@ -1492,7 +1573,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Monthly Spend Category{' '}
+                  <Lbl>Monthly Spend Category</Lbl>{' '}
                   <span className="muted">— delivered value by month, stacked by category</span>
                 </h3>
                 {byMonth
@@ -1506,7 +1587,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Transaction size <span className="muted">— share of value against share of lines</span>
+                  <Lbl>Transaction size</Lbl> <span className="muted">— share of value against share of lines</span>
                 </h3>
                 {byBand ? <BandPairs data={byBand} onFocus={openAlignedFocus} /> : <div className="spinner" />}
                 <p className="note" style={{ marginTop: '.5rem' }}>
@@ -1528,7 +1609,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Manage by HO or Site{' '}
+                  <Lbl>Manage by HO or Site</Lbl>{' '}
                   <span className="muted">— who raised the order, by month</span>
                 </h3>
                 {byHoSite
@@ -1548,11 +1629,11 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  Outstanding PR by Days/Months/Quarters/Years{' '}
+                  <Lbl>Outstanding PR by Days/Months/Quarters/Years</Lbl>{' '}
                   <span className="muted">— this month and last, by aging on the day</span>
                 </h3>
                 {prOutstanding
-                  ? <PrOutstandingBars data={prOutstanding} onFocus={openFocus} />
+                  ? <PrOutstandingBars data={prOutstanding} onFocus={openFocus} onDrill={onDrill} />
                   : <div className="spinner" />}
               </div>
       ),
@@ -1562,7 +1643,7 @@ export function ExecSummaryTab({
       node: (
               <div className="panel">
                 <h3 className="pr-tbl-h">
-                  How concentrated <span className="muted">— how few hold most of the value</span>
+                  <Lbl>How concentrated</Lbl> <span className="muted">— how few hold most of the value</span>
                 </h3>
                 <div className="table-wrap">
                   <table className="data dd-tbl">
@@ -1605,7 +1686,7 @@ export function ExecSummaryTab({
       id: 'panel:meaning',
       node: (
               <div className="panel">
-                <h3 className="pr-tbl-h">What this means</h3>
+                <h3 className="pr-tbl-h"><Lbl>What this means</Lbl></h3>
                 <ul className="xs-means">
                   <li>
                     <strong>Value is concentrated.</strong> The top five categories are {pct(top5)} of
@@ -1680,6 +1761,7 @@ export function ExecSummaryTab({
             subtitle={focus.subtitle}
             {...(focus.clicked ? { clicked: focus.clicked } : {})}
             lifecycleToggle={focus.lifecycleToggle ?? false}
+            initialLifecycle={focus.initialLifecycle ?? ''}
             // The clicked slice on top of the page's own filter, so the panel can
             // never show a wider population than the page it was opened from.
             filterQuery={[filterQuery, focus.slice].filter(Boolean).join('&')}

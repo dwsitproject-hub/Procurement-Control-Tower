@@ -22,6 +22,9 @@ import { z } from 'zod';
 export const FEEDS = [
   'pr', 'prel', 'po', 'por', 'gr', 'fx',
   'pgrp', 'porg', 'matm', 'zuser',
+  // SAP down payments (25 Nov 2026): optional, like the reference feeds - it
+  // refreshes on its own and never gates the PR/PO pickup.
+  'dp',
 ] as const;
 export type Feed = (typeof FEEDS)[number];
 
@@ -40,6 +43,7 @@ export const FEED_LABELS: Record<Feed, string> = {
   porg: 'Purchasing Orgs',
   matm: 'Material Master',
   zuser: 'SAP Users',
+  dp: 'Down Payments',
 };
 
 export const ROLES = ['viewer', 'analyst', 'manager', 'auditor', 'steward', 'admin'] as const;
@@ -71,7 +75,7 @@ export type PageAccess = (typeof PAGE_ACCESS)[number];
 export const PAGE_KEYS = [
   'execsummary',
   'executive', 'openitems', 'pr', 'coupa_src', 'po', 'delivery', 'coupa_inv',
-  'approvals', 'materials', 'vendors', 'governance',
+  'approvals', 'materials', 'vendors',
   'detail', 'master', 'custom', 'admin', 'datacheck',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
@@ -88,7 +92,6 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   approvals: 'Approvals',
   materials: 'Material Group',
   vendors: 'Vendor 360',
-  governance: 'Governance',
   detail: 'Detail Table',
   master: 'Master',
   custom: 'Custom',
@@ -250,8 +253,8 @@ export const KPI_TITLES: Record<KpiId, string> = {
   sto_share: 'STO share of PO lines',
   direct_po_share: 'Direct POs (no PR)',
   open_items: 'Open items',
-  pending_pr_approvals: 'PRs pending approval',
-  pending_po_approvals: 'POs pending approval',
+  pending_pr_approvals: 'PR lines pending approval',
+  pending_po_approvals: 'PO lines pending approval',
   open_po_commitment: 'Open PO Commitment',
   grir_value: 'Received, Not Invoiced (GR/IR)',
   pr_pipeline_value: 'PR Pipeline Value (no PO)',

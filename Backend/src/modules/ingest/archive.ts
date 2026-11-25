@@ -44,6 +44,7 @@ import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { query } from '../../db/client.js';
 import { buildErrorWorkbook, errorWorkbookName, loadRowErrors } from './error_report.js';
+import { insideStorage } from '../../config/storage.js';
 
 export interface ArchiveConfig {
   enabled: boolean;
@@ -92,12 +93,14 @@ export type ArchiveOutcome =
  * validation report identifies it.
  */
 async function recognisedNames(batchId: number): Promise<Set<string>> {
-  const rows = await query<{ original_filename: string; detected_feed: string | null }>(
-    `SELECT original_filename, detected_feed FROM ingest.batch_file WHERE batch_id = $1`,
+  // A file set aside whole by a partial load (042, rejected_reason) is not
+  // accepted either: it goes to failed although the run published.
+  const rows = await query<{ original_filename: string; detected_feed: string | null; rejected_reason: string | null }>(
+    `SELECT original_filename, detected_feed, rejected_reason FROM ingest.batch_file WHERE batch_id = $1`,
     [batchId],
   );
   return new Set(
-    rows.filter((r) => r.detected_feed !== null).map((r) => r.original_filename),
+    rows.filter((r) => r.detected_feed !== null && r.rejected_reason === null).map((r) => r.original_filename),
   );
 }
 
@@ -141,6 +144,9 @@ export async function archiveBundle(opts: {
 
   if (!cfg.enabled) return { ...empty, skipped: 'archiving is switched off' };
   if (files.length === 0) return { ...empty, skipped: 'no source files in this run' };
+  if (!insideStorage(cfg.succeedDir) || !insideStorage(cfg.failedDir)) {
+    return { ...empty, skipped: 'the succeeded/failed folders are outside the storage folder - nothing moved' };
+  }
 
   // Decision 2: only a definite success or a definite failure moves anything.
   if (outcome !== 'published' && outcome !== 'ready' && outcome !== 'failed') {
@@ -236,6 +242,7 @@ export async function fileRowErrors(opts: {
   // whether a run was finished with.
   if (!cfg.enabled || batchId === null) return undefined;
   if (outcome !== 'published' && outcome !== 'ready' && outcome !== 'failed') return undefined;
+  if (!insideStorage(cfg.failedDir)) return undefined;
 
   const rows = await loadRowErrors(batchId);
   if (rows.length === 0) return undefined;

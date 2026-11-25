@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { api, type Kpi } from '../lib/api';
 import { KpiCard } from './KpiCard';
+import { FloatControls } from './FloatControls';
 
 const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartPanel })));
 
@@ -24,7 +25,7 @@ const ChartPanel = lazy(() => import('./Chart').then((m) => ({ default: m.ChartP
  */
 export function ExecFocusModal({
   title, subtitle, clicked, filterQuery, kpiIds, chartIds, currency, onDrill, onClose,
-  lifecycleToggle = false,
+  lifecycleToggle = false, initialLifecycle = '',
 }: {
   title: string;
   subtitle: string;
@@ -55,10 +56,19 @@ export function ExecFocusModal({
    * The toggle keeps the category and changes the state, which is the axis the
    * reader is actually moving along.
    *
-   * Owned here rather than by the caller because it is a property of looking,
-   * not of what was clicked: re-opening the panel starts from All again.
+   * Owned here once open; the caller only says where it STARTS.
    */
   lifecycleToggle?: boolean;
+  /**
+   * The state the panel opens on - the one the clicked figure measured.
+   *
+   * 20 Nov 2026: it always opened on All, so a Monthly Spend cell reading
+   * Rp 9 Bio (delivered) opened on IDR 12.16 B (delivered + not yet + reversed)
+   * and the first card contradicted the figure just clicked. Opening on the
+   * clicked state makes the first card equal that figure; the toggle still
+   * widens it.
+   */
+  initialLifecycle?: '' | 'open' | 'closed';
   kpiIds: string[];
   chartIds: string[];
   currency: 'USD' | 'IDR';
@@ -67,7 +77,7 @@ export function ExecFocusModal({
 }) {
   const [kpis, setKpis] = useState<Kpi[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [lifecycle, setLifecycle] = useState<'' | 'open' | 'closed'>('');
+  const [lifecycle, setLifecycle] = useState<'' | 'open' | 'closed'>(initialLifecycle);
 
   /**
    * The slice the panel actually asks for.
@@ -116,6 +126,7 @@ export function ExecFocusModal({
           <h3>🎯 {title}</h3>
           <span className="count">{subtitle}</span>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           {lifecycleToggle && (
             <div className="gf-scope" role="group" aria-label="Lifecycle">
               {([['', 'All'], ['open', 'Not yet delivered'], ['closed', 'Delivered']] as const).map(([v, l]) => (

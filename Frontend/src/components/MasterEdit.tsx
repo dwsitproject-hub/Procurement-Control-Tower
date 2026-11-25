@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
+import { FloatControls } from './FloatControls';
+import { hubTrack } from '../lib/hub';
 
 /**
  * Master data editing, for Admins (032).
@@ -15,15 +17,24 @@ import { api } from '../lib/api';
 
 export interface EditField {
   col: string; key: string; label: string;
-  kind: 'text' | 'bool' | 'int' | 'number';
+  kind: 'text' | 'bool' | 'int' | 'number' | 'date' | 'choice' | 'multichoice';
   effect: 'label' | 'recompute' | 'mart';
   required?: boolean;
+  /** A choice field's allowed values, stated by the server. */
+  options?: string[];
+  /** Readable names for those values (purchasing organisations). */
+  optionLabels?: Record<string, string>;
+  /**
+   * A choice that can be left to the rules. Empty means Automatic, and the row
+   * value at `viaKey` says whether the current value was chosen by hand.
+   */
+  auto?: { viaKey: string; manualValue: string; label: string };
 }
 export interface EditKey { col: string; key: string; label: string; kind: EditField['kind'] }
 export interface EditBlock {
   keys: EditKey[];
   fields: EditField[];
-  readOnly: { key: string; reason: string }[];
+  readOnly: { key: string; reason: string; label?: string }[];
   allowAdd: boolean;
   allowDelete: boolean;
   note: string;
@@ -86,6 +97,10 @@ export function MasterEditDialog({
   for (const f of edit.fields) {
     const v = row?.[f.key];
     initial[f.key] = v === null || v === undefined ? '' : String(v);
+    // A value the rules produced is not a choice someone made: the form starts
+    // on Automatic, and saving without touching it changes nothing.
+    if (f.auto && row && row[f.auto.viaKey] !== f.auto.manualValue) initial[f.key] = '';
+    if (f.kind === 'date') initial[f.key] = (initial[f.key] ?? '').slice(0, 10);
   }
   const [form, setForm] = useState<Record<string, string>>(initial);
   const [saving, setSaving] = useState(false);
@@ -108,6 +123,7 @@ export function MasterEditDialog({
       }
       if (adding) await api.post('/api/v1/admin/master/rows', { relation, values });
       else await api.patch('/api/v1/admin/master/rows', { relation, values });
+      hubTrack(adding ? 'master_row_added' : 'master_row_edited', { relation });
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -116,8 +132,30 @@ export function MasterEditDialog({
     }
   };
 
-  const input = (key: string, kind: EditField['kind'], disabled: boolean) => (
-    kind === 'bool' ? (
+  const input = (key: string, kind: EditField['kind'], disabled: boolean, field?: EditField) => (
+    kind === 'multichoice' ? (
+      <MultiChoice
+        value={form[key] ?? ''}
+        options={field?.options ?? []}
+        labels={field?.optionLabels}
+        disabled={disabled}
+        onChange={(v) => setForm({ ...form, [key]: v })}
+      />
+    ) : kind === 'choice' ? (
+      <select
+        className="gf-search-in"
+        value={form[key] ?? ''}
+        disabled={disabled}
+        onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+      >
+        <option value="">
+          {field?.auto
+            ? `${field.auto.label}${row && row[key] ? ` (now: ${String(row[key])})` : ''}`
+            : '—'}
+        </option>
+        {(field?.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    ) : kind === 'bool' ? (
       <select
         value={form[key] === 'true' || form[key] === 'yes' ? 'yes' : form[key] === '' ? '' : 'no'}
         disabled={disabled}
@@ -130,7 +168,7 @@ export function MasterEditDialog({
     ) : (
       <input
         className="gf-search-in"
-        type={kind === 'text' ? 'text' : 'number'}
+        type={kind === 'text' ? 'text' : kind === 'date' ? 'date' : 'number'}
         step={kind === 'number' ? 'any' : '1'}
         value={form[key] ?? ''}
         disabled={disabled}
@@ -146,6 +184,7 @@ export function MasterEditDialog({
         <header>
           <h3>{adding ? `Add to ${tableName}` : `Edit ${tableName}`}</h3>
           <span className="spacer" />
+          <FloatControls onClose={onClose} />
           <button type="button" className="dd-x" onClick={onClose} aria-label="Close">✕</button>
         </header>
         <div className="body">
@@ -159,11 +198,11 @@ export function MasterEditDialog({
               </label>
             ))}
             {edit.fields.map((f) => (
-              <label key={f.key} className="me-field">
+              <label key={f.key} className={`me-field${f.kind === 'multichoice' ? ' me-field-wide' : ''}`}>
                 <span className="me-label">
                   {f.label}{f.required ? ' *' : ''}
                 </span>
-                {input(f.key, f.kind, false)}
+                {input(f.key, f.kind, false, f)}
                 {EFFECT_NOTE[f.effect] && <span className="me-effect">{EFFECT_NOTE[f.effect]}</span>}
               </label>
             ))}
@@ -177,7 +216,7 @@ export function MasterEditDialog({
               <p className="me-ro-h">Not editable here</p>
               <ul>
                 {edit.readOnly.map((r) => (
-                  <li key={r.key}><strong>{r.key}</strong> — {r.reason}</li>
+                  <li key={r.key}><strong>{r.label ?? r.key}</strong> — {r.reason}</li>
                 ))}
               </ul>
             </div>
@@ -192,6 +231,69 @@ export function MasterEditDialog({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Several values from a long list - a user's purchasing organisations (491 to
+ * choose from). Chosen ones sit on top as removable chips; a search box narrows
+ * the list. The value is "A, B", sorted, which is exactly how the Master table
+ * shows the column, so an untouched field compares equal and is not sent.
+ */
+function MultiChoice({ value, options, labels, disabled, onChange }: {
+  value: string;
+  options: string[];
+  labels: Record<string, string> | undefined;
+  disabled: boolean;
+  onChange: (v: string) => void;
+}) {
+  const [q, setQ] = useState('');
+  const chosen = value.split(',').map((x) => x.trim()).filter((x) => x !== '');
+  const set = (next: string[]) => onChange([...new Set(next)].sort().join(', '));
+  const name = (o: string) => (labels?.[o] ? `${o} — ${labels[o]}` : o);
+  const needle = q.trim().toLowerCase();
+  const shown = options
+    .filter((o) => !chosen.includes(o))
+    .filter((o) => needle === '' || name(o).toLowerCase().includes(needle))
+    .slice(0, 50);
+  return (
+    <div className="me-multi">
+      <div className="me-multi-chips">
+        {chosen.length === 0 && <span className="muted">None</span>}
+        {chosen.map((o) => (
+          <span key={o} className="me-multi-chip" title={name(o)}>
+            {o}
+            {!disabled && (
+              <button type="button" aria-label={`Remove ${o}`}
+                onClick={(e) => { e.preventDefault(); set(chosen.filter((x) => x !== o)); }}>✕</button>
+            )}
+          </span>
+        ))}
+      </div>
+      {!disabled && (
+        <>
+          <input
+            className="gf-search-in"
+            type="search"
+            placeholder="Search code or name to add…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          {needle !== '' && (
+            <ul className="me-multi-list" role="listbox">
+              {shown.length === 0 && <li className="muted">No match</li>}
+              {shown.map((o) => (
+                <li key={o}>
+                  <button type="button" onClick={(e) => { e.preventDefault(); set([...chosen, o]); setQ(''); }}>
+                    {name(o)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
     </div>
   );
 }

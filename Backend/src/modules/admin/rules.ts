@@ -39,6 +39,12 @@ export const RULE_DEFAULTS: RuleSnapshot = {
   // restores the old full-replace load, where every upload must carry all five
   // exports and is the whole dataset on its own.
   'ingest.merge_enabled': true,
+  // Partial loads (5 Nov 2026): a bad ROW is set aside and filed to failed,
+  // and the rest of its file still loads; a file is set aside whole only when
+  // none of it is usable (empty, no template, a required column missing).
+  // Needs merging, which carries a set-aside feed forward. false restores
+  // all-or-nothing: any blocker fails the whole run.
+  'ingest.partial_load': true,
   // Deleted PRs and PO lines (and the orders of a deleted PR) are left out of
   // every fact at load time (7 Oct 2026). false keeps them, flagged, as before.
   'exclusions.deleted_docs': true,
@@ -91,7 +97,7 @@ export async function setRule(
   note: string | null,
   userId: string | null,
 ): Promise<void> {
-  if (!(ruleKey in RULE_DEFAULTS)) {
+  if (!Object.hasOwn(RULE_DEFAULTS, ruleKey)) {
     throw new Error(`unknown rule key: ${ruleKey}`);
   }
   await query(

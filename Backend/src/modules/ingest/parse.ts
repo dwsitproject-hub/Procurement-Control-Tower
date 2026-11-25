@@ -13,6 +13,52 @@ import { readFile } from 'node:fs/promises';
 import { normHeader, parseDate, parseTime, parseVal, parseDocNo, parseIntStrict } from '@pct/rules';
 import type { Feed } from '@pct/contracts';
 import { CONTRACT_BY_FEED } from './contracts.js';
+
+/**
+ * The file itself is not a readable export (wrong format, empty, a
+ * decompression bomb). A 400 to the uploader with this message, never a 500:
+ * the problem is the file, not the server (security review SEC-S-27).
+ */
+export class FileFormatError extends Error {}
+
+/**
+ * Refuse a ZIP (xlsx) whose declared uncompressed size is absurd BEFORE it is
+ * inflated - the whole workbook would otherwise be expanded in memory first
+ * (security review SEC-S-12). Reads only the central directory. Real SAP
+ * exports compress roughly 5-15x; a bomb compresses thousands of times.
+ */
+const MAX_UNZIPPED_BYTES = 1_500 * 1024 * 1024;
+const MAX_ENTRY_RATIO = 250;
+export function assertSaneZip(buf: Buffer | Uint8Array): void {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+  // End-of-central-directory record: within the last 64 KiB + 22 bytes.
+  let eocd = -1;
+  for (let i = b.length - 22; i >= Math.max(0, b.length - 65_557); i--) {
+    if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new FileFormatError('The file is not a valid Excel workbook (no ZIP directory).');
+  const entries = b.readUInt16LE(eocd + 10);
+  let p = b.readUInt32LE(eocd + 16);
+  let total = 0;
+  for (let n = 0; n < entries; n++) {
+    if (p + 46 > b.length || b.readUInt32LE(p) !== 0x02014b50) {
+      throw new FileFormatError('The file is not a valid Excel workbook (damaged ZIP directory).');
+    }
+    const compressed = b.readUInt32LE(p + 20);
+    const size = b.readUInt32LE(p + 24);
+    if (size === 0xffffffff || compressed === 0xffffffff) {
+      throw new FileFormatError('The workbook is too large to read (ZIP64 entry).');
+    }
+    if (compressed > 0 && size / compressed > MAX_ENTRY_RATIO && size > 50 * 1024 * 1024) {
+      throw new FileFormatError('The workbook was refused: one part expands abnormally (possible decompression bomb).');
+    }
+    total += size;
+    p += 46 + b.readUInt16LE(p + 28) + b.readUInt16LE(p + 30) + b.readUInt16LE(p + 32);
+  }
+  if (total > MAX_UNZIPPED_BYTES) {
+    throw new FileFormatError(`The workbook expands to ${Math.round(total / 1048576)} MB, over the ${MAX_UNZIPPED_BYTES / 1048576} MB limit.`);
+  }
+}
 import type { ClassifyResult } from './classify.js';
 
 export interface SheetData {
@@ -144,7 +190,7 @@ function readSapListFromBuffer(buf: Buffer | Uint8Array): SheetData {
       break;
     }
   }
-  if (headerIdx < 0) throw new Error('no header row found in list output');
+  if (headerIdx < 0) throw new FileFormatError('The file is neither an Excel workbook nor a SAP list export (no header row found).');
 
   const rows: unknown[][] = [];
   for (let i = headerIdx + 1; i < lines.length; i += 1) {
@@ -162,9 +208,12 @@ function readSapListFromBuffer(buf: Buffer | Uint8Array): SheetData {
 
 export function readSheetFromBuffer(buf: Buffer | Uint8Array): SheetData {
   if (!looksLikeZip(buf)) return readSapListFromBuffer(buf);
+  assertSaneZip(buf);
 
   const wb = XLSX.read(buf, {
     type: 'buffer',
+    // Only the first worksheet is ever used; do not inflate the others.
+    sheets: 0,
     cellDates: false,
     cellNF: false,
     cellText: false,
@@ -173,10 +222,10 @@ export function readSheetFromBuffer(buf: Buffer | Uint8Array): SheetData {
   });
 
   const sheetName = wb.SheetNames[0];
-  if (!sheetName) throw new Error('workbook contains no worksheets');
+  if (!sheetName) throw new FileFormatError('The workbook contains no worksheets.');
 
   const ws = wb.Sheets[sheetName];
-  if (!ws) throw new Error(`worksheet "${sheetName}" is unreadable`);
+  if (!ws) throw new FileFormatError(`Worksheet "${sheetName}" is unreadable.`);
 
   const matrix = XLSX.utils.sheet_to_json<unknown[]>(ws, {
     header: 1,
@@ -186,7 +235,7 @@ export function readSheetFromBuffer(buf: Buffer | Uint8Array): SheetData {
   });
 
   const headerRow = matrix[0];
-  if (!headerRow) throw new Error('worksheet is empty');
+  if (!headerRow) throw new FileFormatError('The worksheet is empty.');
 
   const headers = headerRow.map((h) => (h === null || h === undefined ? '' : String(h).trim()));
   const rows = matrix.slice(1).filter((r) => r.some((c) => c !== null && c !== undefined && c !== ''));

@@ -1,17 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
+import { placeLabelAbove, placeLabelAt, type LabelRect } from '../lib/chartLabels';
 import {
   ArcElement, BarController, BarElement, CategoryScale, Chart as ChartJS,
   DoughnutController, Legend, LinearScale, Tooltip,
 } from 'chart.js';
 import { api, type ChartResponse } from '../lib/api';
 import { formatKpi } from '../lib/format';
+import { Lbl } from '../lib/labels';
+import { syncChartTheme } from '../lib/chartTheme';
 
 ChartJS.register(
   ArcElement, BarController, BarElement, CategoryScale, DoughnutController,
   LinearScale, Tooltip, Legend,
 );
 
-const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948'];
+// Hub palette: brand red, amber, teal, blue, violet, orange - distinct hues, readable on light and dark.
+const PALETTE = ['#D23F35', '#F5A623', '#14B8A6', '#4A7FD4', '#8B5CF6', '#E8743A'];
 // v1 colours each priority bucket (Emergency red → Planned green).
 const PRIORITY_COLORS: Record<string, string> = {
   '01-Emergency': '#C0392B',
@@ -121,7 +125,36 @@ const WIDE_CHARTS: Record<string, number> = { pr_by_month: 440 };
  */
 const HORIZONTAL_CHARTS = new Set(['items_by_category']);
 const WATERFALL_BAND_COLORS = ['#4E79A7', '#F28E2B', '#59A14F', '#E15759', '#76B7B2', '#EDC948'];
-const WATERFALL_STEP_COLORS = { new_pr: '#2E7D32', to_po: '#1F3864', cancelled: '#94a3b8' };
+// to_po was navy #1F3864 (redesign, Nov 2026): on the dark theme's navy
+// panels the hatched bars vanished. Blue #2563EB keeps 3:1 against both the
+// dark and the light panel, and is still "the cool colour that left".
+const WATERFALL_STEP_COLORS = { new_pr: '#2E7D32', to_po: '#2563EB', cancelled: '#94a3b8' };
+
+/**
+ * A diagonal hatch over a light tint of `color` (11 Nov 2026: "Became PO" is
+ * shaded rather than solid, so it reads as what LEFT the backlog against the
+ * solid green of what arrived). Same hue, so the legend still matches; falls
+ * back to the plain colour where a canvas is unavailable.
+ */
+function hatch(color: string): CanvasPattern | string {
+  if (typeof document === 'undefined') return color;
+  const c = document.createElement('canvas');
+  c.width = 8;
+  c.height = 8;
+  const g = c.getContext('2d');
+  if (!g) return color;
+  g.fillStyle = `${color}33`;
+  g.fillRect(0, 0, 8, 8);
+  g.strokeStyle = color;
+  g.lineWidth = 1.6;
+  g.beginPath();
+  // One full diagonal and the two corner stubs, so the tiles join seamlessly.
+  g.moveTo(0, 8); g.lineTo(8, 0);
+  g.moveTo(-2, 2); g.lineTo(2, -2);
+  g.moveTo(6, 10); g.lineTo(10, 6);
+  g.stroke();
+  return g.createPattern(c, 'repeat') ?? color;
+}
 
 // v1's PR Status Distribution donut colours, keyed by status.
 const STATUS_COLORS: Record<string, string> = {
@@ -151,6 +184,7 @@ export function ChartPanel({
   onApplyFilter,
   variant = 'bar',
   currency = 'USD',
+  onBucketClick,
 }: {
   chartId: string;
   onDrill: (token: string, label: string) => void;
@@ -166,11 +200,26 @@ export function ChartPanel({
   variant?: 'bar' | 'doughnut';
   /** Money charts with an IDR twin series switch to it when 'IDR'. */
   currency?: 'USD' | 'IDR';
+  /**
+   * When set, a click on a bar - or on its axis label, or anywhere along its
+   * row - hands the bucket to the page instead of opening the row list
+   * (19 Oct 2026: the Material Group page opens its Category 360 popup).
+   */
+  onBucketClick?: (bucketKey: string, bucketLabel: string) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
+  // Read at click time, so a new callback each render does not rebuild the chart.
+  const bucketClick = useRef(onBucketClick);
+  bucketClick.current = onBucketClick;
   const chart = useRef<ChartJS | null>(null);
   const [data, setData] = useState<ChartResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Numbers on the waterfall's segments (21 Nov 2026), off by default: with a
+   * brought-forward stack of five bands per month the chart was unreadable with
+   * every figure printed, so they appear only when asked for.
+   */
+  const [showNumbers, setShowNumbers] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -263,14 +312,20 @@ export function ChartPanel({
       const total = values.reduce((a, v) => a + Number(v), 0);
       const segmentLabels = {
         id: 'segmentLabels',
-        afterDatasetsDraw(c: { ctx: CanvasRenderingContext2D; getDatasetMeta: (i: number) => { data: { tooltipPosition: () => { x: number; y: number } }[] } }) {
+        afterDatasetsDraw(c: { ctx: CanvasRenderingContext2D; getDatasetMeta: (i: number) => { data: {
+          tooltipPosition: () => { x: number; y: number };
+          innerRadius?: number; outerRadius?: number; startAngle?: number; endAngle?: number;
+        }[] } }) {
           const ctx = c.ctx;
           const meta = c.getDatasetMeta(0);
           ctx.save();
           ctx.font = '700 11px "Segoe UI", Arial, sans-serif';
           ctx.fillStyle = '#fff';
+          ctx.strokeStyle = 'rgba(15,23,42,.45)';
+          ctx.lineWidth = 3;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
+          const placed: LabelRect[] = [];
           values.forEach((v, i) => {
             if (total <= 0 || Number(v) / total < 0.04) return; // unreadable slivers
             const el = meta.data[i];
@@ -280,7 +335,20 @@ export function ChartPanel({
             const txt = displayUnit === 'count'
               ? Number(v).toLocaleString('en-GB')
               : formatKpi(Number(v), displayUnit);
-            ctx.fillText(`${txt} (${pct}%)`, pos.x, pos.y);
+            // The slice's own room (21 Nov 2026): the full label where it fits
+            // the ring, the percentage alone where it does not - the legend
+            // carries every value - and nothing on a slice too small for that.
+            // Horizontal text on a slice at the side of the ring runs ACROSS the
+            // ring, so its room is the ring's thickness; at the top or bottom
+            // it runs along the arc.
+            const ring = (el.outerRadius ?? 0) - (el.innerRadius ?? 0);
+            const arc = ((el.endAngle ?? 0) - (el.startAngle ?? 0)) * (((el.outerRadius ?? 0) + (el.innerRadius ?? 0)) / 2);
+            const across = Math.abs(Math.cos(((el.startAngle ?? 0) + (el.endAngle ?? 0)) / 2));
+            const room = (across > 0.6 ? ring / across : Math.min(arc, ring * 3)) * 0.95;
+            let label = `${txt} (${pct}%)`;
+            if (ctx.measureText(label).width > room) label = `${pct}%`;
+            if (ctx.measureText(label).width > room) return;
+            placeLabelAt(ctx, placed, label, pos.x, pos.y, true);
           });
           ctx.restore();
         },
@@ -297,7 +365,7 @@ export function ChartPanel({
           strokeStyle: c.data.datasets[0]!.backgroundColor[i],
           index: i,
         }));
-      chart.current = new ChartJS(
+      syncChartTheme(); chart.current = new ChartJS(
         canvas.current,
         doughnutCfg as unknown as ConstructorParameters<typeof ChartJS>[1],
       ) as unknown as ChartJS;
@@ -317,7 +385,7 @@ export function ChartPanel({
       // Each dataset knows the series it draws, so a click drills to that
       // series' own point - the rows behind exactly that segment.
       const sets: { key: string; label: string; stack: string; color: string;
-        values: (number | [number, number])[] }[] = [
+        values: (number | [number, number])[]; shaded?: boolean }[] = [
         ...bandKeys.map((k, i) => ({
           key: k,
           label: ser(k)?.label ?? k,
@@ -330,7 +398,7 @@ export function ChartPanel({
           values: data.buckets.map((b) => [bf(b.key), bf(b.key) + val('new_pr', b.key)] as [number, number]),
         },
         {
-          key: 'to_po', label: '\u2212 Became PO', stack: 'po', color: WATERFALL_STEP_COLORS.to_po,
+          key: 'to_po', label: '\u2212 Became PO', stack: 'po', color: WATERFALL_STEP_COLORS.to_po, shaded: true,
           values: data.buckets.map((b) => {
             const top = bf(b.key) + val('new_pr', b.key);
             return [top - val('to_po', b.key), top] as [number, number];
@@ -344,15 +412,61 @@ export function ChartPanel({
           }),
         }] : []),
       ];
-      chart.current = new ChartJS(canvas.current, {
+      // Each segment's own count, centred in it; a segment too thin to hold a
+      // number is skipped rather than overprinted.
+      const segmentNumbers = {
+        id: 'waterfallNumbers',
+        afterDatasetsDraw(c: {
+          ctx: CanvasRenderingContext2D;
+          getDatasetMeta: (i: number) => { hidden: boolean | null; data: { x: number; y: number; base: number }[] };
+        }) {
+          if (!showNumbers) return;
+          const ctx = c.ctx;
+          ctx.save();
+          ctx.font = '600 10px "Segoe UI", Arial, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = 'rgba(255,255,255,.85)';
+          ctx.fillStyle = '#1e293b';
+          const placed: LabelRect[] = [];
+          sets.forEach((d, di) => {
+            const meta = c.getDatasetMeta(di);
+            if (meta.hidden) return;
+            data.buckets.forEach((b, i) => {
+              const n = val(d.key, b.key);
+              const el = meta.data[i];
+              if (!el || n <= 0) return;
+              const top = Math.min(el.y, el.base);
+              const bottom = Math.max(el.y, el.base);
+              // The steps sit side by side at the same height, so their numbers
+              // go outside the bar - raised above, became-PO below - and can
+              // never share a line. The brought-forward bands are printed inside.
+              let y: number;
+              // Cancelled starts where Became PO ends, so its number goes ABOVE
+              // its bar: below would be the very line Became PO's number is on.
+              if (d.key === 'new_pr' || d.key === 'cancelled') y = top - 7;
+              else if (d.key === 'to_po') y = bottom + 7;
+              else if (bottom - top >= 11) y = (top + bottom) / 2;
+              else return;
+              placeLabelAt(ctx, placed, n.toLocaleString('en-GB'), el.x, y, true);
+            });
+          });
+          ctx.restore();
+        },
+      };
+      syncChartTheme(); chart.current = new ChartJS(canvas.current, {
         type: 'bar',
+        plugins: [segmentNumbers as never],
         data: {
           labels,
           datasets: sets.map((d) => ({
             label: d.label,
             data: d.values as never,
             stack: d.stack,
-            backgroundColor: d.color,
+            backgroundColor: d.shaded ? hatch(d.color) : d.color,
+            // A shaded bar keeps a solid edge in its own colour.
+            ...(d.shaded ? { borderColor: d.color, borderWidth: 1.5 } : {}),
             borderRadius: 2,
           })),
         },
@@ -413,7 +527,7 @@ export function ChartPanel({
       afterDatasetsDraw(c: {
         ctx: CanvasRenderingContext2D;
         data: { datasets: { data: (number | null)[] }[] };
-        getDatasetMeta: (i: number) => { data: { x: number; y: number }[]; hidden: boolean | null };
+        getDatasetMeta: (i: number) => { data: { x: number; y: number; width?: number; height?: number }[]; hidden: boolean | null };
       }) {
         if (barCount > 24) return;
         const ctx = c.ctx;
@@ -422,6 +536,8 @@ export function ChartPanel({
         ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#64748B';
         ctx.textAlign = horizontal ? 'left' : 'center';
         ctx.textBaseline = horizontal ? 'middle' : 'bottom';
+        // Every label checks the ones already drawn (lib/chartLabels.ts).
+        const placed: LabelRect[] = [];
         c.data.datasets.forEach((ds, di) => {
           const meta = c.getDatasetMeta(di);
           if (meta.hidden) return;
@@ -435,15 +551,23 @@ export function ChartPanel({
               const av = bucket ? annSeries.points.find((x) => x.bucketKey === bucket.key)?.value : null;
               if (av !== null && av !== undefined) txt += ` · ${formatKpi(Number(av), annUnit)}`;
             }
-            if (horizontal) ctx.fillText(txt, el.x + 4, el.y);
-            else ctx.fillText(txt, el.x, el.y - 2);
+            if (horizontal) {
+              const w = ctx.measureText(txt).width;
+              const h = Math.max(10, Math.min(12, (el.height ?? 12)));
+              const rect = { x0: el.x + 4, x1: el.x + 4 + w, y0: el.y - h / 2, y1: el.y + h / 2 };
+              if (placed.some((p2) => rect.x0 < p2.x1 && p2.x0 < rect.x1 && rect.y0 < p2.y1 && p2.y0 < rect.y1)) return;
+              ctx.fillText(txt, el.x + 4, el.y);
+              placed.push(rect);
+            } else {
+              placeLabelAbove(ctx, placed, txt, el.x, el.y, el.width ?? 20, (el as { base?: number }).base);
+            }
           });
         });
         ctx.restore();
       },
     };
 
-    chart.current = new ChartJS(canvas.current, {
+    syncChartTheme(); chart.current = new ChartJS(canvas.current, {
       type: 'bar',
       plugins: [barLabels as never],
       data: {
@@ -470,7 +594,17 @@ export function ChartPanel({
         maintainAspectRatio: false,
         animation: false,
         indexAxis: horizontal ? 'y' : 'x',
-        onClick: (e, elements) => {
+        onHover: (e, elements, c) => {
+          if (!bucketClick.current) return;
+          c.canvas.style.cursor = elements.length > 0 || bucketAt(c, e) !== null ? 'pointer' : 'default';
+        },
+        onClick: (e, elements, c) => {
+          if (bucketClick.current) {
+            const idx = elements[0]?.index ?? bucketAt(c, e);
+            const b = idx === null ? undefined : data.buckets[idx];
+            if (b) bucketClick.current(b.key, b.label);
+            return;
+          }
           const el = elements[0];
           if (!el) return;
           const series = shownSeries[el.datasetIndex];
@@ -516,7 +650,13 @@ export function ChartPanel({
             }
           : {
               x: { grid: { display: false }, ticks: { maxRotation: 60, minRotation: 0, autoSkip: true } },
-              y: { beginAtZero: true, ticks: { callback: (v) => formatKpi(Number(v), displayUnit) } },
+              // Headroom for the labels above the tallest bars; more when bars
+              // are narrow enough that labels turn upright.
+              y: {
+                beginAtZero: true,
+                grace: barCount > 10 ? '30%' : '12%',
+                ticks: { callback: (v) => formatKpi(Number(v), displayUnit) },
+              },
             },
       },
     });
@@ -525,7 +665,49 @@ export function ChartPanel({
       chart.current?.destroy();
       chart.current = null;
     };
-  }, [data, onDrill, variant, currency, chartId]);
+  }, [data, onDrill, variant, currency, chartId, showNumbers]);
+
+  /**
+   * The bucket under the pointer by position on the category axis: its tick
+   * label, or the empty part of its row beside a short bar. Null outside the
+   * band of rows (the legend, the value axis).
+   */
+  function bucketAt(
+    c: ChartJS,
+    e: { x: number | null; y: number | null },
+  ): number | null {
+    if (!data || e.x === null || e.y === null) return null;
+    const horiz = HORIZONTAL_CHARTS.has(chartId);
+    const ax = horiz ? c.scales['y'] : c.scales['x'];
+    const area = c.chartArea;
+    if (!ax || !area) return null;
+    // Across the rows only: a horizontal chart's labels sit left of the plot,
+    // a vertical chart's below it.
+    if (horiz ? (e.y < area.top || e.y > area.bottom || e.x > area.right)
+      : (e.x < area.left || e.x > area.right || e.y < area.top)) return null;
+    // A vertical chart's labels are rotated below the plot: the tick under the
+    // pointer is the nearest one on x, which getValueForPixel gives.
+    const v = ax.getValueForPixel(horiz ? e.y : e.x);
+    if (v === undefined || v === null) return null;
+    const i = Math.round(Number(v));
+    return i >= 0 && i < data.buckets.length ? i : null;
+  }
+
+  /**
+   * A click OUTSIDE the plot - on a category's axis label. Chart.js calls its
+   * onClick only inside the plot area, so the label needs the canvas's own
+   * listener; inside the plot this returns null and the chart handles it.
+   */
+  function outsideBucket(ev: React.MouseEvent<HTMLCanvasElement>): number | null {
+    const c = chart.current;
+    if (!c || !bucketClick.current) return null;
+    const a = c.chartArea;
+    const r = ev.currentTarget.getBoundingClientRect();
+    const x = ev.clientX - r.left;
+    const y = ev.clientY - r.top;
+    if (!a || (x >= a.left && x <= a.right && y >= a.top && y <= a.bottom)) return null;
+    return bucketAt(c, { x, y });
+  }
 
   if (error) {
     return (
@@ -549,14 +731,44 @@ export function ChartPanel({
 
   return (
     <div className={WIDE_CHARTS[chartId] ? 'panel chart-wide' : 'panel'}>
-      <h2>{data.title}</h2>
+      {WATERFALL_CHARTS.has(chartId) ? (
+        <div className="chart-head">
+          <h2><Lbl k={`chart:${chartId}`}>{data.title}</Lbl></h2>
+          <label className="chart-num-toggle" title="Print each segment's count on the chart">
+            <input type="checkbox" checked={showNumbers} onChange={(e) => setShowNumbers(e.target.checked)} />
+            Show numbers
+          </label>
+        </div>
+      ) : (
+        <h2><Lbl k={`chart:${chartId}`}>{data.title}</Lbl></h2>
+      )}
       {data.buckets.length === 0 ? (
         // An empty chart states the reason rather than rendering empty axes.
         <p className="note">{data.notes[0] ?? 'No data for this chart'}</p>
       ) : (
         <>
           <div className="chart-box" style={boxHeight ? { height: boxHeight } : undefined}>
-            <canvas ref={canvas} role="img" aria-label={data.title} />
+            <canvas
+              ref={canvas}
+              role="img"
+              aria-label={data.title}
+              onClick={(ev) => {
+                const i = outsideBucket(ev);
+                const b = i === null ? undefined : data.buckets[i];
+                if (b) bucketClick.current?.(b.key, b.label);
+              }}
+              onMouseMove={(ev) => {
+                const c = chart.current;
+                if (!c || !bucketClick.current) return;
+                const a = c.chartArea;
+                const r = ev.currentTarget.getBoundingClientRect();
+                const x = ev.clientX - r.left;
+                const y = ev.clientY - r.top;
+                // Inside the plot, the chart's own onHover sets the cursor.
+                if (a && x >= a.left && x <= a.right && y >= a.top && y <= a.bottom) return;
+                ev.currentTarget.style.cursor = outsideBucket(ev) === null ? 'default' : 'pointer';
+              }}
+            />
           </div>
           {(data.notes.length > 0 || onApplyFilter) && (
             <p className="note">

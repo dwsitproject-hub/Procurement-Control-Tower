@@ -33,6 +33,7 @@ async function seedMovementTypes(): Promise<void> {
       ('101','receipt',            1, true,  'Goods receipt against purchase order'),
       ('102','reversal',          -1, true,  'Reversal of goods receipt'),
       ('122','reversal',          -1, true,  'Return delivery (registered; absent from reference data)'),
+      ('123','receipt',            1, true,  'Reversal of return delivery (cancels a 122)'),
       ('641','transfer',           1, false, 'Transfer posting to stock in transit (STO)'),
       ('642','transfer_reversal', -1, false, 'Reversal of transfer to stock in transit')
     ON CONFLICT (movement_type) DO UPDATE
@@ -152,8 +153,13 @@ async function seedChartMeta(): Promise<void> {
  * accounts require documented approval and an expiry date.
  */
 async function seedDevAdmin(): Promise<void> {
-  if (env.NODE_ENV === 'production') {
-    process.stdout.write('  skipping dev admin (NODE_ENV=production)\n');
+  // Development ONLY (12 Nov 2026). It used to be skipped only under
+  // NODE_ENV=production, but production PCT runs as NODE_ENV=staging until it
+  // has TLS (the Secure cookie production mode demands needs HTTPS), and a
+  // production database must never receive a published, well-known password.
+  // The first production admin is created with set-password --create-admin.
+  if (env.NODE_ENV !== 'development') {
+    process.stdout.write(`  skipping dev admin (NODE_ENV=${env.NODE_ENV})\n`);
     return;
   }
 

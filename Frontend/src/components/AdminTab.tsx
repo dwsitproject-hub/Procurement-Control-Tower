@@ -5,6 +5,7 @@ import { CoupaPanel } from './CoupaTab';
 import { UserAccessTab } from './UserAccessTab';
 import { SapUploadTab } from './SapUploadTab';
 import { NotifyTab } from './NotifyTab';
+import { Lbl } from '../lib/labels';
 
 /**
  * W6 — steward tooling. v1's cfg-modal (exclusions), cv-modal (column mapping)
@@ -34,6 +35,8 @@ interface Exclusions {
   purchOrgs: string[];
   /** Coupa-only (019). Enforced by views, so it needs no recompute. */
   coupaPurchGroups: string[];
+  /** Coupa plant-code prefixes (047), e.g. 'TH'. Views too, so live on save. */
+  coupaPlants: string[];
   /** Drop lines whose derived status is HOLD PO. Needs a recompute. */
   holdPos: boolean;
   /** Vendor CODE prefixes treated as intercompany. Needs a recompute. */
@@ -47,6 +50,17 @@ interface CoupaOpt {
   sourcingEvents: number;
   receipts: number;
   count: number;
+  excluded: boolean;
+}
+
+interface CoupaPlantOpt {
+  value: string;
+  plants: string;
+  poLines: number;
+  sourcingEvents: number;
+  count: number;
+  /** The group has a plant in the SAP files - excluding it is unusual. */
+  inSap: boolean;
   excluded: boolean;
 }
 
@@ -162,22 +176,37 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [coupaOptions, setCoupaOptions] = useState<CoupaOpt[]>([]);
+  const [coupaPlantOptions, setCoupaPlantOptions] = useState<CoupaPlantOpt[]>([]);
+  /**
+   * No dataset yet (a new installation): there are no values in the data to
+   * tick, so the three SAP lists become typed, comma-separated codes - the same
+   * raw-text pattern as the prefix box (see prefixText) - and saving does not
+   * rebuild, because there is nothing to rebuild; the first load applies them.
+   */
+  const [hasDataset, setHasDataset] = useState(true);
+  const [freeText, setFreeText] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.get<{ current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[] }>(
+    api.get<{
+      current: Exclusions; options: typeof options; coupaOptions: CoupaOpt[];
+      coupaPlantOptions?: CoupaPlantOpt[]; hasDataset?: boolean;
+    }>(
       '/api/v1/admin/exclusions',
     )
       .then((d) => {
-        setCurrent(d.current);
+        setCurrent({ ...d.current, coupaPlants: d.current.coupaPlants ?? [] });
         setPrefixText(null);
+        setFreeText({});
         setOptions(d.options as never);
         setCoupaOptions(d.coupaOptions ?? []);
+        setCoupaPlantOptions(d.coupaPlantOptions ?? []);
+        setHasDataset(d.hasDataset !== false);
       })
       .catch((e: Error) => setMsg(e instanceof ApiError && e.status === 403 ? 'Steward role required.' : e.message));
   }, []);
 
-  if (msg && !current) return <div className="panel"><h2>Data exclusions</h2><p className="note">{msg}</p></div>;
-  if (!current || !options) return <div className="panel"><h2>Data exclusions</h2><div className="spinner" /></div>;
+  if (msg && !current) return <div className="panel"><h2><Lbl>Data exclusions</Lbl></h2><p className="note">{msg}</p></div>;
+  if (!current || !options) return <div className="panel"><h2><Lbl>Data exclusions</Lbl></h2><div className="spinner" /></div>;
 
   /**
    * The list-valued exclusion keys.
@@ -187,7 +216,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
    * caught the mismatch the moment the flag was added.
    */
   type ListKey = 'docTypes' | 'purchGroups' | 'purchOrgs' | 'coupaPurchGroups'
-    | 'intercoVendorPrefixes';
+    | 'coupaPlants' | 'intercoVendorPrefixes';
 
   const toggle = (key: ListKey, v: string) => {
     setCurrent((c) => {
@@ -218,6 +247,13 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
       setDirty(false);
       // Show the saved, normalised list rather than whatever spacing was typed.
       setPrefixText(null);
+      setFreeText({});
+      if (!hasDataset) {
+        setMsg('Saved. Nothing to rebuild yet — these exclusions apply from the first load '
+          + '(SAP Data Upload, or Sync now in SAP Data Sync).');
+        setBusy(null);
+        return;
+      }
       // A Coupa-only change is live already: the views read the rule store
       // directly. Rebuilding every fact for it would cost a minute and change
       // nothing, so the server tells us whether it is actually needed.
@@ -266,7 +302,34 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     }
   };
 
-  const group = (label: string, key: ListKey, opts: Opt[]) => (
+  const group = (label: string, key: ListKey, opts: Opt[]) => (!hasDataset ? (
+    <details className="dt-facet" open>
+      <summary>
+        {label}
+        {current[key].length > 0 && <span className="dt-badge">{current[key].length}</span>}
+      </summary>
+      <div className="dt-facet-list" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <label className="cu-field" style={{ maxWidth: '32rem' }}>
+          SAP codes to exclude
+          <input
+            className="gf-search-in"
+            disabled={!isAdmin}
+            placeholder="e.g. TG4, TL4 — separate with a comma"
+            value={freeText[key] ?? current[key].join(', ')}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setFreeText((t) => ({ ...t, [key]: raw }));
+              setCurrent({
+                ...current,
+                [key]: raw.split(/[,\s]+/).map((x) => x.trim().toUpperCase()).filter((x) => x !== ''),
+              });
+              setDirty(true);
+            }}
+          />
+        </label>
+      </div>
+    </details>
+  ) : (
     <details className="dt-facet" open={current[key].length > 0}>
       <summary>
         {label}
@@ -297,7 +360,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
           ))}
       </div>
     </details>
-  );
+  ));
 
   /**
    * The Coupa purchasing-group facet.
@@ -338,6 +401,49 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
   );
 
   /**
+   * The Coupa plant facet (047).
+   *
+   * Coupa is shared with business units outside this dashboard - Upstream's
+   * 11…/12… POs among them. A value is a plant-code prefix; the options are the
+   * two-character sites found in Coupa. Each says whether the site has a plant
+   * in the SAP files, because that is the scoping question: a site the SAP files
+   * never mention belongs to another business unit.
+   */
+  const coupaPlantGroup = () => (
+    <details className="dt-facet" open={current.coupaPlants.length > 0}>
+      <summary>
+        Coupa plants (business units out of scope)
+        {current.coupaPlants.length > 0 && (
+          <span className="dt-badge">{current.coupaPlants.length}</span>
+        )}
+      </summary>
+      <div className="dt-facet-list">
+        {[...coupaPlantOptions].sort((a, b) => Number(b.excluded) - Number(a.excluded)
+          || Number(a.inSap) - Number(b.inSap) || b.count - a.count)
+          .map((o) => (
+            <label
+              key={o.value}
+              className={`dt-chip${o.excluded ? ' dt-chip-off' : ''}`}
+              title={o.plants ? `Plants: ${o.plants}` : undefined}
+            >
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={current.coupaPlants.includes(o.value)}
+                onChange={() => toggle('coupaPlants', o.value)}
+              />
+              <strong>{o.value}</strong>{' '}
+              <span className="muted">
+                ({formatNumber(o.poLines)} PO lines · {formatNumber(o.sourcingEvents)} quote requests
+                {o.inSap ? ' · in SAP files' : ' · not in SAP files'})
+              </span>
+            </label>
+          ))}
+      </div>
+    </details>
+  );
+
+  /**
    * Held POs and intercompany vendors.
    *
    * Not a facet list like the three above: HOLD PO is one value of a derived
@@ -346,7 +452,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
    * finite option list to tick.
    */
   const holdAndInterco = () => (
-    <details className="dt-facet" open={current.holdPos || current.intercoVendorPrefixes.length > 0}>
+    <details className="dt-facet" open={!hasDataset || current.holdPos || current.intercoVendorPrefixes.length > 0}>
       <summary>
         Held POs and intercompany
         {(current.holdPos || current.intercoVendorPrefixes.length > 0) && (
@@ -413,7 +519,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div className="panel">
-      <h2>🎛 Data exclusions</h2>
+      <h2>🎛 <Lbl>Data exclusions</Lbl></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
         Excluded document types, purchasing groups and orgs are removed from <strong>every</strong>
         stage — requisitions, approval steps (AR), sourcing, orders,
@@ -424,19 +530,29 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
         unticking it restores them on the next save.
         {!isAdmin && ' Editing requires the admin role.'}
       </p>
+      {!hasDataset && (
+        <p className="note" style={{ marginBottom: '.6rem' }}>
+          <span className="bs sl">No data loaded yet</span> Type the SAP codes to exclude. They
+          are applied while the first dataset loads, so set them <strong>before</strong> the first
+          load. Once data is in, this editor lists the values found in it to tick instead.
+        </p>
+      )}
       <div className="dt-facets">
         {group('Document types', 'docTypes', options.docTypes)}
         {group('Purchasing groups', 'purchGroups', options.purchGroups)}
         {group('Purchasing orgs', 'purchOrgs', options.purchOrgs)}
         {holdAndInterco()}
         {coupaGroup()}
+        {coupaPlantGroup()}
       </div>
       <p className="note" style={{ marginTop: '.5rem' }}>
-        <span className="bs sl">Coupa only</span> The last group above applies to the{' '}
+        <span className="bs sl">Coupa only</span> The last two groups above apply to the{' '}
         <strong>Coupa store alone</strong> — its purchase orders, quote requests, receipts and the
         invoices drawn from them. It is separate from the SAP lists because the desks in Coupa are
         largely not the ones in the SAP facts, and because it is enforced by database views rather
-        than by the transform: <strong>it takes effect the moment you save, with no rebuild</strong>.
+        than by the transform: <strong>they take effect the moment you save, with no rebuild</strong>.
+        A plant value is a code prefix: <code>TH</code> drops every TH plant. Sites that never
+        appear in the SAP files (Upstream and other business units) are excluded by default.
         A partially relevant invoice is kept, not dropped — an invoice disappears only when every
         one of its linked lines is excluded.
       </p>
@@ -451,7 +567,7 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
           >
             {busy === 'saving' ? 'Saving…'
               : busy === 'recompute' ? 'Rebuilding…'
-                : 'Save exclusions & recompute'}
+                : hasDataset ? 'Save exclusions & recompute' : 'Save exclusions'}
           </button>
         </div>
       )}
@@ -489,7 +605,7 @@ function MappingsPanel() {
 
   return (
     <div className="panel">
-      <h2>🔧 Column mapping</h2>
+      <h2>🔧 <Lbl>Column mapping</Lbl></h2>
       <p className="note" style={{ marginBottom: '.6rem' }}>
         When SAP renames a column, map the canonical field to the new header here. Mappings are
         server-side and audited — every user sees the same numbers, unlike v1's per-browser storage.
@@ -552,16 +668,92 @@ function MappingRow({ col, onSave }: { col: Record<string, any>; onSave: (f: str
 
 // ────────────────────────────────────────────────────────────── FX rates
 
+/**
+ * The Data Hub exchange-rate source (040, 23 Oct 2026): configured or not, the
+ * last run, the field mapping read from the hub's catalog, and Sync now.
+ */
+function DhmFxBox() {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const load = () => api.get<Record<string, any>>('/api/v1/admin/dhm/fx').then(setD).catch((e: Error) => setMsg(e.message));
+  useEffect(() => { void load(); }, []);
+  // While a run is going, look again every few seconds.
+  useEffect(() => {
+    if (!d?.inFlight) return undefined;
+    const t = setTimeout(() => { void load(); }, 4000);
+    return () => clearTimeout(t);
+  }, [d]);
+
+  if (!d) return msg ? <p className="err">{msg}</p> : null;
+  const st = d.state ?? {};
+  const m = st.mapping;
+  return (
+    <div className="panel" style={{ margin: '.8rem 0', background: 'var(--bg)' }}>
+      <h3 className="pr-tbl-h" style={{ marginTop: 0 }}>
+        🛰 <Lbl>Data Hub exchange rates</Lbl>{' '}
+        <span className="muted">— {d.configured ? `${d.host} · master '${d.entity}' · every ${d.intervalMinutes} min` : 'not configured'}</span>
+      </h3>
+      {!d.configured ? (
+        <p className="note">
+          Set <code>DHM_BASE_URL</code>, <code>DHM_PUBLIC_KEY</code> and <code>DHM_PRIVATE_KEY</code> in the
+          server's secrets file (the key pair comes from the Data Hub integrator, with <code>{d.entity}</code> on
+          PCT's allowlist). Until then rates come from the SAP rate file only.
+        </p>
+      ) : (
+        <>
+          <p className="note" style={{ margin: '.2rem 0' }}>
+            Last run:{' '}
+            {st.last_run_at ? (
+              <>
+                <span className={`bs ${st.last_status === 'ok' ? 'ok' : 'spdel'}`}>{st.last_status}</span>{' '}
+                {String(st.last_run_at).slice(0, 16).replace('T', ' ')} ({st.last_trigger})
+              </>
+            ) : 'never'}
+            {' · '}records {formatNumberSafe(d.records?.live)} live, {formatNumberSafe(d.records?.deleted)} deleted
+            {d.records && d.records.live > d.records.usable ? `, ${d.records.live - d.records.usable} unusable` : ''}
+            {' · '}store: {Object.entries(d.storeBySource ?? {}).map(([k, v]) => `${k === 'dhm' ? 'data hub' : k} ${String(v)}`).join(', ') || DASH}
+          </p>
+          {st.last_error && <p className="err" style={{ margin: '.2rem 0' }}>{st.last_error}</p>}
+          {m && (
+            <p className="note" style={{ margin: '.2rem 0' }}>
+              Fields read: from <code>{m.from}</code>, to <code>{m.to}</code>, rate <code>{m.rate}</code>,{' '}
+              {m.date ? <>date <code>{m.date}</code></> : <>year <code>{m.year}</code> + month <code>{m.month}</code></>}
+              {m.fromFactor && <>, from factor <code>{m.fromFactor}</code></>}
+              {m.toFactor && <>, to factor <code>{m.toFactor}</code></>}
+              {m.unused?.length > 0 && <> · not used: {m.unused.join(', ')}</>}
+            </p>
+          )}
+          <button
+            className="dt-btn"
+            disabled={d.inFlight}
+            onClick={() => {
+              setMsg(null);
+              api.post<{ outcome: string }>('/api/v1/admin/dhm/fx/sync')
+                .then(() => setTimeout(() => { void load(); }, 800))
+                .catch((e: Error) => setMsg(e.message));
+            }}
+          >
+            {d.inFlight ? 'Syncing…' : 'Sync now'}
+          </button>
+          {msg && <span className="err" style={{ marginLeft: '.5rem' }}>{msg}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+const formatNumberSafe = (v: unknown): string => (v === null || v === undefined ? DASH : Number(v).toLocaleString('en-GB'));
+
 function FxPanel() {
   const [d, setD] = useState<Record<string, any> | null>(null);
   useEffect(() => {
     api.get<Record<string, any>>('/api/v1/admin/fx').then(setD).catch(() => setD(null));
   }, []);
 
-  if (!d) return <div className="panel"><h2>💱 FX rates</h2><div className="spinner" /></div>;
+  if (!d) return <div className="panel"><h2>💱 <Lbl>FX rates</Lbl></h2><div className="spinner" /></div>;
   return (
     <div className="panel">
-      <h2>💱 FX rates <span className="muted">— policy {d.policy}, year resolved {d.yearResolved ?? DASH}</span></h2>
+      <h2>💱 <Lbl>FX rates</Lbl> <span className="muted">— policy {d.policy}, year resolved {d.yearResolved ?? DASH}</span></h2>
       <div className="table-wrap" style={{ maxHeight: '300px', overflow: 'auto' }}>
         <table className="data">
           <thead>
@@ -576,8 +768,8 @@ function FxPanel() {
                 <td>{r.derivation}</td>
                 <td>{r.pivotCurrency ?? DASH}</td>
                 <td>
-                  <span className={`bs ${r.source === 'coupa' ? 'su' : r.source === 'sap' ? 'sd' : r.source === 'mixed' ? 'sn' : 'sl'}`}>
-                    {r.source ?? 'sap'}
+                  <span className={`bs ${r.source === 'dhm' ? 'ok' : r.source === 'coupa' ? 'su' : r.source === 'sap' ? 'sd' : r.source === 'mixed' ? 'sn' : 'sl'}`}>
+                    {r.source === 'dhm' ? 'data hub' : r.source ?? 'sap'}
                   </span>
                 </td>
                 <td>{r.sourceUpdatedAt ? String(r.sourceUpdatedAt).slice(0, 16) : DASH}</td>
@@ -590,11 +782,14 @@ function FxPanel() {
         Rates are stored per dataset version — a re-published bundle with a corrected rate file never
         changes figures already published.
       </p>
+      <DhmFxBox />
       <p className="note">
-        <strong>Two sources, one table:</strong> the SAP rate file and Coupa's exchange-rate API both
-        feed the shared FX store; for the same currency and period, whichever record was updated most
-        recently wins (SAP timed by its file's modified date, Coupa by its <code>updated-at</code>).
-        New rates take effect at the next recompute.
+        <strong>Two sources, one table:</strong> the SAP rate file and the Data Hub's exchange-rate
+        master both feed the shared FX store; for the same currency and period, whichever record was
+        updated most recently wins (SAP timed by its file's modified date, the Data Hub by its record's
+        update time). Coupa no longer supplies rates: its earlier ones stay only for months the Data Hub
+        does not cover, and a Data Hub rate always replaces them. New rates take effect at the next
+        recompute.
       </p>
       <p className="note">
         <strong>Period basis:</strong> a PO with a booked Coupa invoice converts at its <strong>invoice

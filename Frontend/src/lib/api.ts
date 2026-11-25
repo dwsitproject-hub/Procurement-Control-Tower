@@ -12,12 +12,16 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, background = false): Promise<T> {
+  const headers: Record<string, string> = body ? { 'content-type': 'application/json' } : {};
+  // A poll the user did not ask for: the server reads it but does not count it
+  // as activity, so an unattended tab still reaches the idle timeout.
+  if (background) headers['x-pct-background'] = '1';
   const res = await fetch(path, {
     method,
     // Single origin: the session cookie is first-party.
     credentials: 'same-origin',
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -35,6 +39,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   get: <T>(p: string) => request<T>('GET', p),
+  /** A GET made by a timer, not by the user (see request()). */
+  poll: <T>(p: string) => request<T>('GET', p, undefined, true),
   post: <T>(p: string, b?: unknown) => request<T>('POST', p, b),
   put: <T>(p: string, b?: unknown) => request<T>('PUT', p, b),
   patch: <T>(p: string, b?: unknown) => request<T>('PATCH', p, b),
@@ -125,6 +131,8 @@ export interface Me {
   /** Effective per-page access (011); absent keys mean 'none'. */
   pages?: Record<string, 'none' | 'view' | 'edit'>;
   mustChangePassword?: boolean;
+  /** Hub user id (OIDC `sub`) for SSO users, for the Hub SDK; null otherwise. */
+  hubSubject?: string | null;
 }
 
 export interface FeedInfo {
@@ -190,12 +198,18 @@ export interface ChartResponse {
 export interface DrillPage {
   label: string;
   grain: string;
+  /** Set when the rows summarise the grain, e.g. one row per purchasing group. */
+  view?: string;
   totalCount: number;
   note: string | null;
   columns: { key: string; label: string; type: string; currency?: string; coupa?: boolean }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
-  totals: { idrSum: number | null; usdSum: number | null; usdComplete: boolean } | null;
+  totals: {
+    idrSum: number | null; usdSum: number | null; usdComplete: boolean;
+    /** What the sums add up: order value, or what is still to deliver / invoice. */
+    basis?: 'value' | 'still_to_deliver' | 'still_to_invoice';
+  } | null;
   detailHandoff: { params: Record<string, string>; unmapped: string[] } | null;
 }
 

@@ -21,6 +21,9 @@ export default defineConfig({
       '/auth': { target: API_TARGET, changeOrigin: false },
     },
   },
+  // Readable stack traces for the Hub SDK's error reports and Sentinel's
+  // analyses: minified function names would hide where an error happened.
+  esbuild: { keepNames: true },
   build: {
     outDir: 'dist',
     assetsInlineLimit: 0,

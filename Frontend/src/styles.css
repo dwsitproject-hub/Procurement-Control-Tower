@@ -1652,6 +1652,11 @@ a:hover { color: var(--accent-hover); }
   margin: 1rem 1.4rem 0; padding: .55rem .8rem; border-radius: 16px; gap: .5rem;
   background: var(--glass); border: 1px solid var(--glass-border-strong); box-shadow: var(--shadow);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  /* The blur makes the bar its own stacking layer, which would trap its
+     dropdowns (.gf-panel) under the page that follows. Lifting the whole bar
+     onto the dropdown level keeps them above the page and below the sticky
+     top bar and modals. */
+  position: relative; z-index: var(--z-dropdown);
 }
 .gf-bar:focus-within { border-color: var(--card-hover-border); box-shadow: 0 0 0 4px rgba(232, 116, 58, .14), var(--shadow); }
 .gf-label { color: var(--kicker); font-size: .68rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
@@ -1667,7 +1672,9 @@ a:hover { color: var(--accent-hover); }
 .gf-panel { border-radius: 16px; border-color: var(--glass-border-strong); box-shadow: 0 24px 60px -20px rgba(0, 0, 0, .45); }
 
 /* ── content column ── */
-.content > main { padding: 1.3rem 1.5rem 3rem; animation: pct-fade .35s ease both; }
+/* fill-mode backwards, not both: a finished animation must not leave <main>
+   as a stacking layer painted over the filter dropdowns */
+.content > main { padding: 1.3rem 1.5rem 3rem; animation: pct-fade .35s ease backwards; }
 
 /* ── panels: Hub cards (glass edge, lift + gradient hairline on hover) ── */
 .panel {

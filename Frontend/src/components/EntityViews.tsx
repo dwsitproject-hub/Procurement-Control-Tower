@@ -8,6 +8,7 @@ import {
 import { api } from '../lib/api';
 import { CATEGORY_COLORS, ChartPanel } from './Chart';
 import { FilterDropdown } from './FilterDropdown';
+import { syncChartTheme } from '../lib/chartTheme';
 
 ChartJS.register(CategoryScale, LineController, LineElement, LinearScale, PointElement, Tooltip, Legend);
 import { DASH, FLAG_META, formatCurrency, formatDate, formatMoney, formatNumber, STATUS_PILL } from '../lib/format';
@@ -1249,7 +1250,7 @@ function PriceTrend({
     const vendors = [...new Set(rows.map((r) => String(r.vendorCode)))];
     const COLORS = ['#2E75B6', '#0D9488', '#ED7D31', '#7C3AED', '#e11d48', '#ca8a04'];
     chart.current?.destroy();
-    chart.current = new ChartJS(canvas.current, {
+    syncChartTheme(); chart.current = new ChartJS(canvas.current, {
       type: 'line',
       data: {
         labels: months,

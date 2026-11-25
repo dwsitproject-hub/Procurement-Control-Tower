@@ -777,6 +777,107 @@ After the update:
   Admin arranges a page, it shows the built-in layout.
 - The Governance page is gone from the menu (10o).
 
+### 10q. Release of 24 Nov 2026 — performance: every page, figure and popup under 2 seconds
+
+The usual §10 BE update; **no FE change, no Rebuild**. One migration, **050**, which replaces three Coupa
+views (`ops.v_coupa_invoice`, `ops.v_coupa_invoice_line`, `ops.v_coupa_receipt`) with faster
+equivalents that return the same rows. Replacing a view needs its OWNER, so check it read-only from the
+running API before the update:
+
+**PuTTY on 172.28.80.51 (BE):**
+
+```bash
+docker exec pct-api node -e 'const {Client}=require("pg");const c=new Client({connectionString:process.env.DATABASE_URL});c.connect().then(()=>c.query("select current_user as me, n.nspname||chr(46)||c.relname as obj, pg_get_userbyid(c.relowner) as owner from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname||chr(46)||c.relname = any($1) order by 2",[["ops.v_coupa_invoice","ops.v_coupa_invoice_line","ops.v_coupa_receipt"]])).then(r=>{console.table(r.rows);return c.end()}).catch(e=>{console.error(e.message);process.exit(1)})'
+```
+
+Expect three rows, with every `me` and `owner` = `pct`. Any other owner: stop. The privileged account must
+`ALTER VIEW … OWNER TO pct` in DMS first, or the API fails migration 050 at start (§11 brings the old image
+back).
+
+What changed (measured locally on the reference data; production on ApsaraDB should gain at least as much):
+
+| Where | Before | After |
+|---|---|---|
+| Popups from the PR flow and PO bracket charts | 4–10 s | under 0.7 s |
+| Any page after a filter change not seen before (e.g. Vendor Type) | 1.8–8.7 s | under 1.5 s |
+| Invoicing & Payment page / its popups | 5.5 s / 1.2–2.8 s | 0.1 s / under 0.5 s |
+| Sourcing page | 3 s | 0.1 s (cached) |
+| Open Items / Detail Table | 2.2–3 s | 0.3–1.2 s |
+| Cache warm-up after an API start | 31 s | 14 s |
+
+- **JIT off on every database session.** Postgres compiled each analytic query with LLVM before
+  running it: 3.3 s of compile for a 0.4 s query.
+- **Filtered cards:** a page now computes only its own cards (not all ~80), in parallel, each cached on
+  its own, and a chart's series run in parallel. The PR flow chart computes its shared base once for all
+  ten series.
+- **Detail table:** the count, rows and 11 filter lists run together, and the count and filter lists
+  are cached.
+- **Coupa pages:** their queries run together and are cached until the next Coupa sync, FX change or
+  dataset version. Migration 050 stops the three views from re-evaluating every Coupa order line on each
+  read: invoices 1,490 ms → 18 ms.
+- No figure changes. Old and new code gave byte-identical results for every card and live chart under
+  four filters, and the views returned the same rows. The drill sweep and the invoice checks pass.
+
+### 10r. Release of 25 Nov 2026 — SAP down payments ("DP All" export)
+
+The usual §10 BE and FE updates; **no Rebuild**. One migration, **051**:
+- **New feed id:** adds the feed id `dp` to two CHECK constraints (`app.template_version`,
+  `ingest.batch_file`).
+- **New store:** creates the per-version store `ops.sap_dp_line` and the view `ops.v_sap_dp_line`.
+- **Replaced views:** replaces `ops.v_coupa_invoice` (050's) and `ops.v_coupa_paid_sap_po` (046's), so a
+  Coupa invoice that IS an SAP DP is counted once.
+
+All of that needs the `pct` account to own those objects and to create in `ops`. Check it read-only
+before the update:
+
+**PuTTY on 172.28.80.51 (BE):**
+
+```bash
+docker exec pct-api node -e 'const {Client}=require("pg");const c=new Client({connectionString:process.env.DATABASE_URL});c.connect().then(()=>c.query("select current_user as me, n.nspname||chr(46)||c.relname as obj, pg_get_userbyid(c.relowner) as owner, has_schema_privilege($2,$3) as can_create_in_ops from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname||chr(46)||c.relname = any($1) order by 2",[["app.template_version","ingest.batch_file","core.dataset_version","ops.v_coupa_invoice","ops.v_coupa_paid_sap_po"],"ops","CREATE"])).then(r=>{console.table(r.rows);return c.end()}).catch(e=>{console.error(e.message);process.exit(1)})'
+```
+
+Expect five rows, every `me` and `owner` = `pct`, and `can_create_in_ops` = `true`. Anything else: stop.
+The privileged account must `ALTER TABLE/VIEW … OWNER TO pct` (or `GRANT CREATE ON SCHEMA ops TO pct`)
+in DMS first.
+
+**Loading the file:** put the SAP "DP All" export (`DP All*.XLSX`) in the SAP folder with the PR/PO
+files. Every scheduled pickup reads it, and its folder defaults to the PR Report's. Or upload it in
+Admin → SAP Data Upload; tick "Publish immediately", or confirm the batch afterwards. Until a DP file is
+loaded, the Invoicing page's DP section says so and Open Items is unchanged.
+
+How the data is read (user rule, 25 Nov 2026):
+- **Clearing Date empty** = the DP is **outstanding**. **Filled** = settled against the final invoice:
+  the PO is **fully paid**. The amount is the DP amount; the final balance payment is not in this
+  file.
+- **Per dataset version**, like the facts: a batch awaiting confirmation, a rejected one or a rollback
+  never changes the published figures. A new file replaces, per company code, the rows inside the
+  posting-date range it covers and keeps the rest. A batch without a DP file carries the last snapshot
+  forward.
+- **PCT scope:**
+  - POs excluded by PCT rules (purchasing org PRO3 / OPS3 / PRO2 / HRG1 / LGL1, held, deleted) and
+    intercompany vendors (`exclusions.interco_vendor_prefixes`) are left out.
+  - So are rows with no PO, such as insurance premiums or a tax DP.
+  - A "TEMP" PO placeholder takes the real PO from Assignment.
+- **No double counting:** a Coupa invoice whose number is an SAP DP document number on the same PO is
+  counted once, as the SAP DP. On the 23 Nov file that was 1 invoice (IDR 346,875), so Coupa invoices
+  dropped from 51 to 50 locally.
+
+What changed for users:
+- **Invoicing & Payment**, a new SAP DP section, movable and hideable like the rest:
+  - Cards: SAP DP outstanding (net of the deductions taken so far), POs with DP outstanding, SAP DP
+    settled, POs fully paid.
+  - Panels: outstanding DP by age of the advance, DP posted by month, largest outstanding DPs by PO.
+  - Every figure opens its line items.
+  - POs whose file holds only deductions are shown apart, because their DP was posted before the file's
+    range (the 23 Nov export starts 2 Jan 2026).
+- **Open Items:** "PO not delivered — paid / DP" now counts SAP down payments as well as Coupa payments.
+  Locally it went from 0 to 102 lines on 36 POs.
+
+Worth asking SAP for (it improves the figures, nothing breaks without it):
+- Add the **Fiscal Year, Line item and Clearing Document** columns, so every row is uniquely identified
+  and a settled DP ties to its clearing.
+- **Include every open DP item whatever its posting date**, so the deductions-only POs get their DP.
+
 ## 11. Rollback
 
 **On the affected server:**

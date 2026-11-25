@@ -7,13 +7,15 @@ import {
 import { api, type ChartResponse } from '../lib/api';
 import { formatKpi } from '../lib/format';
 import { Lbl } from '../lib/labels';
+import { syncChartTheme } from '../lib/chartTheme';
 
 ChartJS.register(
   ArcElement, BarController, BarElement, CategoryScale, DoughnutController,
   LinearScale, Tooltip, Legend,
 );
 
-const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948'];
+// Hub palette: brand red, amber, teal, blue, violet, orange - distinct hues, readable on light and dark.
+const PALETTE = ['#D23F35', '#F5A623', '#14B8A6', '#4A7FD4', '#8B5CF6', '#E8743A'];
 // v1 colours each priority bucket (Emergency red → Planned green).
 const PRIORITY_COLORS: Record<string, string> = {
   '01-Emergency': '#C0392B',
@@ -123,7 +125,10 @@ const WIDE_CHARTS: Record<string, number> = { pr_by_month: 440 };
  */
 const HORIZONTAL_CHARTS = new Set(['items_by_category']);
 const WATERFALL_BAND_COLORS = ['#4E79A7', '#F28E2B', '#59A14F', '#E15759', '#76B7B2', '#EDC948'];
-const WATERFALL_STEP_COLORS = { new_pr: '#2E7D32', to_po: '#1F3864', cancelled: '#94a3b8' };
+// to_po was navy #1F3864 (redesign, Nov 2026): on the dark theme's navy
+// panels the hatched bars vanished. Blue #2563EB keeps 3:1 against both the
+// dark and the light panel, and is still "the cool colour that left".
+const WATERFALL_STEP_COLORS = { new_pr: '#2E7D32', to_po: '#2563EB', cancelled: '#94a3b8' };
 
 /**
  * A diagonal hatch over a light tint of `color` (11 Nov 2026: "Became PO" is
@@ -360,7 +365,7 @@ export function ChartPanel({
           strokeStyle: c.data.datasets[0]!.backgroundColor[i],
           index: i,
         }));
-      chart.current = new ChartJS(
+      syncChartTheme(); chart.current = new ChartJS(
         canvas.current,
         doughnutCfg as unknown as ConstructorParameters<typeof ChartJS>[1],
       ) as unknown as ChartJS;
@@ -450,7 +455,7 @@ export function ChartPanel({
           ctx.restore();
         },
       };
-      chart.current = new ChartJS(canvas.current, {
+      syncChartTheme(); chart.current = new ChartJS(canvas.current, {
         type: 'bar',
         plugins: [segmentNumbers as never],
         data: {
@@ -562,7 +567,7 @@ export function ChartPanel({
       },
     };
 
-    chart.current = new ChartJS(canvas.current, {
+    syncChartTheme(); chart.current = new ChartJS(canvas.current, {
       type: 'bar',
       plugins: [barLabels as never],
       data: {

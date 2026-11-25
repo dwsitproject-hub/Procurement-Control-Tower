@@ -7,8 +7,9 @@
  */
 
 import { pool } from '../../db/client.js';
-import { PARITY_KPIS, PARITY_CHARTS } from './mart_parity.js';
-import { cycleKpis, inlineKpis } from './mart.js';
+import { PARITY_KPIS, PARITY_CHARTS, SHARED_BASE_SQL } from './mart_parity.js';
+import { CYCLE_KPI_IDS, INLINE_KPI_IDS, cycleKpis, inlineKpis } from './mart.js';
+import { memo } from './cache.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import {
   buildFilterClause, injectFilter, mergeIntoPredicate, type FactKind, type GlobalFilter,
@@ -76,13 +77,90 @@ function severityOf(
   return 'neutral';
 }
 
+/**
+ * How many of one request's KPI queries run at once (24 Nov 2026). The pool
+ * holds DB_POOL_MAX (10) connections shared by every user; four leaves room
+ * for the charts the same page asks for in parallel.
+ */
+const KPI_CONCURRENCY = 4;
+
+/** Run fn over items with at most `limit` in flight, results in input order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/**
+ * The KPIs under a filter - only the ones asked for (24 Nov 2026, performance
+ * pass).
+ *
+ * It computed all ~80 for every request, one query after another, although a
+ * page asks for its own dozen: 1.8 s for another year, 8.7 s with Vendor Type,
+ * on every page, for any filter not yet cached. Now:
+ *  - `wanted` (the page's ?ids) limits the work to those KPIs; null = all (the
+ *    cache warm-up, the sweep).
+ *  - Each KPI is cached on its own (memo per id and filter), and the two
+ *    grouped builders (inlineKpis, cycleKpis) once per filter, so the warm-up
+ *    still serves every page, and a page reuses what another page computed.
+ *  - The queries run concurrently, KPI_CONCURRENCY at a time.
+ */
 export async function computeLiveKpis(
   versionId: number,
   filter: GlobalFilter,
+  wanted: ReadonlySet<string> | null = null,
 ): Promise<LiveKpi[]> {
-  const out: LiveKpi[] = [];
+  const want = (id: string): boolean => wanted === null || wanted.has(id);
+  const specs = PARITY_KPIS.filter((s) => want(s.id));
+  const parity = mapLimit(specs, KPI_CONCURRENCY,
+    (spec) => memo(versionId, ['kpi1', spec.id, filter], () => liveParityKpi(spec, versionId, filter)));
 
-  for (const spec of PARITY_KPIS) {
+  /*
+   * The cycle times and the inline counts: the mart's own functions with the
+   * filter passed in. The sample floor is the rule in force, and a KPI a data
+   * caveat disabled in the mart stays disabled here - a filter narrows a
+   * population, it cannot make a caveated measure trustworthy.
+   */
+  const shared = async () => {
+    const rules = await loadRuleSnapshot();
+    const disabled = new Set((await pool.query<{ kpi_id: string }>(
+      `SELECT kpi_id FROM mart.kpi_value WHERE dataset_version_id = $1 AND status = 'disabled'`,
+      [versionId],
+    )).rows.map((r) => r.kpi_id));
+    const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>
+      (await pool.query<T>(sql, params)).rows;
+    return { rules, disabled, q };
+  };
+  const inline = INLINE_KPI_IDS.some(want)
+    ? memo(versionId, ['kpi-inline', filter], async () => {
+      const s = await shared();
+      return inlineKpis(s.q, versionId, s.rules, s.disabled, filter);
+    })
+    : Promise.resolve([]);
+  const cycle = CYCLE_KPI_IDS.some(want)
+    ? memo(versionId, ['kpi-cycle', filter], async () => {
+      const s = await shared();
+      return cycleKpis(s.q, versionId, Number(s.rules['kpi.min_sample'] ?? 30), s.disabled, filter);
+    })
+    : Promise.resolve([]);
+
+  const [a, b, c] = await Promise.all([parity, inline, cycle]);
+  return [...a, ...b, ...c] as LiveKpi[];
+}
+
+/** One parity KPI under the filter. */
+async function liveParityKpi(
+  spec: (typeof PARITY_KPIS)[number],
+  versionId: number,
+  filter: GlobalFilter,
+): Promise<LiveKpi> {
     const grain = (spec.drill?.['grain'] as string | undefined) ?? 'po_line';
     const { kind, alias } = targetOf(spec.id, grain);
 
@@ -96,13 +174,12 @@ export async function computeLiveKpis(
     } catch {
       // A spec with no anchor cannot be filtered honestly, so it reports as
       // unavailable rather than silently returning the unfiltered number.
-      out.push({
+      return {
         kpiId: spec.id, status: 'unavailable', value: null, numerator: null, denominator: null,
         sampleSize: null, unit: spec.unit, currencyBasis: spec.currencyBasis ?? null,
         severity: null, statusReason: 'This figure cannot be filtered.', detail: null,
         drillPredicate: null,
-      });
-      continue;
+      };
     }
 
     let row: Record<string, unknown> = {};
@@ -110,7 +187,7 @@ export async function computeLiveKpis(
       const r = await pool.query(sql, [versionId, ...clause.params]);
       row = (r.rows[0] ?? {}) as Record<string, unknown>;
     } catch (err) {
-      out.push({
+      return {
         kpiId: spec.id, status: 'unavailable', value: null, numerator: null, denominator: null,
         sampleSize: null, unit: spec.unit, currencyBasis: spec.currencyBasis ?? null,
         severity: null,
@@ -118,8 +195,7 @@ export async function computeLiveKpis(
           err instanceof Error ? err.message.slice(0, 120) : 'unknown error'
         }`,
         detail: null, drillPredicate: null,
-      });
-      continue;
+      };
     }
 
     const value =
@@ -149,7 +225,7 @@ export async function computeLiveKpis(
       detail[k] = Number.isNaN(Number(v)) ? v : Number(v);
     }
 
-    out.push({
+    return {
       kpiId: spec.id,
       status: value === null ? 'unavailable' : 'ok',
       value,
@@ -167,26 +243,7 @@ export async function computeLiveKpis(
       // The drill must carry the same global filter, or the card and its drill
       // would disagree the moment a filter is applied.
       drillPredicate: mergeIntoPredicate(spec.drill, filter),
-    });
-  }
-
-  /*
-   * The cycle times: the mart's own function with the filter passed in. The
-   * sample floor is the rule in force, and a KPI a data caveat disabled in the
-   * mart stays disabled here - a filter narrows a population, it cannot make a
-   * caveated measure trustworthy.
-   */
-  const rules = await loadRuleSnapshot();
-  const disabled = new Set((await pool.query<{ kpi_id: string }>(
-    `SELECT kpi_id FROM mart.kpi_value WHERE dataset_version_id = $1 AND status = 'disabled'`,
-    [versionId],
-  )).rows.map((r) => r.kpi_id));
-  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-    (await pool.query<T>(sql, params)).rows;
-  out.push(...await inlineKpis(q, versionId, rules, disabled, filter));
-  out.push(...await cycleKpis(q, versionId, Number(rules['kpi.min_sample'] ?? 30), disabled, filter));
-
-  return out;
+    };
 }
 
 export interface LiveChartPoint {
@@ -228,10 +285,17 @@ export async function computeLiveChartSeries(
 ): Promise<LiveChart[] | null> {
   const specs = PARITY_CHARTS.filter((c) => c.chartId === chartId);
   if (specs.length === 0) return null;
+  const base = SHARED_BASE_SQL[chartId];
+  if (base !== undefined && specs.every((s) => s.sql.startsWith(base))) {
+    return computeSharedBaseChart(specs, base, versionId, filter);
+  }
 
+  // The series run concurrently (24 Nov 2026, performance pass): the PR flow
+  // chart has a dozen, each re-reading the same requisitions, and one after
+  // another they took up to 4.6 s under a filter the cache had not seen.
+  const all = await mapLimit(specs, KPI_CONCURRENCY, (spec) => computeLiveChartFor(spec, versionId, chartId, filter));
   const out: LiveChart[] = [];
-  for (const spec of specs) {
-    const one = await computeLiveChartFor(spec, versionId, chartId, filter);
+  for (const one of all) {
     // A null here means the filter cannot be honoured for this spec at all; that
     // is a property of the chart, not of one series, so the caller falls back to
     // the precomputed chart with its "filter not applied" note.
@@ -339,6 +403,56 @@ async function computeLiveChartFor(
       drillPredicate: mergeIntoPredicate(x.drill, filter) ?? x.drill,
     })),
   };
+}
+
+/**
+ * A chart whose series share one base (SHARED_BASE_SQL): the base, filtered
+ * once, then each series' own SELECT as a CTE of the same statement, so the
+ * base is computed once for all of them. Same points, same order (bucket_key),
+ * same drills as the per-series path.
+ */
+async function computeSharedBaseChart(
+  specs: (typeof PARITY_CHARTS)[number][],
+  base: string,
+  versionId: number,
+  filter: GlobalFilter,
+): Promise<LiveChart[] | null> {
+  const first = specs[0]!;
+  let clause;
+  try {
+    clause = buildFilterClause(filter, first.filterKind ?? 'po_line', first.filterAlias ?? '', 2);
+  } catch {
+    return null;
+  }
+  const filteredBase = injectFilter(base, clause);
+  const tails = specs.map((s, i) => `_s${i} AS (${s.sql.slice(base.length)})`);
+  const selects = specs.map((_, i) =>
+    `SELECT ${i} AS _series, bucket_key, bucket_label, value, row_count, drill FROM _s${i}`);
+  const sql = `${filteredBase}, ${tails.join(', ')} ${selects.join(' UNION ALL ')} ORDER BY _series, bucket_key`;
+  const r = await pool.query<{
+    _series: number; bucket_key: string; bucket_label: string; value: number | null;
+    row_count: number; drill: Record<string, unknown>;
+  }>(sql, [versionId, ...clause.params]);
+  const out: LiveChart[] = [];
+  specs.forEach((spec, i) => {
+    const rows = r.rows.filter((x) => Number(x._series) === i);
+    if (rows.length === 0) return;
+    out.push({
+      chartId: spec.chartId,
+      seriesKey: spec.seriesKey,
+      seriesLabel: spec.seriesLabel,
+      unit: spec.unit,
+      points: rows.map((x, j) => ({
+        bucketKey: x.bucket_key ?? '(none)',
+        bucketLabel: x.bucket_label ?? '(none)',
+        ordinal: j + 1,
+        value: x.value === null ? null : Number(x.value),
+        rowCount: x.row_count,
+        drillPredicate: mergeIntoPredicate(x.drill, filter) ?? x.drill,
+      })),
+    });
+  });
+  return out;
 }
 
 /** Which chart ids can be computed live. Others fall back to the mart. */

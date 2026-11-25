@@ -27,7 +27,7 @@
  */
 
 import { warmDefaultView } from '../analytics/warm.js';
-import type { BatchState, Feed } from '@pct/contracts';
+import { FEED_LABELS, type BatchState, type Feed } from '@pct/contracts';
 import { exec, insertMany, pool, query, queryOne, transaction } from '../../db/client.js';
 import { loadRuleSnapshot, type RuleSnapshot } from '../admin/rules.js';
 import { buildMart } from '../analytics/mart.js';
@@ -330,7 +330,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
         f.message = `Set aside: ${f.message}`;
       }
     }
-    const label = FEED_NAMES[feed as MergeFeed] ?? (feed === 'fx' ? 'Rate Conversion' : feed);
+    const label = FEED_NAMES[feed as MergeFeed] ?? (feed === 'fx' ? 'Rate Conversion' : FEED_LABELS[feed] ?? feed);
     findings.push({
       ruleId: 'V-Q01',
       severity: 'WARNING',

@@ -22,6 +22,9 @@ import { z } from 'zod';
 export const FEEDS = [
   'pr', 'prel', 'po', 'por', 'gr', 'fx',
   'pgrp', 'porg', 'matm', 'zuser',
+  // SAP down payments (25 Nov 2026): optional, like the reference feeds - it
+  // refreshes on its own and never gates the PR/PO pickup.
+  'dp',
 ] as const;
 export type Feed = (typeof FEEDS)[number];
 
@@ -40,6 +43,7 @@ export const FEED_LABELS: Record<Feed, string> = {
   porg: 'Purchasing Orgs',
   matm: 'Material Master',
   zuser: 'SAP Users',
+  dp: 'Down Payments',
 };
 
 export const ROLES = ['viewer', 'analyst', 'manager', 'auditor', 'steward', 'admin'] as const;

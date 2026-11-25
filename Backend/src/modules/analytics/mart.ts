@@ -129,22 +129,38 @@ export async function inlineKpis(
   /**
    * Run one block; under a filter, a block that cannot take it reports its
    * KPIs as unavailable. Unfiltered, a failure is a real fault and is thrown.
+   *
+   * Under a filter the blocks run CONCURRENTLY (24 Nov 2026, performance pass):
+   * each is its own query on the shared pool, and one after another they took
+   * 2.3 s for a filter the cache had not seen. block() then only starts the
+   * block and the function awaits them all before returning. The mart build
+   * (unfiltered, one client inside a transaction) keeps running them in order.
+   * `lastBlock` is the block just started, for the one block that reads
+   * another's result (pending PO approvals reads exemptLines).
    */
-  const block = async (ids: Array<[KpiId, KpiRow['unit']]>, fn: () => Promise<void>): Promise<void> => {
-    try {
-      await fn();
-    } catch (err) {
-      if (!filtered) throw err;
-      for (const [kpiId, unit] of ids) {
-        kpis.push({
-          kpiId, status: 'unavailable', value: null, numerator: null, denominator: null,
-          sampleSize: null, unit, currencyBasis: null, severity: null,
-          statusReason: `Could not compute under the active filter: ${
-            err instanceof Error ? err.message.slice(0, 120) : 'unknown error'}`,
-          detail: null, drillPredicate: null,
-        });
+  const inFlight: Promise<void>[] = [];
+  let lastBlock: Promise<void> = Promise.resolve();
+  const block = (ids: Array<[KpiId, KpiRow['unit']]>, fn: () => Promise<void>): Promise<void> => {
+    const run = (async () => {
+      try {
+        await fn();
+      } catch (err) {
+        if (!filtered) throw err;
+        for (const [kpiId, unit] of ids) {
+          kpis.push({
+            kpiId, status: 'unavailable', value: null, numerator: null, denominator: null,
+            sampleSize: null, unit, currencyBasis: null, severity: null,
+            statusReason: `Could not compute under the active filter: ${
+              err instanceof Error ? err.message.slice(0, 120) : 'unknown error'}`,
+            detail: null, drillPredicate: null,
+          });
+        }
       }
-    }
+    })();
+    lastBlock = run;
+    if (!filtered) return run;
+    inFlight.push(run);
+    return Promise.resolve();
   };
 
   // ─────────────────────────────────── Demand Realism (disabled by V-M01)
@@ -398,6 +414,7 @@ export async function inlineKpis(
   // ─────────────────────────────────────────────── operational counts
 
   let exemptLines = 0;
+  const countsBlock = (): Promise<void> => lastBlock; // read below, after the block starts
   await block(
     [['sto_share', 'percent'], ['direct_po_share', 'percent'], ['retro_po_rate', 'count'], ['open_items', 'count']],
     async () => {
@@ -512,7 +529,11 @@ export async function inlineKpis(
       drillOf({ grain: 'pr_item', columns: 'approval_queue', filters: { releasePending: true } })));
   });
 
+  // The counts block's own run: under a filter it may still be in flight.
+  const countsDone = countsBlock();
   await block([['pending_po_approvals', 'count']], async () => {
+    // exemptLines comes from the counts block above.
+    await countsDone;
     // Release-exempt POs are excluded: they have no release record and can
     // never be approved, so leaving them in the queue would strand them.
     const c = fc('po_line', '');
@@ -528,6 +549,7 @@ export async function inlineKpis(
       drillOf({ grain: 'po_line', columns: 'approval_queue', filters: { poReleaseState: 'pending' } })));
   });
 
+  await Promise.all(inFlight);
   return kpis;
 }
 
@@ -594,7 +616,12 @@ export async function cycleKpis(
     ['cycle_delivery', 'delivery_vs_promise_days', 'po_line',
       { grain: 'po_line', columns: 'delivery', filters: { deliveryVsPlanEvaluable: true } }, true],
   ];
-  for (const [kpiId, expr, kind, drill, keepNegative] of cycles) {
+  // Under a filter the five spans run concurrently (24 Nov 2026, performance
+  // pass); the mart build keeps them in order on its one client.
+  const concurrent = !isEmptyFilter(filter);
+  const oneCycle = async (
+    [kpiId, expr, kind, drill, keepNegative]: [KpiId, string, FactKind, Record<string, unknown>, boolean?],
+  ): Promise<KpiRow> => {
     const table = kind === 'pr_item' ? 'core.fact_pr_item' : 'core.fact_po_line';
     const clause = buildFilterClause(filter, kind, '', 2);
     // The Delivery page's card also splits Local / Import (19 Nov 2026).
@@ -608,10 +635,10 @@ export async function cycleKpis(
     const vals = kept.map((x) => x.d!);
     // Average headline (decision 3 Aug 2026, v1 parity); median in the subtitle.
     const k = cycleKpi(kpiId, vals, minSample, disabledKpis, 'avg', drillOf(drill));
-    out.push(split ? withVendorTypeSplit(k, kept, 'avg') : k);
-  }
+    return split ? withVendorTypeSplit(k, kept, 'avg') : k;
+  };
 
-  {
+  const e2e = async (): Promise<KpiRow> => {
     // Filtered on the order line, which is the grain the drill opens.
     const clause = buildFilterClause(filter, 'po_line', 'pol.', 2);
     const rows = await q<{ d: number | null; vt: string | null }>(
@@ -624,9 +651,16 @@ export async function cycleKpis(
       [versionId, ...clause.params],
     );
     const kept = rows.filter((x) => x.d !== null && x.d >= 0);
-    out.push(withVendorTypeSplit(cycleKpi('cycle_e2e', kept.map((x) => x.d!),
+    return withVendorTypeSplit(cycleKpi('cycle_e2e', kept.map((x) => x.d!),
       minSample, disabledKpis, 'median',
-      drillOf({ grain: 'po_line', columns: 'delivery', filters: { e2eEvaluable: true } })), kept, 'median'));
+      drillOf({ grain: 'po_line', columns: 'delivery', filters: { e2eEvaluable: true } })), kept, 'median');
+  };
+
+  if (concurrent) {
+    out.push(...await Promise.all([...cycles.map(oneCycle), e2e()]));
+  } else {
+    for (const c of cycles) out.push(await oneCycle(c));
+    out.push(await e2e());
   }
   return out;
 }

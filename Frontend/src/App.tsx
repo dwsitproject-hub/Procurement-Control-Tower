@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, type DatasetCurrent, type Finding, type Kpi, type Me } from './lib/api';
-import { formatNumber } from './lib/format';
+import { formatKpi, formatMoney, formatNumber } from './lib/format';
+import { PageIntro, type Takeaway } from './components/PageIntro';
 import { FreshnessBanner } from './components/FreshnessBanner';
 import { KpiCard, KpiSummaryCard } from './components/KpiCard';
 import { ChartPanel } from './components/Chart';
@@ -48,40 +49,42 @@ import {
   LayoutControls, LayoutEditBar, applyLayout, useTabLayout,
 } from './components/LayoutEdit';
 
-// v1's sidebar: grouped nav with icons (.sb / .nsec / .ni).
-const NAV_GROUPS: { section: string; items: { id: Tab; label: string; icon: string }[] }[] = [
+// Sidebar: grouped nav (.sb / .nsec / .ni). Each item carries a two-letter code
+// (drawn as a chip) and a plain-language line, so someone outside procurement
+// can tell "PO Analysis" means "orders placed" without asking.
+const NAV_GROUPS: { section: string; items: { id: Tab; label: string; code: string; desc: string }[] }[] = [
   {
     section: 'Main',
     items: [
       // First in the menu: it is the page an executive opens and the only one
       // that states a conclusion rather than presenting a measurement.
-      { id: 'execsummary', label: 'Executive Summary', icon: '🎯' },
-      { id: 'executive', label: 'Overview', icon: '📊' },
-      { id: 'openitems', label: 'Open Items', icon: '🔥' },
+      { id: 'execsummary', label: 'Executive Summary', code: 'ES', desc: 'the big picture' },
+      { id: 'executive', label: 'Overview', code: 'OV', desc: 'health at a glance' },
+      { id: 'openitems', label: 'Open Items', code: 'OI', desc: 'work still waiting' },
     ],
   },
   {
     // Menu order per user decision 5 Aug 2026 (follows the procure-to-pay flow).
     section: 'Analysis',
     items: [
-      { id: 'pr', label: 'PR Analysis', icon: '📋' },
-      { id: 'coupa_src', label: 'Sourcing', icon: '🛒' },
-      { id: 'po', label: 'PO Analysis', icon: '📦' },
-      { id: 'delivery', label: 'Delivery', icon: '🚚' },
-      { id: 'coupa_inv', label: 'Invoicing & Payment', icon: '💳' },
-      { id: 'approvals', label: 'Approvals', icon: '✅' },
-      { id: 'materials', label: 'Material Group', icon: '🧱' },
-      { id: 'vendors', label: 'Vendor 360', icon: '🏆' },
+      { id: 'pr', label: 'PR Analysis', code: 'PR', desc: 'requests to buy' },
+      { id: 'coupa_src', label: 'Sourcing', code: 'SO', desc: 'supplier bidding' },
+      { id: 'po', label: 'PO Analysis', code: 'PO', desc: 'orders placed' },
+      { id: 'delivery', label: 'Delivery', code: 'DL', desc: 'goods arriving' },
+      { id: 'coupa_inv', label: 'Invoicing & Payment', code: 'IP', desc: 'bills and payments' },
+      { id: 'approvals', label: 'Approvals', code: 'AP', desc: 'who signs off' },
+      { id: 'materials', label: 'Material Group', code: 'MG', desc: 'what we buy' },
+      { id: 'vendors', label: 'Vendor 360', code: 'VN', desc: 'who we buy from' },
     ],
   },
   {
     section: 'Data',
     items: [
-      { id: 'detail', label: 'Detail Table', icon: '🧾' },
-      { id: 'master', label: 'Master', icon: '📚' },
-      { id: 'custom', label: 'Custom', icon: '🧮' },
-      { id: 'admin', label: 'Admin', icon: '⚙️' },
-      { id: 'datacheck', label: 'Data Quality', icon: '✔️' },
+      { id: 'detail', label: 'Detail Table', code: 'DT', desc: 'every line' },
+      { id: 'master', label: 'Master', code: 'MS', desc: 'reference lists' },
+      { id: 'custom', label: 'Custom', code: 'CU', desc: 'build your own' },
+      { id: 'admin', label: 'Admin', code: 'AD', desc: 'settings and uploads' },
+      { id: 'datacheck', label: 'Data Quality', code: 'DQ', desc: 'data checks' },
     ],
   },
 ];
@@ -366,6 +369,15 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem('pct_currency', currency); } catch { /* private mode */ } }, [currency]);
 
   const onDrill = useCallback((token: string, label: string) => setDrill({ token, label }), []);
+  // Plain-language help layer (page intros, key terms, "in plain words" lines,
+  // takeaways). On by default for newcomers; experts can switch it off and the
+  // choice is remembered on this browser.
+  const [help, setHelp] = useState<boolean>(() => {
+    try { return localStorage.getItem('pct_help') !== 'off'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('pct_help', help ? 'on' : 'off'); } catch { /* private mode */ }
+  }, [help]);
 
   useEffect(() => {
     api
@@ -605,14 +617,16 @@ export default function App() {
   const dataCheckCount = findings.filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT' || f.severity === 'BLOCKER').length;
 
   const isAdmin = me.roles.includes('admin');
+  const pageTitle = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === tab)?.label ?? '';
+  const takeaways = takeawaysFor(tab, kpis, findings, currency, onDrill);
 
   return (
     <LabelProvider page={tab} editing={isAdmin && titleEdit}>
-    <div className="app">
+    <div className={help ? 'app' : 'app hide-help'}>
       {/* v1's .bar: navy sticky header */}
       <div className="topbar">
-        <BrandMark />
-        <h1>Procurement Control Tower</h1>
+        <span className="brand-tile"><BrandMark size={20} /></span>
+        <h1>Procurement <span className="grad-text">Control Tower</span></h1>
         {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
         {dataCheckCount > 0 && (
           <button className="hdr-chip" onClick={() => navigate('datacheck')} title="Open Data Quality">
@@ -639,6 +653,14 @@ export default function App() {
         >
           ⤓ Snapshot
         </a>
+        <button
+          className="tbtn"
+          aria-pressed={help}
+          title="Plain-language help: page intros, key terms, 'in plain words' lines and takeaways"
+          onClick={() => setHelp(!help)}
+        >
+          ? Help{help ? ': on' : ': off'}
+        </button>
         <button
           className="tbtn"
           title="Theme: auto follows your system"
@@ -708,8 +730,8 @@ export default function App() {
                     aria-current={tab === t.id ? 'page' : undefined}
                     onClick={linkHandler(t.id)}
                   >
-                    <span className="ic" aria-hidden="true">{t.icon}</span>
-                    {t.label}
+                    <span className="ic" aria-hidden="true">{t.code}</span>
+                    <span className="ni-l">{t.label}<span className="ni-d">{t.desc}</span></span>
                     {openBadge > 0 && <span className="tab-badge">{formatNumber(openBadge)}</span>}
                   </a>
                 );
@@ -726,6 +748,7 @@ export default function App() {
           datasetVersionId={dataset.datasetVersionId}
         />}
       <main>
+        <PageIntro tab={tab} title={pageTitle} takeaways={dataset?.datasetVersionId != null ? takeaways : undefined} />
         {/*
           Admin first, ahead of the no-dataset gate: it is where the first
           dataset is loaded, so a brand-new installation (production, 12 Nov
@@ -884,8 +907,8 @@ export default function App() {
                   .filter((f) => (TAB_FINDINGS[tab] ?? []).includes(f.ruleId))
                   .filter((f) => f.severity === 'WARNING' || f.severity === 'CAVEAT')
                   .slice(0, 3)
-                  .map((f) => (
-                    <p key={f.ruleId} className="anomaly">
+                  .map((f, i) => (
+                    <p key={`${f.ruleId}-${i}`} className="anomaly">
                       <span className={`sev sev-${f.severity}`}>{f.severity}</span> {f.message}
                     </p>
                   ))}
@@ -1254,7 +1277,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
   return (
     <div className="login-wrap">
       <form className="login" onSubmit={submit}>
-        <h1>Procurement Control Tower</h1>
+        <h1>Procurement <span className="grad-text">Control Tower</span></h1>
         <p className="sub">Sign in to continue</p>
 
         {ssoEnabled && (
@@ -1297,6 +1320,76 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
 
 // ─────────────────────────────────────────────────────────────── data check
 
+/**
+ * "Read this first" takeaways for the page intro. Each one restates a KPI the
+ * page already shows — same figure, same currency handling as its card, same
+ * drill — so a takeaway can never disagree with the card beneath it. A KPI
+ * that is missing, disabled or empty is skipped, never shown as zero.
+ */
+const TAKEAWAYS: Partial<Record<Tab, [kpiId: string, title: string, text: string][]>> = {
+  executive: [
+    ['open_po_commitment', 'Money still on order', 'Ordered from suppliers but not yet delivered.'],
+    ['otd_vs_requested', 'Deliveries on time', 'Arrived by the date promised on the purchase order.'],
+    ['pr_pipeline_value', 'Requests with no order yet', 'Value of requests to buy that no purchase order covers yet.'],
+    ['cycle_e2e', 'A typical purchase takes', 'From the request being raised to the goods arriving (median).'],
+  ],
+  pr: [
+    ['cycle_pr_approval', 'Average sign-off time', 'Days from a request being raised to its approval.'],
+    ['approved_within_3d', 'Approved within policy', 'Requests signed off within the 3-day policy.'],
+    ['pr_to_po_conversion', 'Requests that became orders', 'Share of requests that turned into a purchase order.'],
+    ['at_risk_demand', 'Needed already, no order', 'Requests past their required date with no purchase order.'],
+  ],
+  po: [
+    ['total_po_amount', 'Total ordered', 'Net value of purchase orders in the period.'],
+    ['unique_suppliers', 'Suppliers used', 'Different suppliers on the period’s orders.'],
+    ['direct_po_share', 'Orders without a request', 'Share of order lines raised with no requisition behind them.'],
+    ['commitment_over_60d', 'Old open orders', 'Share of open commitment more than 60 days old.'],
+  ],
+  delivery: [
+    ['otd_vs_requested', 'Deliveries on time', 'Arrived by the date promised on the purchase order.'],
+    ['cycle_delivery', 'Typical delay vs plan', 'Days between the planned delivery date and the goods receipt.'],
+    ['cycle_e2e', 'Request to receipt', 'From the request being raised to the goods arriving (median).'],
+    ['reversal_rate', 'Receipts reversed', 'Goods receipts that were later cancelled.'],
+  ],
+  approvals: [
+    ['pending_pr_approvals', 'Requests waiting', 'Request lines in an approver’s queue now.'],
+    ['pending_po_approvals', 'Orders waiting', 'Order lines in an approver’s queue now.'],
+    ['approved_within_3d', 'Within policy', 'Requests signed off within the 3-day policy.'],
+    ['worst_approver_gap', 'Slowest approver', 'Typical wait at the slowest approver.'],
+  ],
+};
+
+/** The card's headline value, with the card's own currency rule. */
+function kpiValueText(k: Kpi, currency: 'USD' | 'IDR'): string {
+  const twinIdr = k.detail?.['value_idr'];
+  const twinUsd = k.detail?.['value_usd'];
+  if (currency === 'IDR' && k.unit === 'usd' && twinIdr !== null && twinIdr !== undefined) return formatMoney(Number(twinIdr), 'IDR');
+  if (currency === 'USD' && k.unit === 'idr' && twinUsd !== null && twinUsd !== undefined) return formatMoney(Number(twinUsd), 'USD');
+  return formatKpi(k.value, k.unit);
+}
+
+function takeawaysFor(
+  tab: Tab, kpis: Kpi[], findings: Finding[], currency: 'USD' | 'IDR',
+  onDrill: (token: string, label: string) => void,
+): Takeaway[] {
+  if (tab === 'datacheck') {
+    const n = (s: Finding['severity']) => findings.filter((f) => f.severity === s).length;
+    return [
+      { title: 'Blocking', value: formatNumber(n('BLOCKER')), text: 'Findings that stop a dataset version from publishing.' },
+      { title: 'Figures switched off', value: formatNumber(n('CAVEAT')), text: 'Caveats: a figure stays off until the source data is fixed.' },
+      { title: 'Read with care', value: formatNumber(n('WARNING')), text: 'Warnings: figures are shown, with a known limit.' },
+    ];
+  }
+  const spec = TAKEAWAYS[tab];
+  if (!spec) return [];
+  return spec.flatMap(([id, title, text]) => {
+    const k = kpis.find((x) => x.kpiId === id);
+    if (!k || k.status !== 'ok' || k.value === null) return [];
+    const token = k.drillToken;
+    return [{ title, value: kpiValueText(k, currency), text, onOpen: token ? () => onDrill(token, k.title) : undefined }];
+  });
+}
+
 function DataCheck({ versionId }: { versionId: number }) {
   const [findings, setFindings] = useState<Finding[] | null>(null);
 
@@ -1334,8 +1427,8 @@ function DataCheck({ versionId }: { versionId: number }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {group.map((f) => (
-                    <tr key={f.ruleId}>
+                  {group.map((f, i) => (
+                    <tr key={`${f.ruleId}-${i}`}>
                       <td><code>{f.ruleId}</code></td>
                       <td>{f.feed ?? '—'}</td>
                       <td className="num">

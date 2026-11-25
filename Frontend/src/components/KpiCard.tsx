@@ -1,6 +1,7 @@
 import type { Kpi } from '../lib/api';
 import { DASH, formatKpi, formatMoney, formatNumber } from '../lib/format';
 import { Lbl } from '../lib/labels';
+import { PLAIN_WORDS } from '../lib/plainWords';
 
 /**
  * KPI card — the honesty rule in the UI.
@@ -15,12 +16,14 @@ import { Lbl } from '../lib/labels';
 // The first slot is the theme's heading colour, not the literal navy: the same
 // #1F3864 in light mode, but readable in dark mode, where navy is the card
 // background family and the value disappeared (functional test FT-40).
-const CARD_PALETTE = ['var(--heading)', '#2E75B6', '#0D9488', '#7C3AED', '#ED7D31', '#4CAF50'];
+// Theme tokens (Nov 2026 redesign), so each accent has a dark and a light value
+// with enough contrast on its surface; the meaning per slot is unchanged.
+const CARD_PALETTE = ['var(--heading)', 'var(--blue)', 'var(--teal)', 'var(--purple)', 'var(--orange)', 'var(--good)'];
 
 function accentFor(kpi: Kpi): string {
-  if (kpi.severity === 'critical') return '#C0392B';
-  if (kpi.severity === 'warning') return '#F59E0B';
-  if (kpi.severity === 'good') return '#4CAF50';
+  if (kpi.severity === 'critical') return 'var(--crit)';
+  if (kpi.severity === 'warning') return 'var(--warn)';
+  if (kpi.severity === 'good') return 'var(--good)';
   // Stable per-KPI decoration: hash the id into the palette.
   let h = 0;
   for (const ch of kpi.kpiId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -43,6 +46,7 @@ export function KpiCard({
         <div className="v">{DASH}</div>
         <div className="l"><Lbl k={`kpi:${kpi.kpiId}`}>{kpi.title}</Lbl></div>
         <div className="s">{kpi.statusReason ?? 'Not available'}</div>
+        {PLAIN_WORDS[kpi.kpiId] && <div className="pw help-only">{PLAIN_WORDS[kpi.kpiId]}</div>}
       </div>
     );
   }
@@ -119,6 +123,7 @@ export function KpiCard({
       {/* Its own line (21 Nov 2026): inside the two-line subtitle the Local /
           Import row was clamped away on Delivered (GR). */}
       {vendorSplit && <div className="kpi-vt-row">{vendorSplit}</div>}
+      {PLAIN_WORDS[kpi.kpiId] && <div className="pw help-only">{PLAIN_WORDS[kpi.kpiId]}</div>}
     </>
   );
 

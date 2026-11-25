@@ -255,9 +255,10 @@ export interface DetailFilters {
    */
   moneyState?: string;
   /**
-   * 'paid' | 'unpaid' (19 Nov 2026): whether the line's SAP PO has a payment or
-   * down payment recorded in Coupa (ops.v_coupa_paid_sap_po). The Open Items
-   * "PO not delivered" cards split on it. Whitelisted like moneyState.
+   * 'paid' | 'unpaid' (19 Nov 2026): whether the line's SAP PO has a payment
+   * recorded in Coupa (ops.v_coupa_paid_sap_po) or, since 25 Nov 2026, a down
+   * payment in SAP (ops.v_sap_dp_line). The Open Items "PO not delivered" cards
+   * split on it. Whitelisted like moneyState.
    */
   paidState?: string;
   excludeSto?: boolean;
@@ -340,10 +341,17 @@ const INVOICED_NOT_PAID = `(d.po_no, d.po_item) IN (
      AND NOT i.paid AND i.status NOT IN ('voided', 'draft'))`;
 
 /** Exported so the Open Items cards count exactly what the table will show. */
-/** paidState's whitelist: the SAP PO has (not) a Coupa payment or DP. */
+/**
+ * paidState's whitelist: the SAP PO has (not) a Coupa payment or an SAP down
+ * payment. A DP counts when money was advanced (a positive DP row), whether
+ * still outstanding or since settled; a Coupa invoice that is an SAP DP keyed
+ * into Coupa is already left out of the Coupa side (051), so nothing counts twice.
+ */
+const HAS_PAYMENT = `(EXISTS (SELECT 1 FROM ops.v_coupa_paid_sap_po pp WHERE pp.po_no = d.po_no)
+   OR EXISTS (SELECT 1 FROM ops.v_sap_dp_line dp WHERE dp.po_no = d.po_no AND dp.amount > 0))`;
 export const PAID_STATE_SQL: Record<string, string> = {
-  paid: 'EXISTS (SELECT 1 FROM ops.v_coupa_paid_sap_po pp WHERE pp.po_no = d.po_no)',
-  unpaid: 'NOT EXISTS (SELECT 1 FROM ops.v_coupa_paid_sap_po pp WHERE pp.po_no = d.po_no)',
+  paid: HAS_PAYMENT,
+  unpaid: `NOT ${HAS_PAYMENT}`,
 };
 
 export const MONEY_STATE_SQL: Record<string, string> = {

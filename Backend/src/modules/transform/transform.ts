@@ -343,6 +343,10 @@ export async function runTransform(
     ],
   );
   const versionId = Number(verIns.rows[0]!.id);
+
+  // SAP down payments (051): this version's snapshot - the published one's,
+  // refreshed by this batch's DP file when it carries one.
+  await loadSapDownPayments(client, batchId, versionId);
   await client.query('SELECT core.create_version_partitions($1)', [versionId]);
 
   // ── PR release: continuation-row fill with guards ──
@@ -1563,6 +1567,129 @@ async function upsertReferenceData(client: pg.PoolClient, batchId: number): Prom
       );
     }
   }
+
+}
+
+/** A ten-digit SAP purchase-order number, or null. */
+const asPoNo = (v: string | null): string | null => {
+  const t = (v ?? '').trim();
+  return /^[0-9]{10}$/.test(t) ? t : null;
+};
+
+/**
+ * SAP down payments (051): this version's snapshot in ops.sap_dp_line.
+ *
+ * Per version, like the facts, so a batch awaiting confirmation, a rejected one
+ * or a rollback never changes what the published version shows. The snapshot
+ * starts from the CURRENTLY PUBLISHED version's rows (a batch without a DP file
+ * carries them forward unchanged). With a DP file, for each company code in it
+ * the rows whose posting date falls between the file's first and last posting
+ * date for that company are replaced by the file's rows: a full "DP All"
+ * refresh replaces everything it covers - a DP since cleared comes back with its
+ * clearing date, a reversed one disappears - while rows outside the range (an
+ * older year, another company) are kept. File rows are inserted as they come:
+ * with no line item in the export, identical rows are separate line items, not
+ * duplicates.
+ *
+ * The PO: Purchasing Document when it is a PO number; when it is a placeholder
+ * ("EUPOTEMP" - the DP was posted before the PO existed) the Assignment usually
+ * holds the PO and is used; otherwise NULL, and v_sap_dp_line leaves the row
+ * out of PCT's figures (insurance premiums, a tax DP...).
+ */
+async function loadSapDownPayments(client: pg.PoolClient, batchId: number, versionId: number): Promise<void> {
+  const base = (await client.query<{ v: string | null }>(
+    'SELECT current_version_id AS v FROM core.dataset_pointer WHERE id = 1',
+  )).rows[0]?.v ?? null;
+  const dp = await loadStaged(batchId, 'dp');
+  /** Copy the published snapshot forward, minus the rows a file replaces. */
+  const carry = async (companies: string[], froms: string[], tos: string[]): Promise<void> => {
+    if (base === null) return;
+    await client.query(
+      `INSERT INTO ops.sap_dp_line
+         (dataset_version_id, company_code, business_area, purchasing_doc, po_no, gl_account, gl_text, vendor_code,
+          vendor_name, clearing_date, clearing_doc, fiscal_year, line_item, tax_code, assignment, doc_no, doc_type,
+          doc_date, posting_date, amount, currency, amount_lc2, lc2_currency, item_text, source_batch_id, source_row,
+          loaded_at)
+       SELECT $1, d.company_code, d.business_area, d.purchasing_doc, d.po_no, d.gl_account, d.gl_text, d.vendor_code,
+              d.vendor_name, d.clearing_date, d.clearing_doc, d.fiscal_year, d.line_item, d.tax_code, d.assignment,
+              d.doc_no, d.doc_type, d.doc_date, d.posting_date, d.amount, d.currency, d.amount_lc2, d.lc2_currency,
+              d.item_text, d.source_batch_id, d.source_row, d.loaded_at
+         FROM ops.sap_dp_line d
+        WHERE d.dataset_version_id = $2
+          AND NOT EXISTS (
+                SELECT 1 FROM unnest($3::text[], $4::date[], $5::date[]) AS w(company, f, t)
+                 WHERE w.company = d.company_code AND d.posting_date BETWEEN w.f AND w.t
+              )
+        ORDER BY d.id`,
+      [versionId, base, companies, froms, tos],
+    );
+  };
+  if (dp.length === 0) {
+    await carry([], [], []);
+    return;
+  }
+  const cols = {
+    company: [] as string[], ba: [] as (string | null)[], pdoc: [] as (string | null)[], po: [] as (string | null)[],
+    gl: [] as string[], glText: [] as (string | null)[], vendor: [] as string[], vendorName: [] as (string | null)[],
+    clr: [] as (string | null)[], clrDoc: [] as (string | null)[], fy: [] as (number | null)[], li: [] as (number | null)[],
+    tax: [] as (string | null)[], asg: [] as (string | null)[], doc: [] as string[], docType: [] as (string | null)[],
+    docDate: [] as (string | null)[], post: [] as string[], amt: [] as number[], ccy: [] as string[],
+    lc2: [] as (number | null)[], lc2Ccy: [] as (string | null)[], txt: [] as (string | null)[], row: [] as number[],
+  };
+  const windows = new Map<string, { from: string; to: string }>();
+  for (const r of dp) {
+    const p = r.payload;
+    const company = s(p['companyCode'])?.trim() ?? '';
+    const doc = s(p['docNo'])?.trim() ?? '';
+    const post = s(p['postingDate']);
+    const amt = n(p['amount']);
+    const gl = s(p['glAccount'])?.trim() ?? '';
+    const vendor = s(p['vendorCode'])?.trim() ?? '';
+    // Unkeyable rows were already reported per cell (V-P01 / V-P02); they cannot
+    // be placed in a window or a PO, so they are not stored.
+    if (company === '' || doc === '' || post === null || amt === null || gl === '' || vendor === '') continue;
+    const pdoc = s(p['purchasingDoc'])?.trim() || null;
+    const asg = s(p['assignment'])?.trim() || null;
+    cols.company.push(company); cols.ba.push(s(p['businessArea'])?.trim() || null);
+    cols.pdoc.push(pdoc); cols.po.push(asPoNo(pdoc) ?? asPoNo(asg));
+    cols.gl.push(gl); cols.glText.push(s(p['glText']));
+    cols.vendor.push(vendor); cols.vendorName.push(s(p['vendorName'])?.trim() || null);
+    cols.clr.push(s(p['clearingDate'])); cols.clrDoc.push(s(p['clearingDoc'])?.trim() || null);
+    cols.fy.push(n(p['fiscalYear'])); cols.li.push(n(p['lineItem']));
+    cols.tax.push(s(p['taxCode'])?.trim() || null); cols.asg.push(asg);
+    cols.doc.push(doc); cols.docType.push(s(p['docType'])?.trim() || null);
+    cols.docDate.push(s(p['docDate'])); cols.post.push(post); cols.amt.push(amt);
+    cols.ccy.push((s(p['currency'])?.trim() || 'IDR').toUpperCase());
+    cols.lc2.push(n(p['amountLc2'])); cols.lc2Ccy.push(s(p['lc2Currency'])?.trim() || null);
+    cols.txt.push(s(p['itemText'])?.trim() || null); cols.row.push(r.source_row);
+    const w = windows.get(company);
+    if (!w) windows.set(company, { from: post, to: post });
+    else {
+      if (post < w.from) w.from = post;
+      if (post > w.to) w.to = post;
+    }
+  }
+  const win = [...windows.entries()];
+  await carry(win.map(([c]) => c), win.map(([, w]) => w.from), win.map(([, w]) => w.to));
+  if (cols.doc.length === 0) return;
+  await client.query(
+    `INSERT INTO ops.sap_dp_line
+       (company_code, business_area, purchasing_doc, po_no, gl_account, gl_text, vendor_code, vendor_name,
+        clearing_date, clearing_doc, fiscal_year, line_item, tax_code, assignment, doc_no, doc_type,
+        doc_date, posting_date, amount, currency, amount_lc2, lc2_currency, item_text, source_batch_id, source_row,
+        dataset_version_id)
+     SELECT c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16,
+            c17, c18, c19, c20, c21, c22, c23, $24::bigint, srow, $26::bigint
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[],
+                   $9::date[], $10::text[], $11::int[], $12::int[], $13::text[], $14::text[], $15::text[], $16::text[],
+                   $17::date[], $18::date[], $19::numeric[], $20::text[], $21::numeric[], $22::text[], $23::text[],
+                   $25::int[])
+            AS t(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16,
+                 c17, c18, c19, c20, c21, c22, c23, srow)`,
+    [cols.company, cols.ba, cols.pdoc, cols.po, cols.gl, cols.glText, cols.vendor, cols.vendorName,
+      cols.clr, cols.clrDoc, cols.fy, cols.li, cols.tax, cols.asg, cols.doc, cols.docType,
+      cols.docDate, cols.post, cols.amt, cols.ccy, cols.lc2, cols.lc2Ccy, cols.txt, batchId, cols.row, versionId],
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────── FX

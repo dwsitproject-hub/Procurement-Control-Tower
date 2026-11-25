@@ -418,9 +418,9 @@ export async function openItemsSummary(
 
   /*
    * "PO not delivered" as two cards (19 Nov 2026): ordered and not received,
-   * split by whether the PO has a payment or down payment recorded in Coupa.
-   * The SAP exports carry no payment field, so Coupa is the source - and it
-   * knows only POs invoiced through Coupa, which the card's subtitle says.
+   * split by whether the PO has a payment - a Coupa payment, or since 25 Nov
+   * 2026 an SAP down payment (the "DP All" export, 051). Before the SAP file
+   * the split was structurally near zero: Coupa holds almost no DPs.
    * The two cards add up to the one they replace, so every total on the page
    * (and the category table's Stage filter, which keeps the one status) is
    * unchanged.
@@ -440,8 +440,8 @@ export async function openItemsSummary(
         key: paid ? 'po_not_delivered_paid' : 'po_not_delivered_no_dp',
         name: paid ? 'PO not delivered — paid / DP' : 'PO not delivered — no DP',
         sub: `${n('pos').toLocaleString('en-GB')} POs · `
-          + (paid ? 'payment or DP recorded in Coupa, no goods receipt'
-            : 'no payment or DP in Coupa, no goods receipt'),
+          + (paid ? 'SAP down payment or Coupa payment, no goods receipt'
+            : 'no SAP down payment or Coupa payment, no goods receipt'),
         count: n('n'),
         bands: AGE_BANDS.map((_b, i) => n(`b${i}`)),
         pastSla: n('past_sla'),

@@ -149,6 +149,7 @@ const PAGE_ROUTES: [string, PageKey][] = [
   ['/api/v1/exec/', 'execsummary'],
   ['/api/v1/coupa/sourcing', 'coupa_src'],
   ['/api/v1/coupa/invoices', 'coupa_inv'],
+  ['/api/v1/sap-dp', 'coupa_inv'],
   ['/api/v1/master', 'master'],
   ['/api/v1/admin/master/', 'master'],
   ['/api/v1/entity/vendors', 'vendors'],

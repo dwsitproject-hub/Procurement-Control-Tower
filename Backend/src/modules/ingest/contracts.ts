@@ -435,9 +435,67 @@ const ZUSER: TemplateContract = {
   ],
 };
 
+// ───────────────────────────────────────── SAP down payments (25 Nov 2026)
+//
+// Vendor line items on the down-payment G/L accounts (an FBL1N-style "DP All"
+// export): one row per line item. Clearing Date empty = the DP is still
+// outstanding; filled = it was settled against the vendor's final invoice, i.e.
+// the PO is fully paid. The amount is the DP amount, not the PO's total payment.
+//
+// Optional (not in REQUIRED_FEEDS): it lands in the same folder as the PR/PO
+// exports, or by manual upload, and never gates their pickup. Stored in
+// ops.sap_dp_line (051) - see transform.ts loadSapDownPayments.
+//
+// The 23 Nov 2026 layout carries no Fiscal Year, Line item or Clearing
+// Document. They are read when SAP adds them (OPT): with them a row is uniquely
+// identified and a settled DP ties to its clearing document.
+const DP: TemplateContract = {
+  feed: 'dp',
+  note: 'SAP down-payment line items (FBL1N on the DP accounts). Clearing Date empty = DP outstanding, '
+    + 'filled = settled against the final invoice (PO fully paid).',
+  signature: {
+    all: ['glaccount', 'clearingdate', 'documentnumber', 'amountindoccurr'],
+  },
+  columns: [
+    col('Company Code', 'str', 'PK', 'companyCode'),
+    col('Business Area', 'str', 'OPT', 'businessArea'),
+    col('Purchasing Document', 'str', 'OPT', 'purchasingDoc',
+      'the SAP PO; "EUPOTEMP" and the like when the DP was posted before the PO - the PO is then in Assignment'),
+    col('G/L Account', 'str', 'REQ', 'glAccount', '10301101 / 10301102 / 15301101 on the 23 Nov 2026 export'),
+    col('G/L Acct Long Text', 'str', 'OPT', 'glText'),
+    col('Account', 'str', 'REQ', 'vendorCode'),
+    col('Cleared/Open Items Symbol', 'str', 'IGN', undefined, 'an icon in SAP; empty in the export - Clearing Date is the status'),
+    col('Clearing Date', 'date', 'OPT', 'clearingDate', 'empty = DP outstanding'),
+    col('Vendor Description', 'str', 'OPT', 'vendorName'),
+    col('Tax Code', 'str', 'OPT', 'taxCode'),
+    col('Assignment', 'str', 'OPT', 'assignment'),
+    col('Document Number', 'str', 'PK', 'docNo'),
+    col('Document type', 'str', 'OPT', 'docType', 'KZ payment, SA journal, KA vendor document / reversal'),
+    col('Document Date', 'date', 'OPT', 'docDate'),
+    col('Posting Date', 'date', 'REQ', 'postingDate'),
+    col('Amount in Doc. Curr.', 'dec', 'REQ', 'amount', 'negative = DP deducted, reversed or refunded'),
+    col('Document Currency', 'str', 'REQ', 'currency'),
+    col('Amount in Loc.Crcy 2', 'dec', 'OPT', 'amountLc2', "SAP's own second local currency amount (US$)"),
+    col('Local currency 2', 'str', 'OPT', 'lc2Currency'),
+    col('Text', 'str', 'OPT', 'itemText'),
+    col('Fiscal Year', 'int', 'OPT', 'fiscalYear', 'not in the 23 Nov 2026 layout'),
+    col('Line item', 'int', 'OPT', 'lineItem', 'not in the 23 Nov 2026 layout'),
+    col('Clearing Document', 'str', 'OPT', 'clearingDoc', 'not in the 23 Nov 2026 layout'),
+  ],
+  aliases: [
+    { field: 'purchasingDoc', aliasNorm: 'purchdoc' },
+    { field: 'amount', aliasNorm: 'amountindoccurrency' },
+    { field: 'amountLc2', aliasNorm: 'amountinloccrcy2' },
+    { field: 'fiscalYear', aliasNorm: 'year' },
+    { field: 'lineItem', aliasNorm: 'item' },
+    { field: 'clearingDoc', aliasNorm: 'clrngdoc' },
+  ],
+};
+
 export const TEMPLATE_CONTRACTS: TemplateContract[] = [
   PR, PREL, PO, POR, GR, FX,
   PGRP, PORG, MATM, ZUSER,
+  DP,
 ];
 
 export const CONTRACT_BY_FEED: Record<Feed, TemplateContract> = {
@@ -451,6 +509,7 @@ export const CONTRACT_BY_FEED: Record<Feed, TemplateContract> = {
   porg: PORG,
   matm: MATM,
   zuser: ZUSER,
+  dp: DP,
 };
 
 /**

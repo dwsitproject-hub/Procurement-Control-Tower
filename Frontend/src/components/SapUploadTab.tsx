@@ -68,6 +68,12 @@ const EXPECTED = [
   { feed: 'porg', label: 'Purchasing Orgs', hint: 'P Org — purchasing org master', optional: true },
   { feed: 'matm', label: 'Material Master', hint: 'Mat group — material code, description, SAP category', optional: true },
   { feed: 'zuser', label: 'SAP Users', hint: 'zuser — user id to name', optional: true },
+  {
+    feed: 'dp',
+    label: 'Down Payments',
+    hint: 'DP All — vendor line items on the down-payment accounts (empty clearing date = DP outstanding)',
+    optional: true,
+  },
 ];
 
 /**

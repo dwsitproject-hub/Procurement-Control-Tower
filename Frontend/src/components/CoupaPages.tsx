@@ -743,9 +743,12 @@ const INV_PILL: Record<string, string> = {
  */
 const INV_CARD_IDS = [
   'inv_total', 'inv_paid', 'inv_open', 'inv_open_amt', 'inv_gross_amt', 'inv_payments', 'inv_paid_amt', 'inv_avg_days',
+  // SAP down payments (25 Nov 2026): the "DP All" export, complementing Coupa.
+  'dp_open_amt', 'dp_open_pos', 'dp_settled_amt', 'dp_paid_pos',
 ];
 const INV_PANEL_IDS = [
   'inv_by_month', 'pay_by_month', 'inv_top_suppliers', 'inv_aging', 'inv_status_mix', 'inv_recent', 'pay_recent',
+  'dp_aging', 'dp_by_month', 'dp_top_open',
 ];
 const EMPTY_LAYOUT_LOCAL: TabLayout = {
   hidden: [], kpiOrder: [], chartOrder: [], replaced: {}, addedKpis: [], addedCharts: [],
@@ -768,10 +771,17 @@ export function CoupaInvoicesTab({
   const [rowsOf, setRowsOf] = useState<SourcingRowsReq | null>(null);
   /** The invoice whose lines are open. */
   const [lineOf, setLineOf] = useState<number | null>(null);
+  /** SAP down payments (25 Nov 2026): the section's data, and the figure whose rows are open. */
+  const [dp, setDp] = useState<Record<string, any> | null>(null);
+  const [dpErr, setDpErr] = useState<string | null>(null);
+  const [dpRowsOf, setDpRowsOf] = useState<SourcingRowsReq | null>(null);
   const open = (what: string, title: string, extra?: Record<string, string>) =>
     setRowsOf({ what, title, ...(extra ? { extra } : {}) });
+  const openDp = (what: string, title: string, extra?: Record<string, string>) =>
+    setDpRowsOf({ what, title, ...(extra ? { extra } : {}) });
   useEffect(() => {
     api.get<Record<string, any>>('/api/v1/coupa/invoices').then(setD).catch((e: Error) => setErr(e.message));
+    api.get<Record<string, any>>('/api/v1/sap-dp').then(setDp).catch((e: Error) => setDpErr(e.message));
   }, []);
   if (err) return <div className="panel"><h2><Lbl>Invoicing &amp; Payment</Lbl></h2><p className="err">{err}</p></div>;
   if (!d) return <div className="center-msg"><div className="spinner" />Loading Coupa invoices…</div>;
@@ -787,6 +797,18 @@ export function CoupaInvoicesTab({
     return v === null || v === undefined ? DASH : formatMoney(Number(v), currency);
   };
   const paidPct = Number(k.invoices ?? 0) > 0 ? ((Number(k.paid_count ?? 0) / Number(k.invoices)) * 100).toFixed(0) : null;
+  const dpLoaded = Boolean(dp?.loaded);
+  const dk = (dp?.kpis ?? {}) as Record<string, any>;
+  /** Shown in the DP section's first panel when there is nothing to show. */
+  const dpNote = (
+    <div className="panel">
+      <h3 className="pr-tbl-h"><Lbl>SAP down payments</Lbl></h3>
+      <p className="note" style={{ marginTop: 0 }}>
+        {dpErr ?? (dp === null ? 'Loading…'
+          : 'No SAP down-payment file loaded yet. Put the "DP All" export in the SAP folder with the PR/PO files, or upload it (SAP Upload).')}
+      </p>
+    </div>
+  );
   const unratedNote = Number(k.unrated ?? 0) > 0 ? `${k.unrated} without an FX rate, not in the amount` : undefined;
   function onInvoiceBar(row: Record<string, any>, key: string) {
     const mk = String(row.mk);
@@ -817,9 +839,94 @@ export function CoupaInvoicesTab({
       onClick={() => open('payments_idr', 'Paid amount')} />,
     // Not clickable (23 Nov 2026): an average; the paid invoices open from Paid.
     inv_avg_days: <Kpi v={k.avg_days_to_pay == null ? DASH : `${Number(k.avg_days_to_pay).toFixed(1)} d`} label="Avg days to pay" sub="invoice date → payment date" />,
+    // ── SAP down payments (25 Nov 2026) ──
+    ...(dpLoaded ? {
+      dp_open_amt: <Kpi v={money(dk.open_usd, dk.open_idr)} label={`SAP DP outstanding (${currency})`}
+        sub={`net of deductions so far · ${formatNumber(Number(dk.open_rows ?? 0))} open DP items`}
+        onClick={() => openDp('open', 'SAP down payments outstanding')} />,
+      dp_open_pos: <Kpi v={formatNumber(Number(dk.open_pos ?? 0))} label="POs with DP outstanding"
+        sub={`of ${formatNumber(Number(dk.pos ?? 0))} POs with an SAP DP`}
+        onClick={() => openDp('open_pos', 'POs with a down payment outstanding')} />,
+      dp_settled_amt: <Kpi v={money(dk.settled_usd, dk.settled_idr)} label={`SAP DP settled (${currency})`}
+        sub="DP amounts cleared against the final invoice"
+        onClick={() => openDp('settled', 'SAP down payments settled')} />,
+      dp_paid_pos: <Kpi v={formatNumber(Number(dk.paid_pos ?? 0))} label="POs fully paid (SAP DP)"
+        sub="every down payment on the PO settled"
+        onClick={() => openDp('paid_pos', 'POs fully paid — every DP settled')} />,
+    } : {}),
   };
 
   const PANELS: Record<string, React.ReactNode> = {
+    dp_aging: dpLoaded ? (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>SAP DP outstanding — age of the advance</Lbl></h3>
+        <p className="note" style={{ marginTop: 0 }}>
+          POs with a down payment not yet cleared, by days since the DP was paid; the amount is net of the
+          deductions taken so far. Click a bucket for its line items.
+        </p>
+        <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
+          <table className="data dd-tbl">
+            <thead><tr><th>Days since posting</th><th className="num">DP items</th><th className="num">POs</th><th className="num">Amount ({currency})</th><th style={{ width: '30%' }} /></tr></thead>
+            <tbody>
+              {(() => {
+                const rows = (dp!.aging ?? []) as any[];
+                const max = Math.max(1, ...rows.map((x) => Math.abs(Number(x.idr ?? 0))));
+                return rows.map((x, i) => (
+                  <tr key={x.bucket} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for these down payments"
+                    onClick={() => openDp('aging', `SAP DP outstanding — ${x.bucket} days`, { bucket: String(x.bucket) })}>
+                    <td><span className={`bs ${DP_AGING_PILL[String(x.bucket)] ?? 'sl'}`}>{x.bucket} d</span></td>
+                    <td className="num">{formatNumber(Number(x.rows))}</td>
+                    <td className="num">{formatNumber(Number(x.pos))}</td>
+                    <td className="num">{money(x.usd, x.idr)}</td>
+                    <td><span className="aging-bar" style={{ width: `${(Math.abs(Number(x.idr ?? 0)) / max) * 100}%` }} /></td>
+                  </tr>
+                ));
+              })()}
+            </tbody>
+          </table>
+        </div>
+        {Number(dk.deduction_only_pos ?? 0) > 0 && (
+          <p className="note">
+            <button className="cu-link" onClick={() => openDp('deduction_only', 'Open deductions whose DP was posted before the file')}>
+              {formatNumber(Number(dk.deduction_only_pos))} PO{Number(dk.deduction_only_pos) === 1 ? '' : 's'}
+            </button>{' '}
+            show only open deductions ({money(dk.deduction_only_usd, dk.deduction_only_idr)}): their down payment was
+            posted before the range the SAP file covers, so they are not in the outstanding figure. A file that
+            carries every open item, whatever its posting date, would include those DPs.
+          </p>
+        )}
+      </div>
+    ) : dpNote,
+    dp_by_month: dpLoaded ? (
+      <OpsBars title={`SAP down payments posted by month (M ${currency})`} rows={dp!.byMonth ?? []}
+        series={isIdr ? DP_SERIES_IDR : DP_SERIES_USD}
+        onBar={(row) => openDp('month', `SAP down payments posted ${String(row.mk)}`, { month: String(row.mk) })} />
+    ) : null,
+    dp_top_open: dpLoaded ? (
+      <div className="panel">
+        <h3 className="pr-tbl-h"><Lbl>Largest SAP DPs outstanding</Lbl> <span className="muted">— by PO · click a row for its DP items</span></h3>
+        <div className="table-wrap dt-scroll" style={{ maxHeight: 340 }}>
+          <table className="data dd-tbl">
+            <thead>
+              <tr><th>PO No</th><th>Vendor</th><th>Co.</th><th className="num">Outstanding ({currency})</th><th className="num">Age (d)</th><th>PO status in SAP</th></tr>
+            </thead>
+            <tbody>
+              {(dp!.topOpen ?? []).map((t: any, i: number) => (
+                <tr key={t.po_no} className={`ent-row ${i % 2 ? '' : 're'}`} title="Click for this PO's down payments"
+                  onClick={() => openDp('po', `SAP down payments — PO ${t.po_no}`, { po: String(t.po_no) })}>
+                  <td>{t.po_no}</td>
+                  <td>{(t.vendor_name ?? '').slice(0, 30)}</td>
+                  <td>{t.company_code}</td>
+                  <td className="num">{money(t.open_usd, t.open_idr)}</td>
+                  <td className="num">{formatNumber(Number(t.age_days))}</td>
+                  <td>{t.po_status ?? <span className="muted" title="The PO is not in the SAP PO data loaded in PCT">not in PO data</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ) : null,
     inv_by_month: (
       <OpsBars title="Invoices by month" rows={d.invoicesByMonth ?? []} series={INVOICE_SERIES} onBar={onInvoiceBar} />
     ),
@@ -1004,7 +1111,129 @@ export function CoupaInvoicesTab({
         <InvoiceRowsModal req={rowsOf} currency={currency} onClose={() => setRowsOf(null)} onInvoice={setLineOf} />
       )}
       {lineOf !== null && <InvoiceLinesModal invoiceId={lineOf} onClose={() => setLineOf(null)} />}
+      {dpRowsOf !== null && <DpRowsModal req={dpRowsOf} currency={currency} onClose={() => setDpRowsOf(null)} />}
     </>
+  );
+}
+
+const DP_SERIES_IDR = [{ key: 'dp_idr', label: 'DP paid (IDR)', color: '#7C3AED', money: true, currency: 'IDR' }];
+const DP_SERIES_USD = [{ key: 'dp_usd', label: 'DP paid (USD)', color: '#7C3AED', money: true, currency: 'USD' }];
+const DP_AGING_PILL: Record<string, string> = { '0-30': 'su', '31-90': 'sn', '91-180': 'sa', '>180': 'spdel' };
+
+/**
+ * The SAP down-payment line items behind one figure (25 Nov 2026): status
+ * (outstanding / settled on its clearing date), age, the PO's status in the
+ * SAP data, both currencies. The header count and total are the figure's.
+ */
+function DpRowsModal({ req, currency = 'IDR', onClose }: {
+  req: SourcingRowsReq;
+  currency?: 'USD' | 'IDR';
+  onClose: () => void;
+}) {
+  const conv = (usd: unknown, idr: unknown): string => {
+    const v = currency === 'IDR' ? idr : usd;
+    return v === null || v === undefined ? DASH : formatMoney(Number(v), currency);
+  };
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [rows, setRows] = useState<Record<string, any>[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const qs = (offset: number) => {
+    const p = new URLSearchParams({ what: req.what, limit: '200', offset: String(offset) });
+    for (const [k2, v2] of Object.entries(req.extra ?? {})) p.set(k2, v2);
+    return p.toString();
+  };
+  useEffect(() => {
+    let gone = false;
+    api.get<Record<string, any>>(`/api/v1/sap-dp/rows?${qs(0)}`)
+      .then((r) => { if (!gone) { setD(r); setRows(r.rows ?? []); } })
+      .catch((e: Error) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const loadMore = async () => {
+    setMore(true);
+    try {
+      const r = await api.get<Record<string, any>>(`/api/v1/sap-dp/rows?${qs(rows.length)}`);
+      setRows((cur) => [...cur, ...(r.rows ?? [])]);
+    } finally { setMore(false); }
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={req.title} onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h3>🔍 {req.title}</h3>
+          <span className="spacer" />
+          <FloatControls onClose={onClose} />
+          <button className="btn secondary" style={{ width: 'auto' }} onClick={onClose}>Close</button>
+        </header>
+        <div className="body">
+          {err && <p className="err">{err}</p>}
+          {!d && !err && <div className="center-msg"><div className="spinner" />Loading…</div>}
+          {d && (
+            <>
+              <p className="count">
+                <strong>{formatNumber(Number(d.total ?? 0))}</strong> DP items · {formatNumber(Number(d.pos ?? 0))} POs
+                {' '}· Σ {conv(d.usd, d.idr)}
+                {Number(d.unrated ?? 0) > 0 && <> · {formatNumber(Number(d.unrated))} without a USD amount</>}
+                {rows.length < Number(d.total ?? 0) && <> · showing {formatNumber(rows.length)}</>}
+              </p>
+              <div className="table-wrap dt-scroll" style={{ maxHeight: '60vh' }}>
+                <table className="data dd-tbl">
+                  <thead>
+                    <tr>
+                      <th>Posted</th><th>PO No</th><th>Vendor</th><th>Co.</th><th>SAP doc</th><th>Status</th>
+                      <th className="num">Age (d)</th><th className="num">Amount</th><th>Ccy</th>
+                      <th className="num">Amount ({currency})</th><th>PO status in SAP</th><th>Text</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r2, i) => (
+                      <tr key={r2.id} className={i % 2 ? '' : 're'}>
+                        <td>{fmtDate(r2.posting_date)}</td>
+                        <td>
+                          {r2.po_no}
+                          {r2.purchasing_doc && r2.purchasing_doc !== r2.po_no && (
+                            <span className="muted" title="SAP placeholder; the PO comes from Assignment"> · {r2.purchasing_doc}</span>
+                          )}
+                        </td>
+                        <td>{(r2.vendor_name ?? r2.vendor_code ?? '').slice(0, 28)}</td>
+                        <td>{r2.company_code}</td>
+                        <td>{r2.doc_no} <span className="muted">{r2.doc_type}</span></td>
+                        <td>
+                          {r2.is_open
+                            ? <span className="bs sa">outstanding</span>
+                            : <span className="bs sd" title="Cleared against the final invoice">settled {fmtDate(r2.clearing_date)}</span>}
+                        </td>
+                        <td className="num">{r2.age_days == null ? DASH : formatNumber(Number(r2.age_days))}</td>
+                        <td className="num" style={Number(r2.amount) < 0 ? { color: '#C0392B' } : undefined}>{formatNumber(Number(r2.amount))}</td>
+                        <td><span className="dd-ccy">{r2.currency}</span></td>
+                        <td className="num">{conv(r2.amount_usd, r2.amount_idr)}</td>
+                        <td>{r2.po_status ?? <span className="muted" title="The PO is not in the SAP PO data loaded in PCT">not in PO data</span>}</td>
+                        <td className="muted" style={{ maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r2.item_text ?? ''}>{r2.item_text ?? DASH}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {rows.length < Number(d.total ?? 0) && (
+                <button className="btn secondary" style={{ width: 'auto', marginTop: '.5rem' }} disabled={more} onClick={() => void loadMore()}>
+                  {more ? 'Loading…' : 'Load 200 more'}
+                </button>
+              )}
+              <p className="note">
+                Negative amounts are DP deductions, reversals or refunds; the total nets them, like the SAP account balance.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

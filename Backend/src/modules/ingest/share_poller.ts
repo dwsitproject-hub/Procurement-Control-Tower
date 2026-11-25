@@ -65,6 +65,8 @@ export const FEED_META: { feed: Feed; label: string; defaultPattern: string }[] 
   { feed: 'porg', label: 'Purchasing Orgs', defaultPattern: 'P Org*.csv' },
   { feed: 'matm', label: 'Material Master', defaultPattern: 'Mat group*.xlsx' },
   { feed: 'zuser', label: 'SAP Users', defaultPattern: 'zuser*.csv' },
+  // SAP down payments (25 Nov 2026), in the same folder as the PR/PO exports.
+  { feed: 'dp', label: 'Down Payments', defaultPattern: 'DP All*.XLSX' },
 ];
 
 export interface FeedConfig {
@@ -123,9 +125,15 @@ export async function loadShareConfig(): Promise<ShareConfig> {
 
   const feeds = FEED_META.map(({ feed, defaultPattern }) => {
     const f = (stored[feed] ?? {}) as Record<string, unknown>;
+    // Down payments (25 Nov 2026) land in the same folder as the PR/PO
+    // exports: until the panel saves a folder for them, they use the PR
+    // Report's folder rather than the storage root, which an installation that
+    // saved per-feed folders no longer reads.
+    const prPath = (stored['pr'] as Record<string, unknown> | undefined)?.['path'];
+    const fallback = feed === 'dp' && prPath !== undefined ? String(prPath) : defaultPath;
     return {
       feed,
-      path: String(f['path'] ?? defaultPath),
+      path: String(f['path'] ?? fallback),
       pattern: String(f['pattern'] ?? defaultPattern),
       slots: normaliseSlots(f['slots']),
     };

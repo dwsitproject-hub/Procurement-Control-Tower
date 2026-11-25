@@ -2027,6 +2027,198 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     res.json({ configured: coupaConfigured(), ...page, watermarks: wm });
   }));
 
+  /*
+   * SAP down payments (25 Nov 2026, ops.v_sap_dp_line - see 051).
+   *
+   * The Invoicing & Payment page's SAP section: what is still advanced
+   * (Clearing Date empty), what was settled (PO fully paid), and how old the
+   * outstanding advances are. Amounts in both currencies: IDR is the document
+   * amount (every row on the reference file is IDR; another currency converts
+   * at its posting month's rate), USD is SAP's own second local currency when
+   * the export carries it.
+   *
+   * Figures, per PO (a DP is consumed over several payments):
+   *  - outstanding = each PO's NET open amount - its DP less the deductions
+   *    ("POT DP") taken so far - for the POs where that is positive. Aged from
+   *    the posting of the PO's first open DP, not row by row: a deduction posted
+   *    in August belongs to the advance paid in February.
+   *  - "deductions only" = POs whose open rows net to zero or less: their DP
+   *    was posted before the range the file covers (the 23 Nov 2026 export
+   *    starts 2 Jan 2026), so the file holds the deductions without the DP.
+   *    Counted apart, never netted into the outstanding figure.
+   *  - settled = the DP amounts (positive rows) whose clearing date is filled.
+   *  - a PO is "fully paid" when it has DP rows and none is open.
+   */
+  const DP_IDR = (d: string): string =>
+    `(CASE WHEN ${d}.currency = 'IDR' THEN ${d}.amount ELSE ${TO_IDR(`${d}.amount`, `${d}.currency`, `${d}.posting_date`)} END)`;
+  const DP_USD = (d: string): string =>
+    `(CASE WHEN ${d}.lc2_currency IN ('US$', 'USD') AND ${d}.amount_lc2 IS NOT NULL THEN ${d}.amount_lc2
+           ELSE ${TO_USD(`${d}.amount`, `${d}.currency`, `${d}.posting_date`)} END)`;
+  const DP_AGE = (d: string): string => `(CURRENT_DATE - ${d}.posting_date)`;
+  const DP_BUCKETS = ['0-30', '31-90', '91-180', '>180'] as const;
+  /** Per PO: net open amount (IDR) and when its first open DP was posted. */
+  const DP_OPEN_PO = `(SELECT _o.po_no, sum(${DP_IDR('_o')}) AS net_idr, sum(${DP_USD('_o')}) AS net_usd,
+          COALESCE(min(_o.posting_date) FILTER (WHERE _o.amount > 0), min(_o.posting_date)) AS since
+     FROM ops.v_sap_dp_line _o WHERE _o.is_open GROUP BY _o.po_no)`;
+  const DP_PO_AGE = '(CURRENT_DATE - op.since)';
+  const DP_PO_BUCKET = `CASE WHEN ${DP_PO_AGE} <= 30 THEN '0-30' WHEN ${DP_PO_AGE} <= 90 THEN '31-90'
+      WHEN ${DP_PO_AGE} <= 180 THEN '91-180' ELSE '>180' END`;
+  /** The PO's statuses in the current SAP data (null: the PO is not in it). */
+  const DP_PO_STATUS = (d: string): string => `(SELECT string_agg(DISTINCT _f.status, ', ' ORDER BY _f.status)
+      FROM core.fact_po_line _f
+     WHERE _f.dataset_version_id = (SELECT current_version_id FROM core.dataset_pointer WHERE id = 1)
+       AND _f.po_no = ${d}.po_no)`;
+
+  r.get('/api/v1/sap-dp', role('analyst', async (_req, res) => {
+    const ver = await currentVersion();
+    const page = await memo(ver?.id ?? 0, ['sap-dp'], async () => {
+      const kpisQ = queryOne<Record<string, unknown>>(
+        `WITH po AS (
+           SELECT po_no, bool_or(is_open) AS any_open, bool_or(in_pct_po) AS in_pct
+             FROM ops.v_sap_dp_line d GROUP BY po_no
+         )
+         SELECT (SELECT sum(op.net_idr) FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0) AS open_idr,
+                (SELECT sum(op.net_usd) FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0) AS open_usd,
+                (SELECT count(*) FROM ops.v_sap_dp_line d
+                  WHERE d.is_open AND d.po_no IN (SELECT op.po_no FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0))::int AS open_rows,
+                (SELECT count(*) FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0)::int AS open_pos,
+                (SELECT count(*) FROM ${DP_OPEN_PO} op WHERE op.net_idr <= 0)::int AS deduction_only_pos,
+                (SELECT sum(op.net_idr) FROM ${DP_OPEN_PO} op WHERE op.net_idr <= 0) AS deduction_only_idr,
+                (SELECT sum(op.net_usd) FROM ${DP_OPEN_PO} op WHERE op.net_idr <= 0) AS deduction_only_usd,
+                (SELECT sum(${DP_IDR('d')}) FROM ops.v_sap_dp_line d WHERE NOT d.is_open AND d.amount > 0) AS settled_idr,
+                (SELECT sum(${DP_USD('d')}) FROM ops.v_sap_dp_line d WHERE NOT d.is_open AND d.amount > 0) AS settled_usd,
+                (SELECT count(*) FROM ops.v_sap_dp_line d WHERE NOT d.is_open AND d.amount > 0)::int AS settled_rows,
+                (SELECT count(*) FROM po WHERE NOT any_open)::int AS paid_pos,
+                (SELECT count(*) FROM po)::int AS pos,
+                (SELECT count(*) FROM po WHERE NOT in_pct)::int AS pos_not_in_pct,
+                (SELECT count(*) FROM ops.v_sap_dp_line d WHERE ${DP_USD('d')} IS NULL)::int AS unrated`,
+      );
+      const agingQ = query<{ bucket: string; rows: number; pos: number; idr: number | null; usd: number | null }>(
+        `SELECT ${DP_PO_BUCKET} AS bucket,
+                sum((SELECT count(*) FROM ops.v_sap_dp_line d WHERE d.is_open AND d.po_no = op.po_no))::int AS rows,
+                count(*)::int AS pos, sum(op.net_idr) AS idr, sum(op.net_usd) AS usd
+           FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0 GROUP BY 1`,
+      );
+      const byMonthQ = query(
+        `SELECT to_char(d.posting_date, 'YYYY-MM') AS mk, count(*)::int AS rows,
+                sum(${DP_IDR('d')}) AS dp_idr, sum(${DP_USD('d')}) AS dp_usd,
+                count(*) FILTER (WHERE d.is_open)::int AS still_open
+           FROM ops.v_sap_dp_line d WHERE d.amount > 0
+          GROUP BY 1 ORDER BY 1`,
+      );
+      const topOpenQ = query(
+        `SELECT op.po_no, d.company_code, d.vendor_name, op.net_idr AS open_idr, op.net_usd AS open_usd,
+                d.rows, op.since AS first_posting, ${DP_PO_AGE} AS age_days, d.in_pct_po,
+                (SELECT string_agg(DISTINCT _f.status, ', ' ORDER BY _f.status) FROM core.fact_po_line _f
+                  WHERE _f.dataset_version_id = (SELECT current_version_id FROM core.dataset_pointer WHERE id = 1)
+                    AND _f.po_no = op.po_no) AS po_status
+           FROM ${DP_OPEN_PO} op
+           JOIN LATERAL (SELECT min(x.company_code) AS company_code, min(x.vendor_name) AS vendor_name,
+                                count(*)::int AS rows, bool_or(x.in_pct_po) AS in_pct_po
+                           FROM ops.v_sap_dp_line x WHERE x.is_open AND x.po_no = op.po_no) d ON true
+          WHERE op.net_idr > 0
+          ORDER BY op.net_idr DESC LIMIT 30`,
+      );
+      // What the file carried that PCT leaves out, so the note can say it.
+      const outQ = queryOne<Record<string, unknown>>(
+        `SELECT count(*) FILTER (WHERE d.po_no IS NULL)::int AS no_po_rows,
+                sum(d.amount) FILTER (WHERE d.po_no IS NULL) AS no_po_amount,
+                count(*) FILTER (WHERE d.po_no IS NOT NULL
+                                   AND NOT EXISTS (SELECT 1 FROM ops.v_sap_dp_line v WHERE v.id = d.id))::int AS excluded_rows,
+                count(*)::int AS stored_rows, max(d.posting_date) AS latest_posting, max(d.loaded_at) AS loaded_at
+           FROM ops.sap_dp_line d
+          WHERE d.dataset_version_id = (SELECT current_version_id FROM core.dataset_pointer WHERE id = 1)`,
+      );
+      const [kpis, agingRows, byMonth, topOpen, out] = await Promise.all([kpisQ, agingQ, byMonthQ, topOpenQ, outQ]);
+      const aging = DP_BUCKETS.map((b) => agingRows.find((x) => x.bucket === b) ?? { bucket: b, rows: 0, pos: 0, idr: null, usd: null });
+      return { kpis, aging, byMonth, topOpen, out };
+    });
+    res.json({ loaded: Number((page.out as Record<string, unknown> | null)?.['stored_rows'] ?? 0) > 0, ...page });
+  }));
+
+  /*
+   * The line items behind a down-payment figure (25 Nov 2026), 200 a page. Every
+   * row carries its status, age, PO status in the SAP data, and both currencies.
+   */
+  r.get('/api/v1/sap-dp/rows', role('analyst', async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const what = String(q['what'] ?? '');
+    const limit = qint(q['limit'], 200, 1, 1000);
+    const offset = qint(q['offset'], 0, 0, 1_000_000);
+    const params: unknown[] = [];
+    const bind = (v: unknown): string => { params.push(v); return `$${params.length}`; };
+    const str = (k: string): string => {
+      const v = String(q[k] ?? '').trim();
+      if (v === '') throw new HttpProblem(400, 'bad-request', `${k} is required for ${what}`);
+      return v;
+    };
+    const FIG: Record<string, () => { where: string; label: string }> = {
+      all: () => ({ where: 'TRUE', label: 'All down-payment line items' }),
+      open: () => ({
+        where: `d.is_open AND d.po_no IN (SELECT op.po_no FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0)`,
+        label: 'Down payments outstanding',
+      }),
+      open_pos: () => ({
+        where: `d.is_open AND d.po_no IN (SELECT op.po_no FROM ${DP_OPEN_PO} op WHERE op.net_idr > 0)`,
+        label: 'Down payments outstanding',
+      }),
+      deduction_only: () => ({
+        where: `d.is_open AND d.po_no IN (SELECT op.po_no FROM ${DP_OPEN_PO} op WHERE op.net_idr <= 0)`,
+        label: 'Open deductions whose DP was posted before the file',
+      }),
+      settled: () => ({ where: 'NOT d.is_open AND d.amount > 0', label: 'Down payments settled (PO fully paid)' }),
+      paid_pos: () => ({
+        where: 'NOT EXISTS (SELECT 1 FROM ops.v_sap_dp_line o WHERE o.po_no = d.po_no AND o.is_open)',
+        label: 'POs fully paid (every DP settled)',
+      }),
+      not_in_pct: () => ({ where: 'NOT d.in_pct_po', label: 'Down payments on POs not in the SAP PO data' }),
+      aging: () => {
+        const b = str('bucket');
+        if (!(DP_BUCKETS as readonly string[]).includes(b)) throw new HttpProblem(400, 'bad-request', 'unknown aging bucket');
+        return {
+          where: `d.is_open AND d.po_no IN (SELECT op.po_no FROM ${DP_OPEN_PO} op
+                                             WHERE op.net_idr > 0 AND ${DP_PO_BUCKET} = ${bind(b)})`,
+          label: `Outstanding for ${b} days`,
+        };
+      },
+      month: () => {
+        const mk = str('month');
+        if (!/^[0-9]{4}-[0-9]{2}$/.test(mk)) throw new HttpProblem(400, 'bad-request', 'month must be YYYY-MM');
+        return { where: `d.amount > 0 AND to_char(d.posting_date, 'YYYY-MM') = ${bind(mk)}`, label: `Down payments posted ${mk}` };
+      },
+      po: () => {
+        const po = str('po');
+        return { where: `d.po_no = ${bind(po)}`, label: `Down payments on PO ${po}` };
+      },
+    };
+    const fig = FIG[what];
+    if (!fig) throw new HttpProblem(400, 'bad-request', `unknown down-payment figure: ${what}`);
+    const { where, label } = fig();
+    const tot = await queryOne<{ n: number; pos: number; idr: number | null; usd: number | null; unrated: number }>(
+      `SELECT count(*)::int AS n, count(DISTINCT d.po_no)::int AS pos, sum(${DP_IDR('d')}) AS idr, sum(${DP_USD('d')}) AS usd,
+              count(*) FILTER (WHERE ${DP_USD('d')} IS NULL)::int AS unrated
+         FROM ops.v_sap_dp_line d WHERE ${where}`,
+      params,
+    );
+    const pp = [...params, limit, offset];
+    const rows = await query(
+      `SELECT d.id, d.company_code, d.po_no, d.purchasing_doc, d.in_pct_po, d.vendor_code, d.vendor_name,
+              d.doc_no, d.doc_type, d.posting_date, d.clearing_date, d.is_open,
+              d.amount, d.currency, ${DP_IDR('d')} AS amount_idr, ${DP_USD('d')} AS amount_usd,
+              CASE WHEN d.is_open THEN ${DP_AGE('d')} END AS age_days,
+              d.gl_account, d.item_text, ${DP_PO_STATUS('d')} AS po_status
+         FROM ops.v_sap_dp_line d
+        WHERE ${where}
+        ORDER BY d.posting_date DESC, d.po_no, d.id
+        LIMIT $${pp.length - 1} OFFSET $${pp.length}`,
+      pp,
+    );
+    res.json({
+      what, label, total: tot?.n ?? 0, pos: tot?.pos ?? 0,
+      idr: tot?.idr ?? null, usd: tot?.usd ?? null, unrated: tot?.unrated ?? 0, rows,
+    });
+  }));
+
   r.get('/api/v1/coupa/summary', role('analyst', async (_req, res) => {
     const [sourcing] = await query<Record<string, unknown>>(
       `SELECT count(*)::int AS events,

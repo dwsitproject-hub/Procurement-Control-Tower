@@ -45,6 +45,9 @@ export interface ClassifyResult {
  */
 const EVALUATION_ORDER: Feed[] = [
   'po', 'gr', 'por', 'prel', 'pr', 'fx',
+  // Down payments: a four-column signature (G/L account, clearing date,
+  // document number, document-currency amount) no other export carries.
+  'dp',
   'matm', 'zuser', 'pgrp', 'porg',
 ];
 

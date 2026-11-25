@@ -626,7 +626,7 @@ export default function App() {
       {/* v1's .bar: navy sticky header */}
       <div className="topbar">
         <span className="brand-tile"><BrandMark size={20} /></span>
-        <h1>Procurement Control Tower</h1>
+        <h1>Procurement <span className="grad-text">Control Tower</span></h1>
         {totalItemsBadge !== null && <span className="hdr-badge">{formatNumber(totalItemsBadge)} items</span>}
         {dataCheckCount > 0 && (
           <button className="hdr-chip" onClick={() => navigate('datacheck')} title="Open Data Quality">
@@ -1277,7 +1277,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
   return (
     <div className="login-wrap">
       <form className="login" onSubmit={submit}>
-        <h1>Procurement Control Tower</h1>
+        <h1>Procurement <span className="grad-text">Control Tower</span></h1>
         <p className="sub">Sign in to continue</p>
 
         {ssoEnabled && (

@@ -14,7 +14,8 @@ ChartJS.register(
   LinearScale, Tooltip, Legend,
 );
 
-const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948'];
+// Hub palette: brand red, amber, teal, blue, violet, orange - distinct hues, readable on light and dark.
+const PALETTE = ['#D23F35', '#F5A623', '#14B8A6', '#4A7FD4', '#8B5CF6', '#E8743A'];
 // v1 colours each priority bucket (Emergency red → Planned green).
 const PRIORITY_COLORS: Record<string, string> = {
   '01-Emergency': '#C0392B',

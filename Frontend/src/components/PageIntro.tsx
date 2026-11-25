@@ -84,13 +84,25 @@ const INFO: Partial<Record<Tab, { eyebrow: string; lede: string; terms?: [string
   datacheck: { eyebrow: 'Data · data checks', lede: 'Every automatic check run on the SAP files, and what it means for the numbers you see — worst first.' },
 };
 
+/** The page title with its last word in the brand gradient (the Hub's headline style). */
+function splitTitle(title: string) {
+  const i = title.trimEnd().lastIndexOf(' ');
+  if (i <= 0) return <span className="pi-grad">{title}</span>;
+  return (
+    <>
+      {title.slice(0, i + 1)}
+      <span className="pi-grad">{title.slice(i + 1)}</span>
+    </>
+  );
+}
+
 export function PageIntro({ tab, title, takeaways }: { tab: Tab; title: string; takeaways?: Takeaway[] }) {
   const info = INFO[tab];
   if (!info) return null;
   return (
     <section className="pi" aria-label="About this page">
-      <div className="pi-eyebrow">{info.eyebrow}</div>
-      <h1 className="pi-h1">{title}</h1>
+      <div className="pi-eyebrow"><span className="pi-live" aria-hidden="true" />{info.eyebrow}</div>
+      <h1 className="pi-h1">{splitTitle(title)}</h1>
       <p className="pi-lede">{info.lede}</p>
       {info.terms && info.terms.length > 0 && (
         <div className="pi-terms help-only">

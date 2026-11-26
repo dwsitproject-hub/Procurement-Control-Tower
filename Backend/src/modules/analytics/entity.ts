@@ -42,6 +42,41 @@ const PRI_SPEND_CAT = spendCategoryWithPlantSql(
 );
 const POL_SPEND_CAT = `COALESCE(pol.spend_category, '(unmapped)')`;
 
+/**
+ * Order quantity in a common unit (26 Nov 2026, the explorer's Quantity):
+ * mass G/KG/MT/TO/TON in KG and volume ML/L/KL/M3 in L - the conversion the
+ * unit-price trend uses - and any other unit as ordered.
+ */
+const QTY_UNIT = `upper(COALESCE(pol.order_unit, ''))`;
+const QTY_FACTOR = `(CASE ${QTY_UNIT} WHEN 'MT' THEN 1000.0 WHEN 'TO' THEN 1000.0 WHEN 'TON' THEN 1000.0
+  WHEN 'G' THEN 0.001 WHEN 'KL' THEN 1000.0 WHEN 'M3' THEN 1000.0 WHEN 'ML' THEN 0.001 ELSE 1.0 END)`;
+const QTY_BASE = `(CASE WHEN ${QTY_UNIT} IN ('MT','TO','TON','KG','G') THEN 'KG'
+  WHEN ${QTY_UNIT} IN ('KL','M3','L','ML') THEN 'L' ELSE NULLIF(${QTY_UNIT}, '') END)`;
+
+/** Factor to a line's base unit (KG / L), and the base itself, for any unit expression. */
+const unitFactorSql = (u: string): string => `(CASE upper(${u}) WHEN 'MT' THEN 1000.0 WHEN 'TO' THEN 1000.0 WHEN 'TON' THEN 1000.0
+  WHEN 'G' THEN 0.001 WHEN 'KL' THEN 1000.0 WHEN 'M3' THEN 1000.0 WHEN 'ML' THEN 0.001 ELSE 1.0 END)`;
+const unitBaseSql = (u: string): string => `(CASE WHEN upper(${u}) IN ('MT','TO','TON','KG','G') THEN 'KG'
+  WHEN upper(${u}) IN ('KL','M3','L','ML') THEN 'L' ELSE upper(${u}) END)`;
+
+/**
+ * Goods received, in the PO line's ORDER unit (26 Nov 2026, the popups' GR
+ * Quantity). receipt_qty_net sums the postings in their unit of ENTRY, which
+ * for ~1% of lines is not the order unit (a PO in MT received in KG, a PU
+ * service received in its real unit) - shown raw it made Outstanding wildly
+ * negative. Mass and volume postings are converted to the order unit; a
+ * posting in a unit that does not convert falls back to SAP's own count,
+ * ordered minus "still to be delivered", which is in the order unit.
+ */
+const GR_QTY_ORDER_UNIT = `(SELECT CASE
+    WHEN count(*) = 0 THEN pol.receipt_qty_net
+    WHEN bool_and(${unitBaseSql('COALESCE(g.unit_of_entry, pol.order_unit)')} = ${unitBaseSql('pol.order_unit')})
+      THEN round(sum(g.signed_qty * ${unitFactorSql('COALESCE(g.unit_of_entry, pol.order_unit)')}) / ${unitFactorSql('pol.order_unit')}, 3)
+    ELSE pol.order_qty - pol.still_deliver_qty END
+   FROM core.fact_gr_posting g
+  WHERE g.dataset_version_id = pol.dataset_version_id AND g.po_no = pol.po_no
+    AND g.po_item = pol.po_item AND g.counts_as_receipt)`;
+
 const OPEN_STATUSES = `('Unapproved PR','PR Approved-No PO','PO-Not Approved','HOLD PO','PO-No GR','Partially Delivered')`;
 
 function scoped(versionId: number, scope: readonly ScopeEntry[], alias: string): { where: string; params: unknown[] } {
@@ -322,7 +357,7 @@ export async function vendorDetail(
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd",
             pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
-            pol.gr_completion_pct AS "grCompletionPct",
+            pol.gr_completion_pct AS "grCompletionPct", ${GR_QTY_ORDER_UNIT} AS "grQty",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.vendor_code = ${vp}
@@ -665,6 +700,73 @@ export async function vendorOtdChart(
 
 // ─────────────────────────────────────────────────────────── material detail
 
+/**
+ * Unit price by month for the top six series (26 Nov 2026), one helper for the
+ * Material 360 and Category 360 popups. `by` picks the series: the vendors, or
+ * the plants that bought. Each point also lists the OTHER side for the hover
+ * (the plants that bought from that vendor that month, or the vendors a plant
+ * bought from).
+ *
+ * The price basis is the Material 360's (v1's material-360 trend, fixed): the
+ * per-line IDR equivalent over the quantity converted to the dominant base unit
+ * (mass G/KG/MT -> KG, volume ML/L/KL/M3 -> L); lines in another unit, without
+ * an IDR equivalent, STO or token-priced are left out and the caller counts
+ * what was charted. Monthly point = sum(value) / sum(base qty).
+ */
+type PricePoint = {
+  code: string | null; name: string | null; mk: string; price: number | null;
+  n: number; base: string; qty: number | null; others: string[] | null;
+};
+async function unitPriceByMonth(where: string, params: unknown[], by: 'vendor' | 'plant'): Promise<PricePoint[]> {
+  const key = by === 'vendor' ? 'vendor_code' : 'plant';
+  const name = by === 'vendor' ? 'vendor_name' : 'plant_label';
+  const other = by === 'vendor' ? 'plant_label' : 'vendor_label';
+  return query<PricePoint>(
+    `WITH l AS (
+       SELECT pol.vendor_code, pol.vendor_name, pol.plant, pol.document_date,
+              pol.plant || COALESCE(' — ' || NULLIF(dp.plant_name, pol.plant), '') AS plant_label,
+              CASE WHEN COALESCE(pol.vendor_name, '') = '' THEN pol.vendor_code
+                   ELSE pol.vendor_name END AS vendor_label,
+              pol.net_order_value_idr AS val, pol.order_qty AS q,
+              upper(COALESCE(pol.order_unit,'')) AS u
+         FROM core.fact_po_line pol
+         LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
+        WHERE ${where}
+          AND pol.net_order_value_idr > 0 AND NOT pol.is_sto AND NOT pol.is_token_price
+          AND pol.order_qty > 0 AND pol.document_date IS NOT NULL),
+     conv AS (
+       SELECT l.*, l.${key} AS k, l.${name} AS kname, l.${other} AS other,
+              CASE u WHEN 'MT' THEN 1000.0 WHEN 'TO' THEN 1000.0 WHEN 'TON' THEN 1000.0
+                     WHEN 'KG' THEN 1.0 WHEN 'G' THEN 0.001
+                     WHEN 'KL' THEN 1000.0 WHEN 'M3' THEN 1000.0 WHEN 'L' THEN 1.0 WHEN 'ML' THEN 0.001
+                     ELSE 1.0 END AS f,
+              CASE WHEN u IN ('MT','TO','TON','KG','G') THEN 'KG'
+                   WHEN u IN ('KL','M3','L','ML') THEN 'L'
+                   ELSE u END AS base
+         FROM l),
+     dom AS (SELECT base FROM conv GROUP BY base ORDER BY count(*) DESC, base LIMIT 1),
+     c2 AS (SELECT conv.* FROM conv JOIN dom ON conv.base = dom.base),
+     t6 AS (SELECT k FROM c2 GROUP BY 1 ORDER BY sum(val) DESC NULLS LAST LIMIT 6)
+     SELECT c2.k AS code, max(c2.kname) AS name,
+            to_char(c2.document_date,'YYYY-MM') AS mk,
+            sum(c2.val) / NULLIF(sum(c2.q * c2.f), 0) AS price,
+            count(*)::int AS n, max(c2.base) AS base,
+            sum(c2.q * c2.f) AS qty,
+            array_agg(DISTINCT c2.other) FILTER (WHERE c2.other IS NOT NULL) AS others
+       FROM c2 JOIN t6 ON t6.k IS NOT DISTINCT FROM c2.k
+      GROUP BY c2.k, 3 ORDER BY 3`,
+    [...params],
+  );
+}
+
+/** A unitPriceByMonth point in the shape the popups' PriceTrend reads. */
+const priceRow = (by: 'vendor' | 'plant') => (x: PricePoint) => ({
+  vendorCode: x.code, vendorName: x.name, monthKey: x.mk, unitPrice: x.price, lines: x.n,
+  // In the base unit the price is per (KG, L, ...), so quantity and price agree.
+  qty: x.qty === null ? null : Number(x.qty), uom: x.base,
+  ...(by === 'vendor' ? { plants: x.others ?? [] } : { vendors: x.others ?? [] }),
+});
+
 export async function materialDetail(
   versionId: number,
   scope: readonly ScopeEntry[],
@@ -710,10 +812,12 @@ export async function materialDetail(
   const head = await queryOne<{
     descr: string; grp: string | null; cat: string | null; lines: number; vendors: number;
     qty: number | null; usd: number | null; idr: number | null; avg_price: number | null;
+    uom: string | null; units: number;
   }>(
     `SELECT left(max(pol.short_text), 80) AS descr, max(pol.material_group) AS grp,
             max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
-            count(DISTINCT pol.vendor_code)::int AS vendors, sum(pol.order_qty) AS qty,
+            count(DISTINCT pol.vendor_code)::int AS vendors, sum(pol.order_qty * ${QTY_FACTOR}) AS qty,
+            min(${QTY_BASE}) AS uom, count(DISTINCT ${QTY_BASE})::int AS units,
             sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr,
             avg(pol.unit_price) FILTER (WHERE NOT pol.is_sto AND NOT pol.is_token_price AND pol.unit_price > 0) AS avg_price
        FROM core.fact_po_line pol
@@ -744,41 +848,11 @@ export async function materialDetail(
   // above a per-KG vendor. v2 converts mass (G/KG/MT) and volume (ML/L/KL/M3)
   // units to the material's dominant base; lines in an incomparable unit are
   // excluded and counted. Monthly point = sum(value)/sum(qty), v1's ratio.
-  const priceByVendor = await query<{
-    code: string | null; name: string | null; mk: string; price: number | null;
-    n: number; base: string; qty: number | null;
-  }>(
-    `WITH l AS (
-       SELECT pol.vendor_code, pol.vendor_name, pol.document_date,
-              pol.net_order_value_idr AS val, pol.order_qty AS q,
-              upper(COALESCE(pol.order_unit,'')) AS u
-         FROM core.fact_po_line pol
-        WHERE ${where} AND pol.material_code = ${mp}
-          AND pol.net_order_value_idr > 0 AND NOT pol.is_sto AND NOT pol.is_token_price
-          AND pol.order_qty > 0 AND pol.document_date IS NOT NULL),
-     conv AS (
-       SELECT *,
-              CASE u WHEN 'MT' THEN 1000.0 WHEN 'TO' THEN 1000.0 WHEN 'TON' THEN 1000.0
-                     WHEN 'KG' THEN 1.0 WHEN 'G' THEN 0.001
-                     WHEN 'KL' THEN 1000.0 WHEN 'M3' THEN 1000.0 WHEN 'L' THEN 1.0 WHEN 'ML' THEN 0.001
-                     ELSE 1.0 END AS f,
-              CASE WHEN u IN ('MT','TO','TON','KG','G') THEN 'KG'
-                   WHEN u IN ('KL','M3','L','ML') THEN 'L'
-                   ELSE u END AS base
-         FROM l),
-     dom AS (SELECT base FROM conv GROUP BY base ORDER BY count(*) DESC, base LIMIT 1),
-     c2 AS (SELECT conv.* FROM conv JOIN dom ON conv.base = dom.base),
-     v6 AS (SELECT vendor_code, max(vendor_name) AS vendor_name, sum(val) AS amt
-              FROM c2 GROUP BY 1 ORDER BY amt DESC NULLS LAST LIMIT 6)
-     SELECT c2.vendor_code AS code, max(v6.vendor_name) AS name,
-            to_char(c2.document_date,'YYYY-MM') AS mk,
-            sum(c2.val) / NULLIF(sum(c2.q * c2.f), 0) AS price,
-            count(*)::int AS n, max(c2.base) AS base,
-            sum(c2.q * c2.f) AS qty
-       FROM c2 JOIN v6 ON v6.vendor_code = c2.vendor_code
-      GROUP BY c2.vendor_code, 3 ORDER BY 3`,
-    [...params],
-  );
+  const matWhere = `${where} AND pol.material_code = ${mp}`;
+  const [priceByVendor, priceByPlant] = await Promise.all([
+    unitPriceByMonth(matWhere, params, 'vendor'),
+    unitPriceByMonth(matWhere, params, 'plant'),
+  ]);
 
   const vendorShare = await query<{ code: string | null; name: string | null; usd: number | null; n: number }>(
     `SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
@@ -806,6 +880,7 @@ export async function materialDetail(
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd",
             pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
+            ${GR_QTY_ORDER_UNIT} AS "grQty",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
       WHERE ${where} AND pol.material_code = ${mp}
@@ -821,7 +896,9 @@ export async function materialDetail(
     kpis: {
       lineCount: head.lines,
       vendorCount: head.vendors,
-      totalQty: head.qty,
+      // In KG / L where the units convert, as the explorer's Quantity (26 Nov 2026).
+      totalQty: head.units > 1 ? null : head.qty,
+      totalQtyUom: head.units > 1 ? 'mixed units' : head.uom,
       spendUsd: head.usd,
       spendIdr: head.idr,
       avgUnitPrice: head.avg_price === null ? null : Math.round(Number(head.avg_price) * 100) / 100,
@@ -829,11 +906,9 @@ export async function materialDetail(
       soleSource: head.vendors === 1,
     },
     priceHistory: priceHistory.map((x) => ({ monthKey: x.mk, avgUnitPrice: x.avg_price, lines: x.n })),
-    priceByVendor: priceByVendor.map((x) => ({
-      vendorCode: x.code, vendorName: x.name, monthKey: x.mk, unitPrice: x.price, lines: x.n,
-      // In the base unit the price is per (KG, L, ...), so quantity and price agree.
-      qty: x.qty === null ? null : Number(x.qty), uom: x.base,
-    })),
+    priceByVendor: priceByVendor.map(priceRow('vendor')),
+    // The same trend by the plants that bought (26 Nov 2026), for the toggle.
+    priceByPlant: priceByPlant.map(priceRow('plant')),
     vendorType,
     priceBasis: {
       baseUnit: priceByVendor[0]?.base ?? null,
@@ -973,6 +1048,18 @@ export async function categoryDetail(
     params,
   );
 
+  // The popup's trend is unit price, as on the Material 360 (26 Nov 2026).
+  const [catPriceByVendor, catPriceByPlant, catLines] = await Promise.all([
+    unitPriceByMonth(where, params, 'vendor'),
+    unitPriceByMonth(where, params, 'plant'),
+    queryOne<{ n: number }>(
+      `SELECT count(*)::int AS n FROM core.fact_po_line pol
+        WHERE ${where} AND pol.net_order_value_idr > 0 AND NOT pol.is_token_price
+          AND pol.order_qty > 0 AND pol.document_date IS NOT NULL`,
+      params,
+    ),
+  ]);
+
   const vendorShare = await query<{ code: string | null; name: string | null; usd: number | null; idr: number | null; n: number }>(
     `SELECT pol.vendor_code AS code, max(pol.vendor_name) AS name,
             sum(pol.net_order_value_usd) AS usd, sum(pol.net_order_value_idr) AS idr, count(*)::int AS n
@@ -1009,11 +1096,13 @@ export async function categoryDetail(
   const poHistory = await query<Record<string, unknown>>(
     `SELECT pol.po_no AS "poNo", pol.po_item AS "poItem", pol.document_date AS "documentDate",
             pol.material_code AS "materialCode", left(pol.short_text, 60) AS "shortText",
-            pol.plant, pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
+            pol.plant || COALESCE(' — ' || NULLIF((SELECT _pl.plant_name FROM core.dim_plant _pl WHERE _pl.plant = pol.plant), pol.plant), '') AS plant,
+            pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
             pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd",
             pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
+            ${GR_QTY_ORDER_UNIT} AS "grQty",
             pol.is_sto AS "_sto", pol.is_token_price AS "_token", pol.release_exempt AS "_exempt"
        FROM core.fact_po_line pol
       WHERE ${where}
@@ -1063,6 +1152,16 @@ export async function categoryDetail(
       uom: x.units > 1 ? 'mixed units' : x.uom,
       qtyByUnit: x.units > 1 ? (x.by_unit ?? []).map((b) => ({ uom: b.u, qty: Number(b.q) })) : null,
     })),
+    priceByVendor: catPriceByVendor.map(priceRow('vendor')),
+    priceByPlant: catPriceByPlant.map(priceRow('plant')),
+    priceBasis: {
+      baseUnit: catPriceByVendor[0]?.base ?? catPriceByPlant[0]?.base ?? null,
+      // Lines charted (top six vendors, in the dominant base unit) of the
+      // lines that carry a price at all - the rest are in another unit or
+      // outside the top six; the popup says so.
+      chartedLines: catPriceByVendor.reduce((a, x) => a + x.n, 0),
+      pricedLines: catLines?.n ?? 0,
+    },
     vendorType,
     vendorShare: vendorShare.map((x) => ({ vendorCode: x.code, vendorName: x.name, usd: x.usd, idr: x.idr, lines: x.n })),
     areaShare: areaShare.map((x) => ({ plant: x.plant, plantName: x.plant_name, usd: x.usd, idr: x.idr, lines: x.n })),
@@ -1174,11 +1273,13 @@ export async function materialGroupPage(
   const materials = await query<{
     code: string; descr: string; grp: string | null; cat: string | null; lines: number;
     vendors: number; qty: number | null; usd: number | null; idr: number | null;
+    uom: string | null; units: number;
   }>(
     `SELECT pol.material_code AS code, left(max(pol.short_text), 60) AS descr,
             max(pol.material_group) AS grp, max(${POL_SPEND_CAT}) AS cat, count(*)::int AS lines,
             count(DISTINCT pol.vendor_code)::int AS vendors,
-            sum(pol.order_qty) AS qty, sum(pol.net_order_value_usd) AS usd,
+            sum(pol.order_qty * ${QTY_FACTOR}) AS qty, sum(pol.net_order_value_usd) AS usd,
+            min(${QTY_BASE}) AS uom, count(DISTINCT ${QTY_BASE})::int AS units,
             sum(pol.net_order_value_idr) AS idr
        FROM core.fact_po_line pol
       WHERE ${where} AND NOT pol.is_sto AND pol.material_code IS NOT NULL${extra}
@@ -1253,7 +1354,11 @@ export async function materialGroupPage(
       category: m.cat,
       lines: m.lines,
       vendors: m.vendors,
-      qty: m.qty,
+      // Ordered quantity (26 Nov 2026: the explorer's Quantity column), mass
+      // in KG and volume in L. A material ordered in units that do not
+      // convert (PC and KG, say) has no single total.
+      qty: m.units > 1 ? null : m.qty,
+      uom: m.units > 1 ? 'mixed units' : m.uom,
       spendUsd: m.usd,
       spendIdr: m.idr,
       soleSource: m.vendors === 1,

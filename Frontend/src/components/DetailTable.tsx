@@ -39,6 +39,8 @@ interface Column {
 interface Facet {
   value: string;
   count: number;
+  /** "CODE — Name" where the code has a name (plant). */
+  label?: string;
 }
 
 interface DetailResponse {
@@ -115,6 +117,7 @@ export function DetailTable({
   initial,
   initialLabel,
   globalQuery,
+  extraColumns,
 }: {
   /** Pre-applied filters from a drill handoff ("Open in Detail tab", G1.2). */
   initial?: Record<string, string>;
@@ -128,6 +131,12 @@ export function DetailTable({
    * bar's, since that is the more specific choice.
    */
   globalQuery?: string;
+  /**
+   * Columns this view adds for its own figure (26 Nov 2026: DP Amount and DP
+   * Date on the Open Items "paid / DP" rows). Shown at the end; never saved
+   * into the reader's own column layout.
+   */
+  extraColumns?: string[];
 } = {}) {
   const init = initial ?? {};
   const listOf = (k: string): string[] | undefined =>
@@ -312,6 +321,17 @@ export function DetailTable({
     });
   };
 
+  /**
+   * Back to the default view (26 Nov 2026): the reader's saved layout is
+   * cleared, so the table follows the defaults again, including later ones.
+   */
+  const resetLayout = () => {
+    if (!data) return;
+    knownRef.current = null;
+    setVisible(data.columns.filter((c) => c.default).map((c) => c.key));
+    void api.put('/api/v1/me/preferences/detail_table_layout', { value: null }).catch(() => undefined);
+  };
+
   // Drag a header onto another to move it there. The `visible` array IS the
   // column order, so reordering it is the whole feature; the same layout
   // preference that stores visibility persists the order.
@@ -401,8 +421,9 @@ export function DetailTable({
   const shown = useMemo(() => {
     if (!data || !visible) return [];
     const byKey = new Map(data.columns.map((c) => [c.key, c]));
-    return visible.map((k) => byKey.get(k)).filter((c): c is Column => c !== undefined);
-  }, [data, visible]);
+    const keys = [...visible, ...(extraColumns ?? []).filter((k) => !visible.includes(k))];
+    return keys.map((k) => byKey.get(k)).filter((c): c is Column => c !== undefined);
+  }, [data, visible, extraColumns]);
 
   if (error) {
     return (
@@ -539,6 +560,11 @@ export function DetailTable({
                 ))}
               </div>
             ))}
+            <div className="dt-chooser-group">
+              <button type="button" className="dt-btn" onClick={resetLayout} title="Your column order and choice are yours alone; this goes back to the default view">
+                Reset to default columns
+              </button>
+            </div>
           </div>
         )}
 
@@ -562,7 +588,7 @@ export function DetailTable({
                           checked={active.includes(o.value)}
                           onChange={() => toggleFilter(key, o.value)}
                         />
-                        {o.value} <span className="muted">({formatNumber(o.count)})</span>
+                        {o.label ?? o.value} <span className="muted">({formatNumber(o.count)})</span>
                       </label>
                     ))}
                   </div>

@@ -1069,6 +1069,9 @@ span.xs-mc-num { pointer-events: none; }
 .oi-asof { margin: 0; font-size: .78rem; color: var(--muted); }
 .oi-total { margin: .1rem 0 0; font-size: 1.9rem; font-weight: 800; color: var(--heading); line-height: 1.1; }
 .oi-total span { font-size: .95rem; font-weight: 600; color: var(--muted); }
+/* The headline total opens its rows (26 Nov 2026). */
+.oi-total-btn { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; border-bottom: 2px dotted transparent; }
+.oi-total-btn:hover, .oi-total-btn:focus-visible { border-bottom-color: currentColor; }
 .oi-says { margin: .6rem 0 0; font-size: .95rem; line-height: 1.5; max-width: 74ch; }
 .oi-desk-pick select { margin: 0 .35rem; padding: .2rem .35rem; }
 

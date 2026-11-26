@@ -760,6 +760,7 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
                 <th>Material</th><th>Description</th><th>Mat Grp</th><th>Category</th>
                 <th style={{ textAlign: 'right' }}>Vendors</th>
                 <th style={{ textAlign: 'right' }}>Lines</th>
+                <th style={{ textAlign: 'right' }} title="Ordered quantity, in the material's order unit">Quantity</th>
                 <th style={{ textAlign: 'right' }}>Amount (M IDR)</th>
               </tr>
             </thead>
@@ -777,6 +778,11 @@ export function MaterialsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
                   <td>{m.category ?? DASH}</td>
                   <td className="num">{m.soleSource ? <span title="Sole source">🔴 1</span> : formatNumber(m.vendors)}</td>
                   <td className="num">{formatNumber(m.lines)}</td>
+                  <td className="num" title={m.uom === 'mixed units' ? 'Ordered in more than one unit - no single total' : undefined}>
+                    {m.qty === null || m.qty === undefined
+                      ? (m.uom === 'mixed units' ? 'mixed units' : DASH)
+                      : `${formatNumber(Number(m.qty), 2)}${m.uom ? ` ${m.uom}` : ''}`}
+                  </td>
                   <td className="num">{m.spendIdr === null ? DASH : (Number(m.spendIdr) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
                 </tr>
               ))}
@@ -990,21 +996,8 @@ export function CategoryModal({
                 . PO figures exclude STO and deleted lines; PR figures use the requisition's own material, as the summary does.
               </p>
 
-              <div className="ent-mini" style={{ marginTop: '.6rem' }}>
-                <div className="ent-h" style={{ marginTop: 0 }}><Lbl>Spend by month — top vendors</Lbl> ({currency})</div>
-                <PriceTrend
-                  rows={(d.spendByVendor ?? []).map((x: any) => ({
-                    ...x, unitPrice: currency === 'IDR' ? x.idr : x.usd,
-                  }))}
-                  yTitle={`Spend (${currency})`}
-                  empty="No dated spend to chart."
-                  valueLabel="Spend"
-                  formatValue={(v) => (currency === 'IDR' ? formatCurrency(null, v, 'IDR') : formatCurrency(v, null, 'USD'))}
-                />
-                <p className="note" style={{ marginBottom: 0 }}>
-                  The six vendors with the most spend in this category, by PO document month.
-                </p>
-              </div>
+              {/* Unit price, as on the Material 360 (26 Nov 2026; was spend by month). */}
+              <UnitPriceTrend d={d} lineCount={k.lineCount} vendorCount={k.vendorCount} plantCount={k.plantCount} category />
               <TwoCol
                 left={<AreaDonut title={`Suppliers / Vendors — share of PO amount (${currency})`} rows={(d.vendorShare ?? []).map((x: any) => ({ plant: x.vendorCode, plantName: `${x.vendorCode ?? ''} ${x.vendorName ?? ''}`.trim() || '(vendor)', usd: currency === 'IDR' ? x.idr : x.usd }))} />}
                 right={<AreaDonut title={`Areas purchased — share of PO amount (${currency})`} rows={(d.areaShare ?? []).map((x: any) => ({ ...x, usd: currency === 'IDR' ? x.idr : x.usd }))} />}
@@ -1124,30 +1117,20 @@ export function MaterialModal({
               <div className="ent-kpis">
                 <Bio label="PO lines" value={formatNumber(d.kpis.lineCount)} />
                 <Bio label="Vendors" value={`${formatNumber(d.kpis.vendorCount)}${d.kpis.soleSource ? ' 🔴 sole source' : ''}`} />
-                <Bio label="Total qty" value={formatNumber(d.kpis.totalQty, 1)} />
+                <Bio
+                  label="Total qty"
+                  value={d.kpis.totalQty === null || d.kpis.totalQty === undefined
+                    ? (d.kpis.totalQtyUom ?? DASH)
+                    : `${formatNumber(d.kpis.totalQty, 1)}${d.kpis.totalQtyUom ? ` ${d.kpis.totalQtyUom}` : ''}`}
+                  title={d.kpis.totalQtyUom === 'mixed units' ? 'Ordered in units that do not convert - no single total' : 'Mass in KG, volume in L'}
+                />
                 <Bio label={`Spend ${currency}`} value={formatCurrency(d.kpis.spendUsd, d.kpis.spendIdr, currency)} />
                 <Bio label="Avg unit price" value={d.kpis.avgUnitPrice === null ? DASH : formatNumber(d.kpis.avgUnitPrice, 2)} title={d.kpis.avgUnitPriceNote} />
                 <Bio label="Group / category" value={`${d.materialGroup ?? DASH} · ${d.category ?? DASH}`} />
               </div>
 
               {/* v1's material-360: per-vendor unit-price trend + two share donuts. */}
-              <div className="ent-mini" style={{ marginTop: '.6rem' }}>
-                <div className="ent-h" style={{ marginTop: 0 }}>
-                  Unit price by month — top vendors (IDR{d.priceBasis?.baseUnit ? ` per ${d.priceBasis.baseUnit}` : ''})
-                </div>
-                <PriceTrend
-                  rows={d.priceByVendor ?? []}
-                  valueLabel="Unit price"
-                  formatValue={(v) => `Rp ${formatNumber(v, 2)}${d.priceBasis?.baseUnit ? ` / ${d.priceBasis.baseUnit}` : ''}`}
-                />
-                <p className="note" style={{ marginBottom: 0 }}>
-                  Showing top {Math.min(6, d.kpis.vendorCount)} of {d.kpis.vendorCount} vendors by amount.
-                  Unit price = Spend ÷ Order Qty per PO line, monthly ratio of sums{d.priceBasis?.baseUnit ? `, quantities normalised to ${d.priceBasis.baseUnit}` : ''}.
-                  Foreign-currency lines use their exact per-line IDR equivalent (FX at invoice/PO date);
-                  unrated lines and units that cannot be converted to the dominant base are excluded
-                  ({formatNumber(d.priceBasis?.chartedLines ?? 0)} of {formatNumber(d.kpis.lineCount)} lines charted).
-                </p>
-              </div>
+              <UnitPriceTrend d={d} lineCount={d.kpis.lineCount} vendorCount={d.kpis.vendorCount} plantCount={(d.plantOptions ?? []).length} />
               <TwoCol
                 left={<AreaDonut title="Suppliers / Vendors — share of PO amount (USD)" rows={d.vendorShare.map((x: any) => ({ plant: x.vendorCode, plantName: `${x.vendorCode ?? ''} ${x.vendorName ?? ''}`.trim() || '(plant)', usd: x.usd }))} />}
                 right={<AreaDonut title="Areas purchased — share of PO amount (USD)" rows={d.areaShare ?? []} />}
@@ -1227,6 +1210,62 @@ function vendorLabel(code: unknown, name: unknown): string {
   return c !== '' && !n.toUpperCase().startsWith(c.toUpperCase()) ? `${c} ${n}` : n;
 }
 
+/**
+ * Unit price by month (IDR per base unit) for the top vendors or, toggled, the
+ * top plants (26 Nov 2026) - the Material 360's and Category 360's trend. The
+ * hover names the other side: the plants that bought from a vendor that month,
+ * or the vendors a plant bought from.
+ */
+function UnitPriceTrend({ d, lineCount, vendorCount, plantCount, category = false }: {
+  d: Record<string, any>; lineCount: number; vendorCount: number; plantCount: number;
+  /** The Category 360: many materials, so the note says what the price averages over. */
+  category?: boolean;
+}) {
+  const [by, setBy] = useState<'vendor' | 'plant'>('vendor');
+  const base: string | null = d.priceBasis?.baseUnit ?? null;
+  const rows: Record<string, any>[] = (by === 'vendor' ? d.priceByVendor : d.priceByPlant) ?? [];
+  const charted = rows.reduce((a2, x) => a2 + Number(x.lines ?? 0), 0);
+  const series = new Set(rows.map((r) => String(r.vendorCode))).size;
+  return (
+    <div className="ent-mini" style={{ marginTop: '.6rem' }}>
+      <div className="ent-h" style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '.6rem', flexWrap: 'wrap' }}>
+        <span>
+          <Lbl>{`Unit price by month — top ${by === 'vendor' ? 'vendors' : 'plants'}`}</Lbl>{' '}
+          (IDR{base ? ` per ${base}` : ''})
+        </span>
+        <span className="gf-scope" role="group" aria-label="Series">
+          {(['vendor', 'plant'] as const).map((v) => (
+            <button key={v} type="button" className="gf-seg" aria-pressed={by === v} onClick={() => setBy(v)}>
+              {v === 'vendor' ? 'Top vendors' : 'Top plants'}
+            </button>
+          ))}
+        </span>
+      </div>
+      <PriceTrend
+        rows={rows}
+        valueLabel="Unit price"
+        formatValue={(v) => `Rp ${formatNumber(v, 2)}${base ? ` / ${base}` : ''}`}
+        empty="No IDR unit-price history to chart."
+      />
+      <p className="note" style={{ marginBottom: 0 }}>
+        Showing top {series} of {formatNumber(by === 'vendor' ? vendorCount : plantCount)} {by === 'vendor' ? 'vendors' : 'plants'} by amount.
+        Unit price = Spend ÷ Order Qty per PO line, monthly ratio of sums{base ? `, quantities normalised to ${base}` : ''}
+        {category ? ', across every material in the category' : ''}.
+        Foreign-currency lines use their exact per-line IDR equivalent (FX at invoice/PO date);
+        unrated lines and units that cannot be converted to the dominant base are excluded
+        ({formatNumber(charted)} of {formatNumber(lineCount)} lines charted: the top {series} {by === 'vendor' ? 'vendors' : 'plants'}&apos; lines in {base ?? 'the dominant unit'}).
+      </p>
+    </div>
+  );
+}
+
+/** Up to four names, then "+n more". */
+function someNames(xs: unknown): string | null {
+  if (!Array.isArray(xs) || xs.length === 0) return null;
+  const head = xs.slice(0, 4).map(String).join(', ');
+  return xs.length > 4 ? `${head} +${xs.length - 4} more` : head;
+}
+
 /** v1's material-360 unit-price trend: one line per top-6 vendor (IDR). */
 function PriceTrend({
   rows, yTitle = 'Unit price (IDR equivalent)', empty = 'No IDR unit-price history to chart.',
@@ -1298,6 +1337,11 @@ function PriceTrend({
                       : `Quantity: ${formatNumber(Number(r.qty), 2)}${r.uom ? ` ${r.uom}` : ''}`);
                   }
                   if (r.lines !== undefined) out.push(`PO lines: ${formatNumber(Number(r.lines))}`);
+                  // The other side of the point (26 Nov 2026).
+                  const pl = someNames(r.plants);
+                  if (pl) out.push(`Plant${r.plants.length > 1 ? 's' : ''}: ${pl}`);
+                  const vn = someNames(r.vendors);
+                  if (vn) out.push(`Vendor${r.vendors.length > 1 ? 's' : ''}: ${vn}`);
                 }
                 return out;
               },
@@ -1393,6 +1437,13 @@ function PoHistoryTable({ rows, vendor = false, material = false, currency = 'US
     ...(vendor ? [{ key: 'vendorName', label: 'Vendor', render: (r: Record<string, any>) => r.vendorName ?? DASH }] : []),
     { key: 'orderQty', label: 'Qty', right: true, render: (r) => formatNumber(r.orderQty, 2) },
     { key: 'orderUnit', label: 'Unit', render: (r) => r.orderUnit ?? DASH },
+    // Received and still to come (26 Nov 2026), in the order unit.
+    { key: 'grQty', label: 'GR Quantity', right: true, render: (r) => formatNumber(r.grQty ?? 0, 2), sortValue: (r) => Number(r.grQty ?? 0) },
+    {
+      key: 'outstandingQty', label: 'Outstanding Quantity', right: true,
+      render: (r) => (r.orderQty === null || r.orderQty === undefined ? DASH : formatNumber(Number(r.orderQty) - Number(r.grQty ?? 0), 2)),
+      sortValue: (r) => (r.orderQty === null || r.orderQty === undefined ? null : Number(r.orderQty) - Number(r.grQty ?? 0)),
+    },
     {
       key: 'unitPrice', label: 'Unit price', right: true,
       render: (r) => ((r.flags as string[])?.includes('sto') ? `${DASH} (STO)` : formatNumber(r.unitPrice, 2)),

@@ -463,7 +463,8 @@ export function liveChartAvailable(chartId: string): boolean {
 /** Facet options for the global filter bar. */
 export async function globalFilterOptions(versionId: number): Promise<{
   company: { value: string; label: string }[];
-  plant: { value: string; label: string }[];
+  /** `companies`: the company codes the plant's lines carry, for the bar's company <-> plant cascade. */
+  plant: { value: string; label: string; companies: string[] }[];
   purchOrg: { value: string; label: string }[];
   monthKey: { value: string; label: string }[];
   year: { value: string; label: string }[];
@@ -480,12 +481,15 @@ export async function globalFilterOptions(versionId: number): Promise<{
       WHERE pol.dataset_version_id = $1 ORDER BY 1`,
     [versionId],
   );
-  const pl = await pool.query<{ value: string; label: string }>(
-    `SELECT DISTINCT pol.plant AS value,
-            COALESCE(NULLIF(dp.plant_name, ''), NULLIF(pol.plant, ''), '(blank)') AS label
+  // The companies each plant's lines belong to (26 Nov 2026): picking a
+  // company narrows the Plant list to its plants, and the reverse.
+  const pl = await pool.query<{ value: string; label: string; companies: string[] }>(
+    `SELECT pol.plant AS value,
+            COALESCE(NULLIF(max(dp.plant_name), ''), NULLIF(pol.plant, ''), '(blank)') AS label,
+            array_agg(DISTINCT COALESCE(pol.company_code, '')) AS companies
        FROM core.fact_po_line pol
        LEFT JOIN core.dim_plant dp ON dp.plant = pol.plant
-      WHERE pol.dataset_version_id = $1 ORDER BY 1`,
+      WHERE pol.dataset_version_id = $1 GROUP BY pol.plant ORDER BY 1`,
     [versionId],
   );
   const po = await pool.query<{ value: string; label: string }>(

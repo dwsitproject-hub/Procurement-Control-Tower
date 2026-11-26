@@ -36,9 +36,14 @@ interface Option {
   label: string;
 }
 
+interface PlantOption extends Option {
+  /** The company codes this plant's lines carry. */
+  companies?: string[];
+}
+
 interface FilterOptions {
   company: Option[];
-  plant: Option[];
+  plant: PlantOption[];
   purchOrg: Option[];
   monthKey: Option[];
   year?: Option[];
@@ -203,9 +208,24 @@ export function GlobalFilterBar({
       </div>
 
       {DIMENSIONS.map((d) => {
+        // Company and Plant narrow each other (26 Nov 2026): with companies
+        // picked, Plant lists only their plants; with plants picked, Company
+        // lists only theirs. A value already selected always stays listed, so
+        // it can still be unticked.
+        const plantCompanies = (p: PlantOption) => p.companies ?? [];
         const options = d.key === 'monthKey' && value.year.length > 0
           ? opts.monthKey.filter((o) => value.year.includes(o.value.slice(0, 4)))
-          : opts[d.key];
+          : d.key === 'plant' && value.company.length > 0
+            ? opts.plant.filter((o) => value.plant.includes(o.value)
+              || plantCompanies(o).some((c) => value.company.includes(c)))
+            : d.key === 'company' && value.plant.length > 0
+              ? (() => {
+                const cos = new Set(opts.plant
+                  .filter((p) => value.plant.includes(p.value))
+                  .flatMap(plantCompanies));
+                return opts.company.filter((o) => value.company.includes(o.value) || cos.has(o.value));
+              })()
+              : opts[d.key];
         // A dimension with one value is hidden: filtering to the only value that
         // exists changes nothing, so the control would be a dead end. Company is
         // therefore invisible on a single-entity dataset and appears the moment a

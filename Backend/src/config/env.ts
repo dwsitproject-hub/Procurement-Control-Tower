@@ -136,6 +136,12 @@ export const EnvSchema = z
     // The scheduled Data Hub FX sync can be switched off without a code change
     // (26 Nov 2026); manual syncs from the Admin page still work.
     DHM_FX_ENABLED: bool.default(true),
+    // Plant master from the Data Hub (26 Nov 2026): the names shown beside
+    // every plant code. Read once a day; the entity's fields are resolved from
+    // its catalog, so only its slug is configured.
+    DHM_PLANT_ENTITY: z.string().regex(/^[a-z][a-z0-9_]*$/).default('plant'),
+    DHM_PLANT_SYNC_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    DHM_PLANT_ENABLED: bool.default(true),
 
     SMTP_HOST: z.string().default('mailhog'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),

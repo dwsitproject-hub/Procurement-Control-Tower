@@ -342,7 +342,15 @@ export function OpenItemsTab({
                 of the query, so the page total IS the category's total and
                 there is nothing to reconcile. */}
             <p className="oi-total">
-              {formatNumber(sum.totalOpen)}{' '}
+              {/* Clickable (26 Nov 2026): every open line the page counts. */}
+              <button
+                type="button"
+                className="oi-total-btn"
+                title="Click for every open PR / PO line"
+                onClick={() => openRows(`All open PR PO lines${desk ? ` in ${desk}` : ''}`, sum.detailFilter, false, 'total')}
+              >
+                {formatNumber(sum.totalOpen)}
+              </button>{' '}
               <span>total open PR PO Lines{desk ? ` in ${desk}` : ''}</span>
             </p>
           </div>
@@ -833,6 +841,9 @@ export function OpenItemsTab({
             : { ...sum.detailFilter, ...focus.init }}
           globalQuery={filterQuery}
           onClose={() => setFocus(null)}
+          // The "PO not delivered - paid / DP" rows carry the SAP down payment
+          // (26 Nov 2026), whichever of the card's figures opened them.
+          extraColumns={focus.init['paidState'] === 'paid' ? ['dpAmount', 'dpDate'] : undefined}
         />
       )}
     </>

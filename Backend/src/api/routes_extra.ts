@@ -36,6 +36,7 @@ import type { Feed } from '@pct/contracts';
 import { coupaConfigured, coupaGet, coupaHost } from '../modules/coupa/client.js';
 import { COUPA_OBJECTS, coupaSyncInFlight, notifyCoupaErrors, runCoupaSync, storeQuoteResponses } from '../modules/coupa/sync.js';
 import { dhmFxStatus, dhmFxSyncInFlight, runDhmFxSync } from '../modules/dhm/fx.js';
+import { dhmPlantStatus, dhmPlantSyncInFlight, runDhmPlantSync } from '../modules/dhm/plant.js';
 import { loadRuleSnapshot } from '../modules/admin/rules.js';
 import { isEmail, loadNotifyConfig, notify, recentNotifications } from '../modules/notify/mailer.js';
 import { loadMasterPage, masterIndex } from '../modules/analytics/master.js';
@@ -1238,6 +1239,27 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     void runDhmFxSync('manual')
       .then((out) => recordAudit({
         action: 'dhm.fx.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+        outcome: out.outcome === 'error' ? 'failure' : 'success',
+        detail: { ...out },
+        ip: req.ip,
+      }))
+      .catch(() => undefined);
+    res.json({ outcome: 'started' });
+  }));
+
+  // The Data Hub plant master (26 Nov 2026): status and Sync now.
+  r.get('/api/v1/admin/dhm/plant', role('steward', async (_req, res) => {
+    res.json(await dhmPlantStatus());
+  }));
+
+  r.post('/api/v1/admin/dhm/plant/sync', role('steward', async (req, res, ctx) => {
+    if (dhmPlantSyncInFlight()) {
+      res.json({ outcome: 'locked' });
+      return;
+    }
+    void runDhmPlantSync('manual')
+      .then((out) => recordAudit({
+        action: 'dhm.plant.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
         outcome: out.outcome === 'error' ? 'failure' : 'success',
         detail: { ...out },
         ip: req.ip,

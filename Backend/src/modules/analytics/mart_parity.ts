@@ -9,6 +9,7 @@
  */
 
 import type pg from 'pg';
+import { plantLabelSql } from './plant_label.js';
 import {
   AGE_BANDS, ageBandCaseSql, ageBandOrderSql, ageBandPredicateSql,
 } from '@pct/rules';
@@ -1821,7 +1822,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'pr_by_plant', seriesKey: 'items', seriesLabel: 'PR items', unit: 'count',
-    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+    sql: `SELECT plant AS bucket_key, ${plantLabelSql(`${PRI}.plant`)} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
                    jsonb_build_object('plant', plant,'notDeleted',true)) AS drill
@@ -1957,7 +1958,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'po_by_plant', seriesKey: 'value', seriesLabel: 'Net order value (USD)', unit: 'usd',
-    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+    sql: `SELECT plant AS bucket_key, ${plantLabelSql(`${POL}.plant`)} AS bucket_label,
                  sum(net_order_value_usd)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
                    jsonb_build_object('plant', plant,'notSto',true,'notDeleted',true)) AS drill
@@ -1966,7 +1967,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   },
   {
     chartId: 'po_by_plant', seriesKey: 'value_idr', seriesLabel: 'Net order value (IDR)', unit: 'idr',
-    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+    sql: `SELECT plant AS bucket_key, ${plantLabelSql(`${POL}.plant`)} AS bucket_label,
                  sum(net_order_value_idr)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','po_line','filters',
                    jsonb_build_object('plant', plant,'notSto',true,'notDeleted',true)) AS drill
@@ -2745,7 +2746,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   })),
   {
     chartId: 'wbs_by_plant', seriesKey: 'violations', seriesLabel: 'Violations', unit: 'count',
-    sql: `SELECT plant AS bucket_key, plant AS bucket_label,
+    sql: `SELECT plant AS bucket_key, ${plantLabelSql(`${PRI}.plant`)} AS bucket_label,
                  count(*)::numeric AS value, count(*)::int AS row_count,
                  jsonb_build_object('grain','pr_item','filters',
                    jsonb_build_object('wbsStatus','violation','plant', plant)) AS drill

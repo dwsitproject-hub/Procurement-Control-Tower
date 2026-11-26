@@ -113,16 +113,25 @@ export function useColumnLayout(prefKey: string | null, columns: ToolColumn[] | 
     return (visible ?? allKeys).map((k) => byKey.get(k)).filter((c): c is ToolColumn => c !== undefined);
   }, [columns, visible, allKeys]);
 
-  return { visible: visible ?? allKeys, shown, toggle, reorder };
+  /** Back to the default view: every column, the saved layout cleared (26 Nov 2026). */
+  const reset = useCallback(() => {
+    setSaved(null);
+    setVisible(allKeys);
+    if (prefKey) void api.put(`/api/v1/me/preferences/${prefKey}`, { value: null }).catch(() => undefined);
+  }, [prefKey, allKeys]);
+
+  return { visible: visible ?? allKeys, shown, toggle, reorder, reset };
 }
 
 /** The "Columns (n/m)" button and its checkbox panel. */
 export function ColumnChooser({
-  columns, visible, onToggle,
+  columns, visible, onToggle, onReset,
 }: {
   columns: ToolColumn[];
   visible: string[];
   onToggle: (key: string) => void;
+  /** Clears the reader's saved layout. */
+  onReset?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -140,6 +149,11 @@ export function ColumnChooser({
               </label>
             ))}
           </div>
+          {onReset && (
+            <div className="dt-chooser-group">
+              <button type="button" className="dt-btn" onClick={onReset}>Reset to default columns</button>
+            </div>
+          )}
         </div>
       )}
     </>
@@ -257,7 +271,7 @@ export function ToolTable<T>({
   return (
     <>
       <div className="tt-bar">
-        <ColumnChooser columns={columns} visible={layout.visible} onToggle={layout.toggle} />
+        <ColumnChooser columns={columns} visible={layout.visible} onToggle={layout.toggle} onReset={layout.reset} />
       </div>
       <ScrollFrame className="table-wrap" style={maxHeight ? { maxHeight, overflow: 'auto' } : undefined}>
         <table className={className}>

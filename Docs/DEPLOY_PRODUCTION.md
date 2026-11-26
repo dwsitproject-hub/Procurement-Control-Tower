@@ -960,6 +960,56 @@ old container configuration.
   correct for production.
 - **An autoheal container would not have helped:** each restart re-fired the slot and wedged again.
 
+### 10t. Release of 26 Nov 2026 — plant names, cascading filters, column layouts, material unit prices
+
+**What changed:**
+- **Open Items:**
+  - the headline "total open PR PO Lines" number clicks through to every open line;
+  - the "PO not delivered - paid / DP" rows carry **DP Amount** (sum of the PO's SAP down payments, IDR)
+    and **DP Date** (first DP posting). Both are PO-level, repeated on each line, and blank for a line
+    whose payment is in Coupa only. Both are also in the Detail table's column chooser.
+- **Plant master from the Data Hub, once a day:**
+  - `modules/dhm/plant.ts` reads the hub's `plant` master (same `DHM_*` key pair as the FX rates; the
+    PCT application needs `plant` on its allowlist) into `core.dim_plant`;
+  - names change, new plants are added, nothing is deleted;
+  - a name an administrator set in Master always wins;
+  - status and **Sync now** are under Admin → Column mapping → Data Hub plant master.
+- **"CODE — Name" wherever a plant code shows:**
+  - Detail table (column, facet and search);
+  - drill tables;
+  - the plant charts (PR / PO / WBS by plant);
+  - the Material and Category 360 popups;
+  - the filter bar already showed the name with the code.
+- **Company and Plant narrow each other:**
+  - in the filter bar;
+  - in the Detail table's filters (main tab and floating panel). Picking a company lists only its
+    plants, and picking a plant lists only its company.
+- **Tables:**
+  - every Detail column sorts (PO Split was the one that did not);
+  - **Reset to default columns** in the Detail table, the drill tables and the popup tables clears
+    the reader's own saved order and choice. Layouts were already saved per user.
+- **Material Group page:**
+  - the material explorer has a **Quantity** column, mass in KG and volume in L (MT, G, KL, M3 converted;
+    other units as ordered; "mixed units" when they do not convert). The Material 360's Total qty uses
+    the same rule;
+  - Material 360 and Category 360 show **unit price by month (IDR per KG/L)**, with a **Top vendors /
+    Top plants** toggle. The hover names the plants that bought from that vendor, or the vendors that
+    plant bought from. The Category 360's old spend-by-month chart is replaced;
+  - every popup PO list has **GR Quantity** and **Outstanding Quantity** (= Qty − GR Quantity), in the
+    PO's order unit. GR postings in another unit (a PO in MT received in KG) are converted; a unit that
+    does not convert falls back to SAP's own still-to-be-delivered.
+
+**Deploy:** the usual §10 BE and FE updates, with no migration. Then:
+1. **Admin → SAP Data Sync → Rebuild** once, so the precomputed plant charts carry the names. Filtered
+   views compute live and show them straight away.
+2. Ask the Data Hub integrator to add `plant` to PCT's allowlist, then use **Sync now** in the plant
+   box. The daily run starts by itself 3.5 minutes after the API starts.
+
+New optional settings in `/opt/pct/secrets.production.env` (defaults shown):
+- `DHM_PLANT_ENTITY=plant`: the hub master's slug;
+- `DHM_PLANT_SYNC_HOURS=24`: the interval;
+- `DHM_PLANT_ENABLED=true`: `false` stops the scheduled run, and Sync now still works.
+
 ## 11. Rollback
 
 **On the affected server:**

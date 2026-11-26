@@ -21,6 +21,7 @@ import { initSessionStore, sessionStoreKind } from './modules/auth/session.js';
 import { initOidc, oidcEnabled } from './modules/auth/auth.js';
 import { startCoupaPoller } from './modules/coupa/sync.js';
 import { startDhmFxPoller } from './modules/dhm/fx.js';
+import { startDhmPlantPoller } from './modules/dhm/plant.js';
 import { startSharePoller } from './modules/ingest/share_poller.js';
 import { coupaConfigured } from './modules/coupa/client.js';
 
@@ -92,6 +93,8 @@ async function main(): Promise<void> {
   // Data Hub exchange rates (040): every DHM_FX_SYNC_MINUTES, first run within
   // a minute of boot. Without DHM_* env vars this is a no-op.
   startDhmFxPoller((msg) => process.stdout.write(`${msg}\n`));
+  // The Data Hub plant master, once a day (26 Nov 2026). No-op without DHM_*.
+  startDhmPlantPoller((msg) => process.stdout.write(`${msg}\n`));
   // The scheduled share ingest (settings in rule_config; off until enabled).
   startSharePoller((msg) => process.stdout.write(`${msg}\n`));
 

@@ -20,11 +20,14 @@ export function DetailModal({
   initial,
   globalQuery,
   onClose,
+  extraColumns,
 }: {
   title: string;
   initial: Record<string, string>;
   globalQuery: string;
   onClose: () => void;
+  /** Columns shown for this figure only (see DetailTable). */
+  extraColumns?: string[];
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -55,6 +58,7 @@ export function DetailModal({
             initial={initial}
             initialLabel={title}
             globalQuery={globalQuery}
+            extraColumns={extraColumns}
           />
         </div>
       </div>

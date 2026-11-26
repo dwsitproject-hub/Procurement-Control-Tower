@@ -36,6 +36,8 @@ export interface DetailColumn {
   sql: string;
   /** Read from Coupa's live store through COUPA_JOIN, not from the view. */
   coupa?: boolean;
+  /** `sql` is an expression over `d` (a correlated lookup), not a view column. */
+  expr?: boolean;
   type: 'string' | 'int' | 'number' | 'money' | 'date' | 'enum' | 'pct';
   currency?: string;
   /** Shown by default; the rest are available in the column chooser. */
@@ -53,7 +55,13 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'descr',           label: 'Desc',                   sql: 'descr',               type: 'string', default: true,  sortable: true },
   { key: 'company',         label: 'Company',                sql: 'company',             type: 'string', default: false, sortable: true },
   { key: 'companyFull',     label: 'Company Description',    sql: 'company_full',        type: 'string', default: false, sortable: true },
-  { key: 'plant',           label: 'Plant',                  sql: 'plant',               type: 'string', default: true,  sortable: true },
+  // "CODE — Name" (26 Nov 2026: the plant name beside the code everywhere; the
+  // names come from the Data Hub plant master, dhm/plant.ts). Sorted by it, so
+  // it still orders by code first.
+  {
+    key: 'plant', label: 'Plant', expr: true, type: 'string', default: true, sortable: true,
+    sql: `(d.plant || CASE WHEN COALESCE(d.plant_name, '') NOT IN ('', d.plant) THEN ' — ' || d.plant_name ELSE '' END)`,
+  },
   { key: 'plantName',       label: 'Plant Name',             sql: 'plant_name',          type: 'string', default: false, sortable: true },
   { key: 'prQty',           label: 'PR Qty',                 sql: 'pr_qty',              type: 'number', default: true,  sortable: true },
   { key: 'uom',             label: 'UoM',                    sql: 'uom',                 type: 'string', default: false, sortable: true },
@@ -78,7 +86,7 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'sourcingAgingDays', label: 'Sourcing Aging(d)',    sql: 'sourcing_aging_days', type: 'int',    default: false, sortable: true },
   { key: 'poNo',            label: 'PO No',                  sql: 'po_no',               type: 'string', default: true,  sortable: true },
   { key: 'poItem',          label: 'PO Item',                sql: 'po_item',             type: 'int',    default: false, sortable: true },
-  { key: 'poSplit',         label: 'PO Split',               sql: 'po_split',            type: 'string', default: false, sortable: false },
+  { key: 'poSplit',         label: 'PO Split',               sql: 'po_split',            type: 'string', default: false, sortable: true },
   { key: 'poMatDesc',       label: 'PO Mat Desc',            sql: 'po_mat_desc',         type: 'string', default: false, sortable: true },
   { key: 'poQty',           label: 'PO Qty',                 sql: 'po_qty',              type: 'number', default: false, sortable: true },
   { key: 'poUom',           label: 'PO UoM',                 sql: 'po_uom',              type: 'string', default: false, sortable: true },
@@ -142,6 +150,18 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'coupaAwarded',    label: 'Coupa Awarded Supplier', sql: 'cp.awarded',          coupa: true, type: 'string', default: false, sortable: true },
   { key: 'coupaInvoiceNo',  label: 'Coupa Invoice No',       sql: 'cp.invoice_nos',      coupa: true, type: 'string', default: false, sortable: true },
   { key: 'coupaInvoiceStatus', label: 'Coupa Invoice Status', sql: 'cp.invoice_status',  coupa: true, type: 'string', default: false, sortable: true },
+  // SAP down payments on the line's PO (26 Nov 2026, the Open Items "PO not
+  // delivered - paid / DP" card): the DP amounts paid (positive rows, IDR) and
+  // the first DP's posting date, from the current version's DP snapshot (051).
+  // PO-level figures, repeated on each of the PO's lines.
+  {
+    key: 'dpAmount', label: 'DP Amount', expr: true, type: 'money', currency: 'IDR', default: false, sortable: true,
+    sql: `(SELECT sum(_dp.amount) FILTER (WHERE _dp.amount > 0) FROM ops.v_sap_dp_line _dp WHERE _dp.po_no = d.po_no)`,
+  },
+  {
+    key: 'dpDate', label: 'DP Date', expr: true, type: 'date', default: false, sortable: true,
+    sql: `(SELECT min(_dp.posting_date) FILTER (WHERE _dp.amount > 0) FROM ops.v_sap_dp_line _dp WHERE _dp.po_no = d.po_no)`,
+  },
 ];
 
 /**
@@ -207,12 +227,12 @@ const COUPA_JOIN = `
   ) cp ON true`;
 
 /** A column's SELECT/ORDER expression: the view's column, or the Coupa lookup's. */
-const colExpr = (c: DetailColumn): string => (c.coupa ? c.sql : `d.${c.sql}`);
+const colExpr = (c: DetailColumn): string => (c.coupa || c.expr ? c.sql : `d.${c.sql}`);
 
 const COLUMN_BY_KEY = new Map(DETAIL_COLUMNS.map((c) => [c.key, c]));
 
 /** Free-text search hits these columns only, so the index stays predictable. */
-const SEARCH_COLUMNS = ['pr_no', 'po_no', 'descr', 'po_mat_desc', 'supplier', 'vendor_code', 'plant', 'wbs'];
+const SEARCH_COLUMNS = ['pr_no', 'po_no', 'descr', 'po_mat_desc', 'supplier', 'vendor_code', 'plant', 'plant_name', 'wbs'];
 
 export interface DetailFilters {
   status?: string[];
@@ -509,7 +529,7 @@ export interface DetailPage {
   rows: Record<string, unknown>[];
   appliedFilters: Record<string, unknown>;
   nextCursor: string | null;
-  facets: Record<string, Array<{ value: string; count: number }>>;
+  facets: Record<string, Array<{ value: string; count: number; label?: string }>>;
 }
 
 /**
@@ -518,11 +538,12 @@ export interface DetailPage {
  * One list rather than two so a facet cannot be offered in the UI without the
  * filter that narrows it, or vice versa.
  */
-const FACETS: { name: keyof DetailFilters & string; col: string }[] = [
+const FACETS: { name: keyof DetailFilters & string; col: string; labelCol?: string }[] = [
   { name: 'status', col: 'status' },
   { name: 'matCat', col: 'mat_cat' },
   { name: 'matGroup', col: 'mat_group' },
-  { name: 'plant', col: 'plant' },
+  // Labelled "CODE — Name" (26 Nov 2026); the value stays the code.
+  { name: 'plant', col: 'plant', labelCol: 'plant_name' },
   { name: 'spendCategory', col: 'spend_category' },
   { name: 'company', col: 'company' },
   { name: 'purchOrg', col: 'purch_org' },
@@ -643,22 +664,27 @@ async function detailFacets(
   scope: readonly ScopeEntry[],
   filters: DetailFilters,
 ): Promise<DetailPage['facets']> {
-  const lists = new Array<{ value: string; count: number }[]>(FACETS.length);
+  const lists = new Array<{ value: string; count: number; label?: string }[]>(FACETS.length);
   let next = 0;
   const worker = async (): Promise<void> => {
     while (next < FACETS.length) {
       const i = next++;
-      const { name, col } = FACETS[i]!;
+      const { name, col, labelCol } = FACETS[i]!;
       const w = buildDetailWhere(versionId, scope, filters, name);
-      const f = await query<{ value: string | null; n: number }>(
-        `SELECT d.${col} AS value, count(*)::int AS n
+      const f = await query<{ value: string | null; n: number; label: string | null }>(
+        `SELECT d.${col} AS value, count(*)::int AS n,
+                ${labelCol ? `max(d.${labelCol})` : 'NULL::text'} AS label
            FROM core.v_detail d WHERE ${w.sql}
           GROUP BY 1 ORDER BY 2 DESC LIMIT 200`,
         w.params,
       );
-      const opts = f
+      const opts: { value: string; count: number; label?: string }[] = f
         .filter((x) => x.value !== null)
-        .map((x) => ({ value: x.value as string, count: x.n }));
+        .map((x) => ({
+          value: x.value as string,
+          count: x.n,
+          ...(x.label && x.label !== x.value ? { label: `${x.value} — ${x.label}` } : {}),
+        }));
       // A value the reader has already selected must appear in the list even
       // if this dataset no longer offers it - otherwise the only way to clear
       // it is the "Clear filters" button, and the tick it came from is gone

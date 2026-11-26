@@ -13,6 +13,7 @@
  */
 
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { plantLabelSql } from './plant_label.js';
 import { loadEnv } from '../../config/env.js';
 import { query, queryOne } from '../../db/client.js';
 import {
@@ -1031,14 +1032,14 @@ const COLUMNS: Record<Grain, DrillPage['columns']> = {
 const SELECTS: Record<Grain, string> = {
   pr_item: `f.pr_no AS "prNo", f.pr_item AS "prItem", f.short_text AS "shortText",
             f.material_code AS "materialCode", f.material_category AS "materialCategory",
-            f.spend_category AS "spendCategory", f.plant, f.purch_org AS "purchOrg",
+            f.spend_category AS "spendCategory", ${plantLabelSql('f.plant')} AS plant, f.purch_org AS "purchOrg",
             fp.vendor_name AS "vendorName", fp.po_no AS "poNo", f.status,
             fp.document_date AS "documentDate", fp.receipt_date AS "receiptDate",
             f.aging_days AS "agingDays", f.total_value_idr AS "totalValueIdr",
             f.total_value_usd AS "totalValueUsd",
             f.requisition_date AS "requisitionDate", f.wbs_status AS "_wbs"`,
   po_line: `f.po_no AS "poNo", f.po_item AS "poItem", f.pr_no AS "prNo", f.short_text AS "shortText",
-            f.vendor_name AS "vendorName", f.plant, f.purch_org AS "purchOrg",
+            f.vendor_name AS "vendorName", ${plantLabelSql('f.plant')} AS plant, f.purch_org AS "purchOrg",
             f.purch_group AS "purchGroup", pg.description AS "purchGroupName",
             f.spend_category AS "spendCategory",
             f.net_order_value AS "netOrderValue",

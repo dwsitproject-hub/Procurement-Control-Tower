@@ -637,6 +637,77 @@ function MappingsPanel() {
         </div>
       )}
       {msg && <p className="note" style={{ marginTop: '.5rem' }}>{msg}</p>}
+      <DhmPlantBox />
+    </div>
+  );
+}
+
+/**
+ * The Data Hub plant master (26 Nov 2026): plant names (and companies) read
+ * once a day into the plant dimension, so every page shows "CODE — Name".
+ */
+function DhmPlantBox() {
+  const [d, setD] = useState<Record<string, any> | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const load = () => api.get<Record<string, any>>('/api/v1/admin/dhm/plant').then(setD).catch((e: Error) => setMsg(e.message));
+  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!d?.inFlight) return undefined;
+    const t = setTimeout(() => { void load(); }, 4000);
+    return () => clearTimeout(t);
+  }, [d]);
+
+  if (!d) return msg ? <p className="err">{msg}</p> : null;
+  const st = d.state ?? {};
+  const m = st.mapping;
+  return (
+    <div className="panel" style={{ margin: '.8rem 0', background: 'var(--bg)' }}>
+      <h3 className="pr-tbl-h" style={{ marginTop: 0 }}>
+        🏭 <Lbl>Data Hub plant master</Lbl>{' '}
+        <span className="muted">
+          — {d.configured ? `master '${d.entity}' · every ${d.intervalHours} h${d.enabled ? '' : ' · DISABLED'}` : 'not configured'}
+          {' · '}{formatNumberSafe(d.plants?.named)} of {formatNumberSafe(d.plants?.plants)} plants named
+        </span>
+      </h3>
+      {!d.configured ? (
+        <p className="note">
+          Uses the same <code>DHM_*</code> key pair as the exchange rates, with <code>{d.entity}</code> on PCT's
+          allowlist. Until then plant names come from the seeded plant list.
+        </p>
+      ) : (
+        <>
+          <p className="note" style={{ margin: '.2rem 0' }}>
+            Last run:{' '}
+            {st.last_run_at ? (
+              <>
+                <span className={`bs ${st.last_status === 'ok' ? 'ok' : 'spdel'}`}>{st.last_status}</span>{' '}
+                {String(st.last_run_at).slice(0, 16).replace('T', ' ')} ({st.last_trigger}) · records {formatNumberSafe(st.records_seen)}
+              </>
+            ) : 'never'}
+          </p>
+          {st.last_error && <p className="err" style={{ margin: '.2rem 0' }}>{st.last_error}</p>}
+          {m && (
+            <p className="note" style={{ margin: '.2rem 0' }}>
+              Fields read: code <code>{m.code}</code>, name <code>{m.name}</code>
+              {m.company && <>, company <code>{m.company}</code></>}
+              {m.unused?.length > 0 && <> · not used: {m.unused.join(', ')}</>}
+            </p>
+          )}
+          <button
+            className="dt-btn"
+            disabled={d.inFlight}
+            onClick={() => {
+              setMsg(null);
+              api.post<{ outcome: string }>('/api/v1/admin/dhm/plant/sync')
+                .then(() => setTimeout(() => { void load(); }, 800))
+                .catch((e: Error) => setMsg(e.message));
+            }}
+          >
+            {d.inFlight ? 'Syncing…' : 'Sync now'}
+          </button>
+          {msg && <span className="err" style={{ marginLeft: '.5rem' }}>{msg}</span>}
+        </>
+      )}
     </div>
   );
 }

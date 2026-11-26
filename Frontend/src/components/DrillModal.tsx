@@ -166,7 +166,7 @@ export function DrillModal({
           <span className="spacer" />
           <FloatControls onClose={onClose} />
           {page && !error && page.totalCount > 0 && (
-            <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} />
+            <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} onReset={layout.reset} />
           )}
           {page && !error && page.totalCount > 0 && (
             <button

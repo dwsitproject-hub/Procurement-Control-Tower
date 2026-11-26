@@ -99,6 +99,13 @@ export const EnvSchema = z
     INGEST_FILE_SETTLE_SECONDS: z.coerce.number().int().min(0).default(30),
     INGEST_STALL_CYCLES: z.coerce.number().int().positive().default(4),
     INGEST_AUTOPOLL_ENABLED: bool.default(true),
+    // Ingest isolation (26 Nov 2026, the production wedge): every ingest runs in
+    // a worker thread with its own heap, so the API keeps answering whatever
+    // the parse and transform cost. false = in-process, as before.
+    INGEST_IN_WORKER: bool.default(true),
+    // The background jobs (share pickup, Coupa and Data Hub syncs) wait this
+    // long after a start, so they do not pile onto the start-up cache warm.
+    BACKGROUND_START_DELAY_SECONDS: z.coerce.number().int().min(0).max(3600).default(180),
 
     // Coupa API (TECH_04). All optional: without them the poller stays off and
     // the Admin panel says "not configured". Staging vs production is only here.
@@ -126,6 +133,9 @@ export const EnvSchema = z
     DHM_PRIVATE_KEY: z.string().optional(),
     DHM_FX_ENTITY: z.string().regex(/^[a-z][a-z0-9_]*$/).default('exchange_rate'),
     DHM_FX_SYNC_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
+    // The scheduled Data Hub FX sync can be switched off without a code change
+    // (26 Nov 2026); manual syncs from the Admin page still work.
+    DHM_FX_ENABLED: bool.default(true),
 
     SMTP_HOST: z.string().default('mailhog'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),

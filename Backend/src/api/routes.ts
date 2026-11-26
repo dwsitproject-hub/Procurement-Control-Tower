@@ -43,10 +43,11 @@ import {
   DrillTokenError, executeDrill, issueDrillToken, openDrillToken, type DrillPredicate,
 } from '../modules/analytics/drill.js';
 import { CHART_BY_ID, CHART_META } from '../modules/analytics/charts.js';
-import { getFindings, publishVersion, runIngest } from '../modules/ingest/pipeline.js';
-import { ManualUploadSource, type DiscoveredFile } from '../modules/ingest/sources.js';
+import { getFindings, publishVersion } from '../modules/ingest/pipeline.js';
+import { type DiscoveredFile } from '../modules/ingest/sources.js';
+import { IngestWorkerError, runIngestIsolated } from '../modules/ingest/isolated.js';
 import {
-  INGEST_LOCK_KEY, PerFeedShareSource, archiveAfterRun, diagnoseMissing, loadShareConfig, withIngestLock,
+  INGEST_LOCK_KEY, diagnoseMissing, withIngestLock,
 } from '../modules/ingest/share_poller.js';
 import { archiveSummary } from '../modules/ingest/archive.js';
 import { notify } from '../modules/notify/mailer.js';
@@ -93,6 +94,11 @@ declare global {
       requestId?: string;
     }
   }
+}
+
+/** A failed ingest thread, as a problem the operator can read (26 Nov 2026). */
+function asIngestProblem(e: unknown): unknown {
+  return e instanceof IngestWorkerError ? new HttpProblem(500, 'ingest-failed', 'The load failed', e.message) : e;
 }
 
 export class HttpProblem extends Error {
@@ -1429,15 +1435,15 @@ export function buildRouter(): Router {
   r.post('/api/v1/ingest/sync', role('steward', async (req, res, ctx) => {
     // Same per-feed folders/patterns the scheduler uses, so "Sync now" and the
     // scheduled pickup can never read different files.
-    const shareCfg = await loadShareConfig();
-    const source = new PerFeedShareSource(shareCfg);
+    // The same ingest job the scheduled pickup runs - same folders, patterns
+    // and after-run filing - in a worker thread so it never blocks the API
+    // (isolated.ts, 26 Nov 2026).
     const force = Boolean((req.body ?? {}).force);
-    const out = await withIngestLock(() => runIngest({ source, submittedBy: ctx.principal.userId, autoPublish: true, force }));
-    if (out === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
-    // The same after-run filing the scheduled pickup does. Sharing one helper is
-    // the point: these two paths already share the source so they cannot read
-    // different files, and they must not diverge on what happens next either.
-    const archive = await archiveAfterRun(source, out.outcome, 'batchId' in out ? out.batchId : null, shareCfg);
+    const ran = await withIngestLock(() => runIngestIsolated(
+      { kind: 'share', submittedBy: ctx.principal.userId, force }, 'sync now'))
+      .catch((e) => { throw asIngestProblem(e); });
+    if (ran === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
+    const { out, archive, lastScan } = ran;
     await recordAudit({
       action: 'ingest.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
       outcome: out.outcome === 'failed' ? 'failure' : 'success',
@@ -1457,10 +1463,10 @@ export function buildRouter(): Router {
         // reproduce a failure would produce a LESS informative mail than the
         // one being investigated.
         missingReasons: 'missing' in out
-          ? diagnoseMissing(out.missing, source.lastScan, out.filesRead)
+          ? diagnoseMissing(out.missing, lastScan ?? [], out.filesRead)
           : undefined,
         batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
-        archive: archiveSummary(archive),
+        archive: archive ? archiveSummary(archive) : undefined,
       });
       await notify('ingest.failure', m.subject, m.body);
     }
@@ -1536,13 +1542,16 @@ export function buildRouter(): Router {
         });
       }
 
-      const out = await withIngestLock(() => runIngest({
-        source: new ManualUploadSource(staged),
+      // In a worker thread, like every ingest (isolated.ts, 26 Nov 2026).
+      const ran = await withIngestLock(() => runIngestIsolated({
+        kind: 'manual',
+        files: staged,
         submittedBy: ctx.principal.userId,
         // Manual batches wait for confirmation; automatic batches publish at once.
         autoPublish: req.query.publish === 'true',
-      }));
-      if (out === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
+      }, 'upload')).catch((e) => { throw asIngestProblem(e); });
+      if (ran === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
+      const out = ran.out;
 
       await recordAudit({
         action: 'ingest.upload', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,

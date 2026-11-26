@@ -878,6 +878,88 @@ Worth asking SAP for (it improves the figures, nothing breaks without it):
   and a settled DP ties to its clearing.
 - **Include every open DP item whatever its posting date**, so the deductions-only POs get their DP.
 
+### 10s. Release of 26 Nov 2026 — fix for the 25 Nov API wedge
+
+**What happened (25 Nov 2026).** About 60 seconds after every start, `pct-api` stopped answering. It
+held 100% CPU and 2.28 GB of memory, kept its port open, and wrote nothing more to its log.
+
+The heap was pinned at its 2 GB limit (`NODE_OPTIONS=--max-old-space-size=2048`), so V8 spent all its
+time in garbage collection. That is a hang, not a crash: no exit, no restart, and a port probe still
+connects.
+
+**The cause.** The scheduled SAP folder pickup parsed and transformed the exports **on the API's own
+thread**. Reproduced locally with the 25 Sep exports under the same 2 GB cap, one full ingest:
+- peaked at **1.78 GB**;
+- blocked the API for up to **10.8 s at a stretch** (31 s in total).
+
+Production has more merged history and runs the start-up cache warm alongside, which is enough to
+cross 2 GB.
+
+**Why it repeated on every restart.** A slot was marked done only **after** its run finished. A run
+that never finished left the slot due, and the first poller tick after every start (T+60 s) fired it
+again. The DHM FX sync also runs at T+60 s and logs a line straight away, which is why it looked
+like the culprit. It completes normally and is not the cause.
+
+**Confirm it on production** (read-only, ApsaraDB DMS):
+
+```sql
+-- the pickup slots of 25-26 Nov: missing or never-finished rows confirm the loop
+SELECT feed, slot, ran_on, ran_at, outcome FROM ops.ingest_slot_run
+ WHERE ran_on >= DATE '2026-11-25' ORDER BY ran_at;
+-- batches the wedged runs left behind (state stuck in SCANNING / PARSING / ...)
+SELECT id, source_kind, state, started_at, finished_at FROM ingest.batch ORDER BY id DESC LIMIT 8;
+```
+
+**Until this release is deployed, pause the scheduled pickup.** Run this in DMS, then `docker restart
+pct-api`. Do not use Sync now or Upload until the release is in, because both run the same in-process
+ingest:
+
+```sql
+INSERT INTO app.rule_config (rule_key, rule_value, effective_from, note)
+VALUES ('ingest.autopoll_enabled', 'false'::jsonb, CURRENT_DATE, 'paused for the 25 Nov 2026 wedge - re-enable after 10s');
+```
+
+After the release, switch the schedule back on in Admin → SAP Data Upload → SAP Data Sync.
+
+**What changed:**
+- **Every SAP load runs in a worker thread:** scheduled pickup, Sync now and upload. It has its own heap
+  and its own database pool. Measured locally on the same exports:
+  - the API answered every health check within 0.05 s throughout an 88 s ingest (before: 7–11 s
+    stalls);
+  - an ingest that runs out of memory ends only its worker. The API keeps serving and answers "The
+    load ran out of memory and was stopped; the dashboard is unaffected", and a stranded batch is
+    marked FAILED.
+  - The output is identical: same rows, totals and per-line hash as the in-process run.
+  - `INGEST_IN_WORKER=false` is an emergency fallback to the old behaviour.
+- **Less memory per ingest:** workbooks are read in SheetJS dense mode (PO List 669 → 345 MB), and each
+  file's rows are released once staged. An in-process ingest now peaks at 1.04 GB instead of 1.78 GB.
+- **A pickup slot is marked "running" before the run.** A run that dies no longer re-fires on every
+  restart; its files wait for the next slot or Sync now. A failure the process lives through still
+  unmarks the slot for the back-off retry.
+- **The background jobs wait 180 s after a start** (`BACKGROUND_START_DELAY_SECONDS`): folder pickup,
+  Coupa sync and DHM FX sync. They no longer pile onto the start-up cache warm.
+- **Watchdog:** a log line when the event loop was blocked for more than 2 s, or the heap passes 85%,
+  naming the job that was running. For example: `watchdog: event loop blocked up to 8.3 s … (heap
+  440/2096 MB; running: upload)`. Pickups also log `share sync: starting […]` and
+  `ingest worker: started (…), heap limit … MB`.
+- **`DHM_FX_ENABLED=false`** switches off the scheduled Data Hub sync without removing its keys.
+
+**Deploy:** the usual §10 BE update, with no FE change, no migration and no Rebuild. This release
+**also changes `deploy/production/be.compose.yml`**:
+- the `api` service gets `mem_limit: 5g` (the API's 2 GB heap, plus the worker's own 2 GB, plus native
+  memory).
+
+Carry that line into `/opt/pct/compose.yml` by hand (§10 step 5), then apply it with
+`docker compose -f /opt/pct/compose.yml up -d --force-recreate api`. A plain `docker restart` keeps the
+old container configuration.
+
+**On the incident report's other findings:**
+- **`NODE_ENV=staging` is intentional** while the site is plain HTTP; the template explains why (§12).
+  The database, cache and features are chosen by their own variables, not by `NODE_ENV`.
+- **`DHM_BASE_URL` pointing at the FE host** (172.28.80.50:2001) is the production Data Hub, which is
+  correct for production.
+- **An autoheal container would not have helped:** each restart re-fired the slot and wedged again.
+
 ## 11. Rollback
 
 **On the affected server:**

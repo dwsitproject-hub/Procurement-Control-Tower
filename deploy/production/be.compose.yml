@@ -44,6 +44,11 @@ services:
     # on a shared host (architecture review).
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     restart: unless-stopped
+    # Bounded (26 Nov 2026, after the 25 Nov wedge): the API's 2 GB heap plus
+    # the SAP ingest's own 2 GB heap in its worker thread, plus native memory.
+    # A runaway is now killed and restarted - visible - instead of taking the
+    # 16 GB host or hanging silently in garbage collection.
+    mem_limit: 5g
     depends_on:
       redis:
         condition: service_healthy

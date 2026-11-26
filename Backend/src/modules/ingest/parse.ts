@@ -212,6 +212,11 @@ export function readSheetFromBuffer(buf: Buffer | Uint8Array): SheetData {
 
   const wb = XLSX.read(buf, {
     type: 'buffer',
+    // Dense cell storage (26 Nov 2026): one array per row instead of an object
+    // keyed "A1", "B1"... - half the heap and faster on the PO List (669 -> 345
+    // MB for 64k rows). The default sparse map, held for six exports at once,
+    // took a full ingest to the API's 2 GB heap limit.
+    dense: true,
     // Only the first worksheet is ever used; do not inflate the others.
     sheets: 0,
     cellDates: false,

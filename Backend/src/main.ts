@@ -7,6 +7,7 @@
  */
 
 import { warmDefaultView } from './modules/analytics/warm.js';
+import { startWatchdog, trackJob } from './modules/ops/watchdog.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -119,8 +120,12 @@ async function main(): Promise<void> {
   // Precompute the default view of the version being served, so the first
   // visitor after a restart does not pay for every live query.
   setTimeout(() => {
-    void warmDefaultView((m) => process.stdout.write(`${m}\n`)).catch(() => undefined);
+    void trackJob('cache warm', warmDefaultView((m) => process.stdout.write(`${m}\n`))).catch(() => undefined);
   }, 5_000).unref();
+
+  // Event-loop and heap watchdog (26 Nov 2026): one log line when the loop was
+  // blocked for more than 2 s or the heap passes 85%, naming the job running.
+  startWatchdog((m) => process.stdout.write(`${m}\n`));
 
   const server = app.listen(env.PORT, () => {
     process.stdout.write(

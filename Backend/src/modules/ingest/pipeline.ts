@@ -27,6 +27,7 @@
  */
 
 import { warmDefaultView } from '../analytics/warm.js';
+import { isMainThread } from 'node:worker_threads';
 import { FEED_LABELS, type BatchState, type Feed } from '@pct/contracts';
 import { exec, insertMany, pool, query, queryOne, transaction } from '../../db/client.js';
 import { loadRuleSnapshot, type RuleSnapshot } from '../admin/rules.js';
@@ -209,6 +210,8 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     sheetName: string;
     headers: string[];
     rows: unknown[][];
+    /** rows.length, kept once the rows themselves are released (staged). */
+    rowCount: number;
     cls: ReturnType<typeof classifyHeaders>;
   }
 
@@ -234,6 +237,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       sheetName: sheet.sheetName,
       headers: sheet.headers,
       rows: sheet.rows,
+      rowCount: sheet.rows.length,
       cls,
     });
   }
@@ -468,6 +472,10 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       } finally {
         client.release();
       }
+      // Staged: the file's rows now live in staging.raw_row, and nothing below
+      // reads them from memory again. Released here so the six exports are not
+      // all held at once through merge, transform and mart (26 Nov 2026).
+      p.rows = [];
     }
     timings.parsing = (Date.now() - parseStart) / 1000;
 
@@ -479,9 +487,9 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       return {
         feed: feed ?? '(unrecognised)',
         filename: p.displayName,
-        rowsRead: p.rows.length,
+        rowsRead: p.rowCount,
         rowsWithError: withError,
-        rowsAccepted: feed === null ? 0 : p.rows.length - withError,
+        rowsAccepted: feed === null ? 0 : p.rowCount - withError,
         matched: feed !== null,
       };
     });
@@ -904,6 +912,9 @@ export async function publishVersion(versionId: number, userId: string | null): 
 
 /** Precompute the default view of the newly published version, in the background. */
 function scheduleWarm(): void {
+  // Inside the ingest worker (isolated.ts) the cache is not the API's: the
+  // parent warms its own once the worker reports the publish.
+  if (!isMainThread) return;
   void warmDefaultView((m) => process.stdout.write(`${m}\n`)).catch(() => undefined);
 }
 

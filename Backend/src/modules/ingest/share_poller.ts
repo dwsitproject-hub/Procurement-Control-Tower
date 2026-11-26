@@ -28,7 +28,8 @@ import { pool, query } from '../../db/client.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import { loadEnv } from '../../config/env.js';
 import { insideStorage, resolveStorage, storageRoots } from '../../config/storage.js';
-import { runIngest } from './pipeline.js';
+import { runIngestIsolated } from './isolated.js';
+import { trackJob } from '../ops/watchdog.js';
 import {
   archiveBundle, archiveSummary, fileRowErrors, recordFiling,
   type ArchiveConfig, type ArchiveReport,
@@ -536,9 +537,9 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
     );
     if (!lock.rows[0]?.ok) return { outcome: 'locked' };
 
-    const source = new PerFeedShareSource(cfg);
-    const out = await runIngest({ source, autoPublish: true });
-    const archive = await archiveAfterRun(source, out.outcome, 'batchId' in out ? out.batchId : null, cfg);
+    // In a worker thread (isolated.ts): the parse and transform must never
+    // block the API (production wedge, 25 Nov 2026).
+    const { out, archive, lastScan } = await runIngestIsolated({ kind: 'share' }, 'share pickup');
 
     const base = 'missing' in out ? `missing ${out.missing.join(',')}`
       : 'datasetVersionId' in out ? `v${out.datasetVersionId}`
@@ -547,11 +548,11 @@ export async function runShareSync(_trigger: 'scheduled' | 'manual'): Promise<Sh
       : 'filedBatchId' in out
         ? `filed by batch ${out.filedBatchId}, ${out.hoursAgo}h ago`
         : undefined;
-    const arch = archiveSummary(archive);
+    const arch = archive ? archiveSummary(archive) : undefined;
     return {
       outcome: out.outcome,
       missingReasons: 'missing' in out
-        ? diagnoseMissing(out.missing, source.lastScan, out.filesRead)
+        ? diagnoseMissing(out.missing, lastScan ?? [], out.filesRead)
         : undefined,
       detail: [base, arch].filter(Boolean).join(' · ') || undefined,
       batchId: 'batchId' in out && out.batchId !== null ? out.batchId : undefined,
@@ -589,6 +590,15 @@ export async function recentSlotRuns(limit = 20): Promise<Record<string, unknown
  * fired today, assemble the bundle and ingest once. All settings are re-read
  * each tick, so changes apply without a restart.
  */
+async function unmark(marked: { feed: Feed; slot: number; date: string }[]): Promise<void> {
+  for (const m of marked) {
+    await query(
+      `DELETE FROM ops.ingest_slot_run WHERE feed = $1 AND slot = $2 AND ran_on = $3 AND outcome = 'running'`,
+      [m.feed, m.slot, m.date],
+    );
+  }
+}
+
 export function startSharePoller(log: (msg: string) => void): void {
   if (pollerStarted) return;
   pollerStarted = true;
@@ -601,16 +611,44 @@ export function startSharePoller(log: (msg: string) => void): void {
   setInterval(() => {
     void (async () => {
       if (Date.now() < nextTryAt) return;
+      // Not in the first minutes after a start: the cache warm runs then
+      // (BACKGROUND_START_DELAY_SECONDS, 26 Nov 2026).
+      if (process.uptime() < env.BACKGROUND_START_DELAY_SECONDS) return;
+      let marked: { feed: Feed; slot: number; date: string }[] = [];
       try {
         const cfg = await loadShareConfig();
         if (!cfg.enabled) return;
         const due = await dueSlots(cfg);
         if (due.length === 0) return;
 
-        const r = await runShareSync('scheduled');
-        // 'locked' means another run holds the lock; leave the slots unmarked
-        // so the next tick retries rather than losing the pickup.
-        if (r.outcome === 'locked') return;
+        /*
+         * The slots are marked BEFORE the run (26 Nov 2026). They used to be
+         * marked only after it, so a run that never finished - the process
+         * wedged, was restarted - left its slot due, and every start fired it
+         * again on the first tick: the production wedge repeated a minute
+         * after each restart. A run that dies now leaves 'running'; the files
+         * stay in the folder for the next slot or Sync now. A run that merely
+         * fails (an exception below, or 'locked') unmarks them for the retry.
+         */
+        const day = nowInZone(cfg.timezone).date;
+        marked = due.map((d) => ({ feed: d.feed, slot: d.slot, date: day }));
+        for (const m of marked) {
+          await query(
+            `INSERT INTO ops.ingest_slot_run (feed, slot, ran_on, outcome, detail)
+             VALUES ($1, $2, $3, 'running', 'started; a run that never finishes stays here')
+             ON CONFLICT (feed, slot, ran_on) DO NOTHING`,
+            [m.feed, m.slot, m.date],
+          );
+        }
+        log(`share sync: starting [${due.map((d) => `${d.feed}@${d.hhmm}`).join(' ')}]`);
+
+        const r = await trackJob('share sync', runShareSync('scheduled'));
+        // 'locked' means another run holds the lock; unmark the slots so the
+        // next tick retries rather than losing the pickup.
+        if (r.outcome === 'locked') {
+          await unmark(marked);
+          return;
+        }
 
         const label = due.map((d) => `${d.feed}@${d.hhmm}`).join(' ');
 
@@ -654,6 +692,8 @@ export function startSharePoller(log: (msg: string) => void): void {
         errorStreak = 0;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        // A failure the process lived through: unmark, so the back-off retries.
+        await unmark(marked).catch(() => undefined);
         errorStreak += 1;
         const waitMin = Math.min(2 ** errorStreak, 30);
         nextTryAt = Date.now() + waitMin * 60_000;

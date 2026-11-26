@@ -22,6 +22,7 @@
 
 import { pool, query, queryOne } from '../../db/client.js';
 import { loadEnv } from '../../config/env.js';
+import { trackJob } from '../ops/watchdog.js';
 import { DhmError, dhmConfigured, dhmGet, dhmHost } from './client.js';
 
 const env = loadEnv();
@@ -439,14 +440,16 @@ let lastRunAt = 0;
 
 /** Checks every minute whether a run is due (DHM_FX_SYNC_MINUTES apart). */
 export function startDhmFxPoller(log: (msg: string) => void): void {
-  if (pollerStarted || !dhmConfigured()) return;
+  if (pollerStarted || !dhmConfigured() || !env.DHM_FX_ENABLED) return;
   pollerStarted = true;
   setInterval(() => {
     void (async () => {
+      // Not in the first minutes after a start (26 Nov 2026).
+      if (process.uptime() < env.BACKGROUND_START_DELAY_SECONDS) return;
       if (Date.now() - lastRunAt < env.DHM_FX_SYNC_MINUTES * 60_000) return;
       lastRunAt = Date.now();
       try {
-        const r = await runDhmFxSync('scheduled');
+        const r = await trackJob('dhm fx sync', runDhmFxSync('scheduled'));
         log(`dhm fx sync (${r.outcome}): ${r.records} records, ${r.slotsWritten} rates written, ${r.slotsRemoved} removed${r.error ? ` - ${r.error}` : ''}`);
       } catch (e) {
         log(`dhm fx poller error: ${e instanceof Error ? e.message : String(e)}`);

@@ -15,6 +15,8 @@
  */
 
 import { pool, query, queryOne } from '../../db/client.js';
+import { loadEnv } from '../../config/env.js';
+import { trackJob } from '../ops/watchdog.js';
 import { loadRuleSnapshot } from '../admin/rules.js';
 import { notify } from '../notify/mailer.js';
 import { coupaErrorBody } from '../notify/messages.js';
@@ -605,12 +607,14 @@ export function startCoupaPoller(log: (msg: string) => void): void {
   setInterval(() => {
     void (async () => {
       try {
+        // Not in the first minutes after a start (26 Nov 2026).
+        if (process.uptime() < loadEnv().BACKGROUND_START_DELAY_SECONDS) return;
         const rules = await loadRuleSnapshot();
         if (rules['coupa.sync_enabled'] !== true && rules['coupa.sync_enabled'] !== 'true') return;
         const interval = Math.min(Math.max(Number(rules['coupa.sync_interval_minutes'] ?? 10), 5), 60);
         if (Date.now() - lastRunAt < interval * 60_000) return;
         lastRunAt = Date.now();
-        const r = await runCoupaSync('scheduled');
+        const r = await trackJob('coupa sync', runCoupaSync('scheduled'));
         log(`coupa sync (${r.outcome}): ${r.objects.map((o) => `${o.object}=${o.rowsUpserted}`).join(' ')}`);
         // Only errors are worth an email here (user decision 6 Aug 2026): a
         // clean incremental sync happens every few minutes and would be noise.

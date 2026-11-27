@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollFrame } from './ScrollFrame';
 import { SortButton, ToolTable, type SortState, type ToolTableColumn } from './TableTools';
 import {
@@ -122,6 +122,24 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
    * null is the default ranking, spend descending.
    */
   const [sort, setSort] = useState<SortState>(null);
+  /**
+   * Item Category filter (27 Nov 2026) for Top vendors and Vendors × months:
+   * the PO line's spend category, on top of the filter bar. A vendor opened
+   * from the filtered list opens on the same categories, so its popup agrees
+   * with the row.
+   */
+  const [cats, setCats] = useState<string[]>([]);
+  const [catOptions, setCatOptions] = useState<{ value: string; label: string }[]>([]);
+  useEffect(() => {
+    api.get<{ spendCategory?: { value: string; label: string }[] }>('/api/v1/filters')
+      .then((r) => setCatOptions(r.spendCategory ?? []))
+      .catch(() => setCatOptions([]));
+  }, []);
+  const pageFilter = useMemo(() => {
+    const q = new URLSearchParams(filterQuery);
+    if (cats.length > 0) q.set('spendCategory', cats.join(','));
+    return q.toString();
+  }, [filterQuery, cats]);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
@@ -129,7 +147,7 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
   }, [search]);
 
   // A new search, page size, sort or filter restarts from the first page.
-  useEffect(() => { setPage(0); }, [debounced, pageSize, sort, filterQuery]);
+  useEffect(() => { setPage(0); }, [debounced, pageSize, sort, pageFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,7 +155,7 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
     api
       .get<{ totalVendors: number; rows: VendorRow[] }>(
         `/api/v1/entity/vendors?limit=${pageSize}&offset=${page * pageSize}${debounced ? `&q=${encodeURIComponent(debounced)}` : ''}`
-          + `${sort ? `&sort=${sort.key}&dir=${sort.dir}` : ''}${filterQuery ? `&${filterQuery}` : ''}`,
+          + `${sort ? `&sort=${sort.key}&dir=${sort.dir}` : ''}${pageFilter ? `&${pageFilter}` : ''}`,
       )
       .then((d) => {
         if (cancelled) return;
@@ -149,7 +167,7 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
     return () => {
       cancelled = true;
     };
-  }, [debounced, page, pageSize, sort, filterQuery]);
+  }, [debounced, page, pageSize, sort, pageFilter]);
 
   return (
     <>
@@ -170,13 +188,17 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
           onChange={(e) => setSearch(e.target.value)}
           aria-label="Search vendors"
         />
+        <FilterDropdown label="Item Category" options={catOptions} selected={cats} onChange={setCats} />
+        {cats.length > 0 && (
+          <button className="gf-btn gf-clear" onClick={() => setCats([])}>Clear</button>
+        )}
         <span className="count">
           {formatNumber(total)} vendors · STO excluded
         </span>
       </div>
 
       {view === 'pivot' ? (
-        <VendorPivot search={debounced} filterQuery={filterQuery} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
+        <VendorPivot search={debounced} filterQuery={pageFilter} onOpenVendor={setOpen} onOpenMaterial={setOpenMaterial} />
       ) : loading ? (
         <div className="center-msg"><div className="spinner" />Loading vendors…</div>
       ) : (
@@ -243,8 +265,8 @@ export function VendorsTab({ onDrill, filterQuery = '', currency = 'USD' }: {
       <VendorOtdBars onOpenVendor={setOpen} />
     </div>
 
-    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} filterQuery={filterQuery} />}
-    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} currency={currency} filterQuery={filterQuery} />}
+    {open && <VendorModal code={open} onClose={() => setOpen(null)} onDrill={onDrill} currency={currency} filterQuery={pageFilter} />}
+    {openMaterial && <MaterialModal code={openMaterial} onClose={() => setOpenMaterial(null)} onDrill={onDrill} currency={currency} filterQuery={pageFilter} />}
     </>
   );
 }
@@ -292,7 +314,7 @@ function VendorPivot({
       return;
     }
     setExpanded((c) => ({ ...c, [code]: 'loading' }));
-    api.get<{ materials: Record<string, any>[] }>(`/api/v1/entity/vendor-pivot/${encodeURIComponent(code)}`)
+    api.get<{ materials: Record<string, any>[] }>(`/api/v1/entity/vendor-pivot/${encodeURIComponent(code)}${filterQuery ? `?${filterQuery}` : ''}`)
       .then((r) => setExpanded((c) => ({ ...c, [code]: r.materials })))
       .catch(() => setExpanded((c) => ({ ...c, [code]: [] })));
   };

@@ -177,6 +177,8 @@ export interface Kpi {
   unit: string;
   currencyBasis: string | null;
   severity: string | null;
+  /** What the dot's colour is measured against; absent for a figure with no target. */
+  threshold?: { worseWhen: 'high' | 'low'; warn: number; crit: number } | null;
   statusReason: string | null;
   detail: Record<string, unknown> | null;
   drillToken: string | null;

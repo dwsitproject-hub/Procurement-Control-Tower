@@ -52,6 +52,7 @@ import {
 import { archiveSummary } from '../modules/ingest/archive.js';
 import { notify } from '../modules/notify/mailer.js';
 import { ingestFailureBody } from '../modules/notify/messages.js';
+import { kpiThreshold } from '../modules/analytics/mart_parity.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
 import {
   queryDetail, DETAIL_COLUMNS, DETAIL_QUERY_PARAMS, parseDetailQuery,
@@ -739,6 +740,7 @@ export function buildRouter(): Router {
             unit: k.unit,
             currencyBasis: k.currencyBasis,
             severity: k.severity,
+            threshold: kpiThreshold(k.kpiId),
             statusReason: k.statusReason,
             detail: k.detail,
             drillToken:
@@ -784,6 +786,7 @@ export function buildRouter(): Router {
         unit: k.unit,
         currencyBasis: k.currency_basis,
         severity: k.severity,
+        threshold: kpiThreshold(k.kpi_id),
         statusReason: k.status_reason,
         detail: k.detail,
         // A disabled KPI gets no drill token: there is nothing behind it.

@@ -468,6 +468,8 @@ export async function globalFilterOptions(versionId: number): Promise<{
   purchOrg: { value: string; label: string }[];
   monthKey: { value: string; label: string }[];
   year: { value: string; label: string }[];
+  /** The PO lines' item (spend) categories (27 Nov 2026, Vendor 360's filter). */
+  spendCategory: { value: string; label: string }[];
 }> {
   const co = await pool.query<{ value: string; label: string }>(
     `SELECT DISTINCT pol.company_code AS value,
@@ -517,5 +519,14 @@ export async function globalFilterOptions(versionId: number): Promise<{
      ) t ORDER BY 1`,
     [versionId],
   );
-  return { company: co.rows, plant: pl.rows, purchOrg: po.rows, monthKey: mo.rows, year: yr.rows };
+  const sc = await pool.query<{ value: string; label: string }>(
+    `SELECT DISTINCT spend_category AS value, spend_category AS label
+       FROM core.fact_po_line
+      WHERE dataset_version_id = $1 AND spend_category IS NOT NULL AND spend_category <> '' ORDER BY 1`,
+    [versionId],
+  );
+  return {
+    company: co.rows, plant: pl.rows, purchOrg: po.rows, monthKey: mo.rows, year: yr.rows,
+    spendCategory: sc.rows,
+  };
 }

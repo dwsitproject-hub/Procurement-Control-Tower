@@ -645,8 +645,14 @@ export async function vendorPivotMaterials(
   versionId: number,
   scope: readonly ScopeEntry[],
   vendorCode: string,
+  /** The page's filters, Item Category included (27 Nov 2026), so a row expands to what it counted. */
+  filter: GlobalFilter = {},
 ): Promise<Record<string, unknown>[]> {
-  const { where, params } = scoped(versionId, scope, 'pol');
+  const s0 = scoped(versionId, scope, 'pol');
+  const params = s0.params;
+  const gfc = buildFilterClause(filter, 'po_line', 'pol.', params.length + 1);
+  params.push(...gfc.params);
+  const where = `${s0.where}${gfc.sql}`;
   params.push(vendorCode);
   const rows = await query<{
     code: string | null; descr: string | null; mk: string; usd: number | null; unrated: number;

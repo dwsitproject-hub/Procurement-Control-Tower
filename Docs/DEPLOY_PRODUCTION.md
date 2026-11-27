@@ -1072,6 +1072,39 @@ ask infra for more RAM there (or fewer co-tenants). A recompute is lighter but n
 
 **Deploy:** the usual §10 BE and FE updates, with no migration, no new setting and no Rebuild.
 
+### 10w. Release of 27 Nov 2026 — requisition flow chart, card dots, sourcing competition, vendor category filter
+
+**What changed:**
+- **Requisition flow chart** ("PR Inflow vs PR Outflow", chart `pr_by_month`):
+  - "Newly raised" now stacks on top of the outstanding bands, so one column is everything open in the
+    month; "Became PO" and "Cancelled" stay as the step down beside it;
+  - "Brought forward" is renamed "Outstanding" everywhere;
+  - the six age bands take the colours of "Outstanding PR by Days/Months/Quarters/Years", green for
+    under 7 days through to dark red for over 150 (shared in `lib/ageBandColors.ts`);
+  - the chart is also on the **Executive Summary**, after the outstanding-PR panel.
+- **PR Analysis:**
+  - the "PR Approval & Value" card drops "Avg PR line value" and is now "PR Approval";
+  - a legend above the cards says what the dot means: green within target, amber past the warning
+    threshold, red past the critical threshold, grey no target;
+  - hovering a card names its own thresholds, e.g. "green below 90 d, amber from 90 d, red from 180 d";
+  - on every page, a card without a target now has a grey dot. It used to take a decorative colour
+    hashed from its id, whose green and orange read like "on target" and "warning".
+- **Sourcing:**
+  - "Sourcing events" also shows how many events sent to suppliers (not draft, template or test) had
+    fewer than 3 different suppliers bidding;
+  - "Bid award rate" also shows how many awarded bids had a cheaper bid on the same event, in the same
+    currency. This compares whole-bid totals, so a supplier who quoted fewer lines can look cheaper;
+  - both figures open their rows: the events with a "Suppliers bidding" column, and the bids with the
+    lowest bid, its bidder and the % above it.
+- **Vendor 360:**
+  - an **Item Category** filter (the PO line's spend category) applies to Top vendors and to
+    Vendors × months, including the expanded material rows;
+  - a vendor or material opened from the filtered list opens on the same categories.
+
+**Deploy:** the usual §10 BE and FE updates, with no migration and no new setting. Run **Admin → SAP Data
+Sync → Rebuild** once so the precomputed flow chart's series names read "Outstanding". The chart already
+shows the new wording, because it builds the band labels itself.
+
 ## 11. Rollback
 
 **On the affected server:**

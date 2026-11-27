@@ -24,7 +24,11 @@ ChartJS.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip,
 const M = (v: unknown) =>
   v === null || v === undefined ? DASH : `${(Number(v) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })} M`;
 
-function Kpi({ v, label, sub, onClick }: { v: unknown; label: string; sub?: string; onClick?: () => void }) {
+function Kpi({ v, label, sub, onClick, extra }: {
+  v: unknown; label: string; sub?: string; onClick?: () => void;
+  /** A second, separately clickable figure on the card (27 Nov 2026). */
+  extra?: { text: string; title: string; onClick: () => void };
+}) {
   const body = (
     <>
       <div className="v">{v === null || v === undefined ? DASH : String(v)}</div>
@@ -32,6 +36,18 @@ function Kpi({ v, label, sub, onClick }: { v: unknown; label: string; sub?: stri
       {sub && <div className="s">{sub}</div>}
     </>
   );
+  if (extra) {
+    return (
+      <div className="kpi kpi-split" data-sev="neutral">
+        <button type="button" className="kpi-main" onClick={onClick} disabled={!onClick} title="Click to see the rows behind this figure">
+          {body}
+        </button>
+        <button type="button" className="kpi-extra" onClick={extra.onClick} title={extra.title}>
+          {extra.text}
+        </button>
+      </div>
+    );
+  }
   // Clickable figures open the rows they count (21 Nov 2026, Sourcing).
   return onClick ? (
     <button className="kpi" data-sev="neutral" onClick={onClick} title="Click to see the rows behind this figure">
@@ -215,7 +231,12 @@ export function CoupaSourcingTab() {
           bids per event are one card; every other figure opens its rows. */}
       <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
         <Kpi v={formatNumber(Number(k.events ?? 0))} label="Sourcing events" sub={vtype ? `with a ${vtype === 'local' ? 'Local' : 'Import'} bid` : 'excluding templates'}
-          onClick={() => open('events', 'Sourcing events')} />
+          onClick={() => open('events', 'Sourcing events')}
+          extra={{
+            text: `${formatNumber(Number(k.few_bidders ?? 0))} with fewer than 3 participating suppliers`,
+            title: `Of the ${formatNumber(Number(k.sent_events ?? 0))} events sent to suppliers (not draft, template or test), those where fewer than 3 different suppliers submitted a bid. Click for the events.`,
+            onClick: () => open('few_bidders', 'Events with fewer than 3 participating suppliers'),
+          }} />
         <Kpi v={formatNumber(Number(k.open_events ?? 0))} label="Open events" sub="not complete or canceled"
           onClick={() => open('open', 'Open events')} />
         <Kpi v={formatNumber(Number(k.completed ?? 0))} label="Completed events"
@@ -242,7 +263,12 @@ export function CoupaSourcingTab() {
         <Kpi v={formatNumber(Number(b.suppliers ?? 0))} label="Participating suppliers" sub={`${formatNumber(Number(b.responses ?? 0))} submitted bids`}
           onClick={() => open('bids', 'Participating suppliers — their submitted bids')} />
         <Kpi v={awardRate === null ? DASH : `${awardRate}%`} label="Bid award rate" sub={`${formatNumber(Number(b.awarded ?? 0))} awarded bids`}
-          onClick={() => open('awarded_bids', 'Awarded bids')} />
+          onClick={() => open('awarded_bids', 'Awarded bids')}
+          extra={{
+            text: `${formatNumber(Number(b.not_lowest ?? 0))} awarded above the lowest bid`,
+            title: 'Awarded bids where another bid on the same event, in the same currency, was cheaper. Compares whole-bid totals, so a supplier who quoted fewer lines can look cheaper - open the event to compare line by line. Click for the bids, with the lowest bid beside each.',
+            onClick: () => open('award_not_lowest', 'Awards not given to the lowest bid'),
+          }} />
       </div>
 
       <div className="chart-grid">
@@ -404,6 +430,10 @@ function SourcingRowsModal({ req, vendorType, onClose, onCompare }: {
   };
   const isEvent = d?.grain === 'event';
   const showCycle = req.what === 'cycle';
+  /** The lowest bid beside an award that was not it (27 Nov 2026). */
+  const showLowest = req.what === 'award_not_lowest';
+  /** Distinct bidders per event (27 Nov 2026). */
+  const showBidders = req.what === 'few_bidders';
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={req.title} onClick={(e) => e.stopPropagation()}>
@@ -431,9 +461,12 @@ function SourcingRowsModal({ req, vendorType, onClose, onCompare }: {
                     <tr>
                       <th>Event</th><th>Type</th><th>State</th><th>Commodity</th><th>Description</th>
                       <th>PR No</th><th>{isEvent ? 'Awarded supplier' : 'Supplier'}</th><th>Vendor Type</th>
-                      <th className="num">Bids</th><th>Awarded</th><th>Submitted</th>
+                      <th className="num">Bids</th>
+                      {showBidders && <th className="num">Suppliers bidding</th>}
+                      <th>Awarded</th><th>Submitted</th>
                       {showCycle && <th className="num">Cycle</th>}
                       <th className="num">{isEvent ? 'Awarded amount' : 'Amount'}</th><th>Ccy</th>
+                      {showLowest && <><th className="num">Lowest bid</th><th>Lowest bidder</th><th className="num">Above lowest</th></>}
                     </tr>
                   </thead>
                   <tbody>
@@ -453,11 +486,23 @@ function SourcingRowsModal({ req, vendorType, onClose, onCompare }: {
                         <td>{r2.supplier_name ?? DASH}</td>
                         <td>{r2.vendor_type ? r2.vendor_type : <span className="muted">—</span>}</td>
                         <td className="num">{formatNumber(Number(r2.bids_on_event ?? 0))}</td>
+                        {showBidders && <td className="num">{formatNumber(Number(r2.bidders ?? 0))}</td>}
                         <td><span className={`bs ${r2.awarded ? 'sd' : 'sl'}`}>{r2.awarded ? 'Yes' : 'No'}</span></td>
                         <td>{r2.submitted_at ? String(r2.submitted_at).slice(0, 10) : DASH}</td>
                         {showCycle && <td className="num">{cycleText(r2.cycle_days)}</td>}
                         <td className="num">{r2.total_amount == null ? DASH : formatNumber(Number(r2.total_amount))}</td>
                         <td><span className="dd-ccy">{r2.currency ?? DASH}</span></td>
+                        {showLowest && (
+                          <>
+                            <td className="num">{r2.lowest_amount == null ? DASH : formatNumber(Number(r2.lowest_amount))}</td>
+                            <td>{r2.lowest_supplier ?? DASH}</td>
+                            <td className="num">
+                              {r2.lowest_amount && r2.total_amount
+                                ? `+${formatNumber(((Number(r2.total_amount) / Number(r2.lowest_amount)) - 1) * 100, 1)}%`
+                                : DASH}
+                            </td>
+                          </>
+                        )}
                       </tr>
                     ))}
                   </tbody>

@@ -1048,7 +1048,7 @@ const CARRIED_IN_BAND_SERIES: ChartSpec[] = AGE_BANDS.map((b, idx) => ({
   seriesKey: `carried_in_b${idx}`,
   filterKind: 'pr_item' as const,
   filterAlias: 'pri.',
-  seriesLabel: `Brought forward ${b.label}`,
+  seriesLabel: `Outstanding ${b.label}`,
   unit: 'count',
   sql: prFlowSeries('carried_in',
     `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk
@@ -1184,7 +1184,7 @@ export const PARITY_CHARTS: ChartSpec[] = [
   {
     chartId: 'pr_by_month', seriesKey: 'carried_in',
     filterKind: 'pr_item', filterAlias: 'pri.',
-    seriesLabel: 'Brought forward (still open)', unit: 'count',
+    seriesLabel: 'Outstanding (still open)', unit: 'count',
     sql: prFlowSeries('carried_in',
       `NOT pr.is_deleted AND pr.rm < s.mk AND COALESCE(pr.pm, '9999-99') >= s.mk`),
   },
@@ -2778,6 +2778,17 @@ const CHART_COLS = [
   'series_label', 'bucket_key', 'bucket_label', 'bucket_ordinal', 'value_num', 'row_count',
   'unit', 'currency_basis', 'drill_predicate',
 ] as const;
+
+/**
+ * The thresholds behind a card's coloured dot (27 Nov 2026), so the card can
+ * say what its colour means. Null for a figure that has no target.
+ */
+export function kpiThreshold(kpiId: string): { worseWhen: 'high' | 'low'; warn: number; crit: number } | null {
+  const spec = PARITY_KPIS.find((k) => k.id === kpiId);
+  if (spec?.worseWhenHigh) return { worseWhen: 'high', ...spec.worseWhenHigh };
+  if (spec?.worseWhenLow) return { worseWhen: 'low', ...spec.worseWhenLow };
+  return null;
+}
 
 function severityOf(spec: KpiSpec, value: number | null): string | null {
   if (value === null) return null;

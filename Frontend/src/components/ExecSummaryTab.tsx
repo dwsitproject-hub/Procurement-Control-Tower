@@ -4,6 +4,8 @@ import { formatMoney, formatNumber } from '../lib/format';
 import { ExecFocusModal } from './ExecFocusModal';
 import { LayoutControls, applyLayout, panelSpan, type TabLayout } from './LayoutEdit';
 import { Lbl } from '../lib/labels';
+import { AGE_BAND_COLORS } from '../lib/ageBandColors';
+import { ChartPanel } from './Chart';
 
 /**
  * Executive Summary — the one page that states a conclusion rather than
@@ -893,13 +895,14 @@ function HoSiteBars({ data, onFocus, currency }: {
  * their own band rather than dropped from the chart. Keys must match the CASE
  * in the exec_pr_outstanding spec exactly — they ARE the bucket keys.
  */
+// Colours shared with the requisition flow chart (lib/ageBandColors.ts).
 const PR_BANDS = [
-  { key: '>150', label: '> 150', color: '#7f1d1d' },
-  { key: '91-150', label: '91 - 150', color: '#dc2626' },
-  { key: '61-90', label: '61 - 90', color: '#ea7317' },
-  { key: '31-60', label: '31 - 60', color: '#d4b106' },
-  { key: '8-30', label: '8 - 30', color: '#a3c93a' },
-  { key: '<7', label: '< 7', color: '#4CAF50' },
+  { key: '>150', label: '> 150', color: AGE_BAND_COLORS['>150']! },
+  { key: '91-150', label: '91 - 150', color: AGE_BAND_COLORS['91-150']! },
+  { key: '61-90', label: '61 - 90', color: AGE_BAND_COLORS['61-90']! },
+  { key: '31-60', label: '31 - 60', color: AGE_BAND_COLORS['31-60']! },
+  { key: '8-30', label: '8 - 30', color: AGE_BAND_COLORS['8-30']! },
+  { key: '<7', label: '< 7', color: AGE_BAND_COLORS['<7']! },
 ] as const;
 
 function PrOutstandingBars({ data, onFocus, onDrill }: {
@@ -1637,6 +1640,12 @@ export function ExecSummaryTab({
                   : <div className="spinner" />}
               </div>
       ),
+    },
+    // The requisition flow (27 Nov 2026), as on PR Analysis: what was
+    // outstanding at each month's start, what came in, what left.
+    {
+      id: 'panel:pr-flow',
+      node: <ChartPanel chartId="pr_by_month" onDrill={onDrill} filterQuery={filterQuery} />,
     },
     {
       id: 'panel:concentration',

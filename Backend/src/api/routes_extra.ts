@@ -1056,7 +1056,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const v = await version();
     res.json({
       datasetVersionId: v.id,
-      materials: await vendorPivotMaterials(v.id, ctx.scope, String(req.params.code)),
+      materials: await vendorPivotMaterials(
+        v.id, ctx.scope, String(req.params.code), parseGlobalFilter(req.query as Record<string, unknown>),
+      ),
     });
   }));
 
@@ -1346,6 +1348,25 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
       (SELECT min(_m[1]) FROM regexp_matches(COALESCE(${e}.description, ''), '(1[0-9]{9})', 'g') AS _m
         WHERE left(_m[1], 4) = ANY(${series})))`;
 
+  /*
+   * Two competition checks (27 Nov 2026), one definition each, shared by the
+   * Sourcing cards and the rows they open.
+   *
+   * Few bidders: an event that went out to suppliers (not a template, test or
+   * draft) with fewer than three DIFFERENT suppliers submitting a bid.
+   * Not lowest: an awarded bid when another bid on the same event, in the same
+   * currency, was cheaper (positive amounts only).
+   * Both read the response TABLE: the event or bid has already passed the
+   * exclusions through the views (see the note on the joins below).
+   */
+  const SENT_TO_SUPPLIERS = `e.state NOT IN ('template','test_complete','new','draft')`;
+  const BIDDERS_SQL = `(SELECT count(DISTINCT _b.supplier_name) FROM ops.coupa_supplier_response _b
+                         WHERE _b.quote_request_id = e.id AND _b.state = 'submitted')`;
+  const CHEAPER_BID = (r: string): string => `EXISTS (SELECT 1 FROM ops.coupa_supplier_response _c
+      WHERE _c.quote_request_id = ${r}.quote_request_id AND _c.state = 'submitted' AND _c.total_amount > 0
+        AND COALESCE(NULLIF(_c.currency,''), '-') = COALESCE(NULLIF(${r}.currency,''), '-')
+        AND _c.total_amount < ${r}.total_amount)`;
+
   r.get('/api/v1/coupa/sourcing', role('analyst', async (req, res) => {
     const series = await prSeriesSql();
     const vt = parseVendorType((req.query as Record<string, unknown>)['vendorType']);
@@ -1368,7 +1389,9 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (e.end_time - e.submit_time))/86400.0)
                   FILTER (WHERE e.submit_time IS NOT NULL AND e.end_time IS NOT NULL) AS median_cycle_days,
                 sum(e.planned_savings) FILTER (WHERE e.currency = 'IDR') AS planned_savings_idr,
-                count(*) FILTER (WHERE e.planned_savings IS NOT NULL AND e.currency <> 'IDR')::int AS savings_other_ccy
+                count(*) FILTER (WHERE e.planned_savings IS NOT NULL AND e.currency <> 'IDR')::int AS savings_other_ccy,
+                count(*) FILTER (WHERE ${SENT_TO_SUPPLIERS})::int AS sent_events,
+                count(*) FILTER (WHERE ${SENT_TO_SUPPLIERS} AND ${BIDDERS_SQL} < 3)::int AS few_bidders
            FROM ops.v_coupa_sourcing_event e WHERE e.state <> 'template'${evType}`,
         p,
       );
@@ -1377,7 +1400,8 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                 count(DISTINCT r.quote_request_id)::int AS events_with_bids,
                 count(DISTINCT r.supplier_name)::int AS suppliers,
                 round(count(*)::numeric / NULLIF(count(DISTINCT r.quote_request_id), 0), 1) AS avg_bids_per_event,
-                count(*) FILTER (WHERE r.awarded)::int AS awarded
+                count(*) FILTER (WHERE r.awarded)::int AS awarded,
+                count(*) FILTER (WHERE r.awarded AND r.total_amount > 0 AND ${CHEAPER_BID('r')})::int AS not_lowest
            FROM ops.v_coupa_supplier_response r WHERE r.state = 'submitted'${rType}`,
         p,
       );
@@ -1521,6 +1545,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
         label: 'Open events',
       }),
       completed: () => ({ where: `e.state = 'complete'${evType()}`, label: 'Completed events' }),
+      few_bidders: () => ({
+        where: `e.state <> 'template' AND ${SENT_TO_SUPPLIERS} AND ${BIDDERS_SQL} < 3${evType()}`,
+        label: 'Events with fewer than 3 participating suppliers',
+      }),
       cycle: () => ({
         where: `e.state <> 'template' AND e.submit_time IS NOT NULL AND e.end_time IS NOT NULL${evType()}`,
         label: 'Events with a cycle (submit → end)',
@@ -1556,6 +1584,10 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
     const BID: Record<string, () => { where: string; label: string }> = {
       bids: () => ({ where: `r.state = 'submitted'${rType()}`, label: 'Submitted bids' }),
       awarded_bids: () => ({ where: `r.state = 'submitted' AND r.awarded${rType()}`, label: 'Awarded bids' }),
+      award_not_lowest: () => ({
+        where: `r.state = 'submitted' AND r.awarded AND r.total_amount > 0 AND ${CHEAPER_BID('r')}${rType()}`,
+        label: 'Awards not given to the lowest bid',
+      }),
       commodity: () => {
         const c = str('commodity');
         return {
@@ -1586,6 +1618,7 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                   WHERE r.quote_request_id = e.id AND r.awarded) AS vendor_type,
                 (SELECT count(*) FROM ops.coupa_supplier_response r
                   WHERE r.quote_request_id = e.id AND r.state = 'submitted')::int AS bids_on_event,
+                ${BIDDERS_SQL}::int AS bidders,
                 EXISTS (SELECT 1 FROM ops.coupa_supplier_response r
                          WHERE r.quote_request_id = e.id AND r.awarded) AS awarded,
                 e.submit_time AS submitted_at,
@@ -1619,9 +1652,17 @@ export function mountExtraRoutes(r: Router, h: RouteHelpers): void {
                 r.supplier_name, r.vendor_type, r.awarded, r.submitted_at, r.total_amount,
                 COALESCE(NULLIF(r.currency,''), e.currency) AS currency,
                 (SELECT count(*) FROM ops.coupa_supplier_response r2
-                  WHERE r2.quote_request_id = r.quote_request_id AND r2.state = 'submitted')::int AS bids_on_event
+                  WHERE r2.quote_request_id = r.quote_request_id AND r2.state = 'submitted')::int AS bids_on_event,
+                lo.amount AS lowest_amount, lo.supplier AS lowest_supplier
            FROM ops.v_coupa_supplier_response r
            JOIN ops.coupa_sourcing_event e ON e.id = r.quote_request_id
+           -- The cheapest bid on the same event in the same currency (27 Nov 2026).
+           LEFT JOIN LATERAL (
+             SELECT _l.total_amount AS amount, _l.supplier_name AS supplier
+               FROM ops.coupa_supplier_response _l
+              WHERE _l.quote_request_id = r.quote_request_id AND _l.state = 'submitted' AND _l.total_amount > 0
+                AND COALESCE(NULLIF(_l.currency,''), '-') = COALESCE(NULLIF(r.currency,''), '-')
+              ORDER BY _l.total_amount LIMIT 1) lo ON true
           WHERE ${where}
           ORDER BY r.submitted_at DESC NULLS LAST, r.quote_request_id DESC
           LIMIT $${pp.length - 1} OFFSET $${pp.length}`,

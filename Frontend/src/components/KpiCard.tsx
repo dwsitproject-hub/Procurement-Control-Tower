@@ -20,14 +20,35 @@ import { PLAIN_WORDS } from '../lib/plainWords';
 // with enough contrast on its surface; the meaning per slot is unchanged.
 const CARD_PALETTE = ['var(--heading)', 'var(--blue)', 'var(--teal)', 'var(--purple)', 'var(--orange)', 'var(--good)'];
 
+/**
+ * The dot's colour (27 Nov 2026): it carries the figure's status and nothing
+ * else - red past the critical threshold, amber past the warning one, green
+ * within target, grey for a figure with no target. It used to fall back to a
+ * decorative colour hashed from the card id, whose green and orange read
+ * exactly like "on target" and "warning".
+ */
 function accentFor(kpi: Kpi): string {
   if (kpi.severity === 'critical') return 'var(--crit)';
   if (kpi.severity === 'warning') return 'var(--warn)';
   if (kpi.severity === 'good') return 'var(--good)';
-  // Stable per-KPI decoration: hash the id into the palette.
-  let h = 0;
-  for (const ch of kpi.kpiId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return CARD_PALETTE[h % CARD_PALETTE.length]!;
+  return 'var(--sev-none, #94a3b8)';
+}
+void CARD_PALETTE;
+
+/** The dot in words, for the card's hover (27 Nov 2026). */
+export function dotMeaning(kpi: Kpi): string {
+  const t = kpi.threshold;
+  const f = (v: number) => formatKpi(v, kpi.unit);
+  const rule = t
+    ? (t.worseWhen === 'high'
+      ? `green below ${f(t.warn)}, amber from ${f(t.warn)}, red from ${f(t.crit)}`
+      : `green above ${f(t.warn)}, amber at ${f(t.warn)} or below, red at ${f(t.crit)} or below`)
+    : null;
+  const now = kpi.severity === 'critical' ? 'Red dot: past the critical threshold'
+    : kpi.severity === 'warning' ? 'Amber dot: past the warning threshold'
+      : kpi.severity === 'good' ? 'Green dot: within target'
+        : 'Grey dot: information only - this figure has no target';
+  return rule ? `${now} (${rule}).` : `${now}.`;
 }
 
 export function KpiCard({
@@ -137,7 +158,7 @@ export function KpiCard({
         className="kpi"
         data-sev={kpi.severity ?? 'neutral'}
         style={{ ['--c' as string]: accent }}
-        title={sub}
+        title={`${sub ? `${sub}\n` : ''}${dotMeaning(kpi)}`}
       >
         {body}
       </div>
@@ -152,7 +173,8 @@ export function KpiCard({
       style={{ ['--c' as string]: accent }}
       onClick={() => onDrill(token, kpi.title)}
       title={`${sub ? `${sub}
-` : ''}Click to see the rows behind this figure`}
+` : ''}${dotMeaning(kpi)}
+Click to see the rows behind this figure`}
     >
       {body}
     </button>
@@ -276,7 +298,7 @@ export function KpiSummaryCard({
     return formatKpi(k.value, k.unit);
   };
   return (
-    <div className="kpi kpi-multi" style={{ ['--c' as string]: 'var(--heading)' }}>
+    <div className="kpi kpi-multi" style={{ ['--c' as string]: 'var(--sev-none, #94a3b8)' }} title="Several figures in one card - grey dot: information only">
       <div className="l kpi-multi-h"><Lbl k={`kpi:${id}`}>{title}</Lbl></div>
       <dl className="kpi-multi-list">
         {items.map(({ kpi, label }) => (

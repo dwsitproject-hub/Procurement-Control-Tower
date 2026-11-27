@@ -5,6 +5,7 @@ import {
   DoughnutController, Legend, LinearScale, Tooltip,
 } from 'chart.js';
 import { api, type ChartResponse } from '../lib/api';
+import { AGE_BAND_COLORS, AGE_BAND_ORDER } from '../lib/ageBandColors';
 import { formatKpi } from '../lib/format';
 import { Lbl } from '../lib/labels';
 import { syncChartTheme } from '../lib/chartTheme';
@@ -90,6 +91,7 @@ const BAR_COLORS: Record<string, string> = { ...PRIORITY_COLORS, ...CATEGORY_COL
 const SERIES_COLORS: Record<string, string> = {
   'Newly raised': '#4CAF50',
   'Brought forward (still open)': '#ED7D31',
+  'Outstanding (still open)': '#ED7D31',
   'Became PO': '#2E75B6',
   'Cancelled (by month raised)': '#94a3b8',
 };
@@ -97,7 +99,7 @@ const SERIES_COLORS: Record<string, string> = {
 /**
  * The requisition flow as a WATERFALL (requested 7 Oct 2026), per month:
  *
- *   brought forward - the requisitions still open when the month began,
+ *   outstanding     - the requisitions still open when the month began,
  *                     stacked by how long each had been waiting (six bands,
  *                     colours as specified with the request);
  *   + newly raised  - a step up from there;
@@ -124,7 +126,10 @@ const WIDE_CHARTS: Record<string, number> = { pr_by_month: 440 };
  * of its own bar, on its own row, and the category reads straight.
  */
 const HORIZONTAL_CHARTS = new Set(['items_by_category']);
-const WATERFALL_BAND_COLORS = ['#4E79A7', '#F28E2B', '#59A14F', '#E15759', '#76B7B2', '#EDC948'];
+// The outstanding bands take the Executive Summary's outstanding-PR colours
+// (27 Nov 2026), youngest green to oldest dark red, so one band reads the same
+// on both charts. Index = AGE_BANDS position (carried_in_b0 = '< 7 d').
+const WATERFALL_BAND_COLORS = AGE_BAND_ORDER.map((b) => AGE_BAND_COLORS[b.key]!);
 // to_po was navy #1F3864 (redesign, Nov 2026): on the dark theme's navy
 // panels the hatched bars vanished. Blue #2563EB keeps 3:1 against both the
 // dark and the light panel, and is still "the cool colour that left".
@@ -386,16 +391,25 @@ export function ChartPanel({
       // series' own point - the rows behind exactly that segment.
       const sets: { key: string; label: string; stack: string; color: string;
         values: (number | [number, number])[]; shaded?: boolean }[] = [
-        ...bandKeys.map((k, i) => ({
-          key: k,
-          label: ser(k)?.label ?? k,
-          stack: 'bf',
-          color: WATERFALL_BAND_COLORS[i] ?? PALETTE[i % PALETTE.length]!,
-          values: data.buckets.map((b) => val(k, b.key)),
-        })),
+        ...bandKeys.map((k) => {
+          // "Outstanding" (27 Nov 2026; was "Brought forward"), named from the
+          // band itself so a version built before the rename reads the same.
+          const idx = Number(k.slice('carried_in_b'.length));
+          const band = AGE_BAND_ORDER[idx];
+          return {
+            key: k,
+            label: band ? `Outstanding ${band.label}` : (ser(k)?.label ?? k),
+            stack: 'bf',
+            color: WATERFALL_BAND_COLORS[idx] ?? PALETTE[idx % PALETTE.length]!,
+            values: data.buckets.map((b) => val(k, b.key)),
+          };
+        }),
+        // Stacked ON the outstanding bands (27 Nov 2026), rather than a step
+        // of its own beside them: one column is everything open during the
+        // month - what was outstanding at its start plus what came in.
         {
-          key: 'new_pr', label: '+ Newly raised', stack: 'new', color: WATERFALL_STEP_COLORS.new_pr,
-          values: data.buckets.map((b) => [bf(b.key), bf(b.key) + val('new_pr', b.key)] as [number, number]),
+          key: 'new_pr', label: '+ Newly raised', stack: 'bf', color: WATERFALL_STEP_COLORS.new_pr,
+          values: data.buckets.map((b) => val('new_pr', b.key)),
         },
         {
           key: 'to_po', label: '\u2212 Became PO', stack: 'po', color: WATERFALL_STEP_COLORS.to_po, shaded: true,
@@ -500,7 +514,7 @@ export function ChartPanel({
                   if (!bucket) return '';
                   const end = bf(bucket.key) + val('new_pr', bucket.key)
                     - val('to_po', bucket.key) - val('cancelled', bucket.key);
-                  return `Brought forward ${bf(bucket.key).toLocaleString('en-GB')} \u2192 open at month end ${end.toLocaleString('en-GB')}`;
+                  return `Outstanding ${bf(bucket.key).toLocaleString('en-GB')} + newly raised ${val('new_pr', bucket.key).toLocaleString('en-GB')} \u2192 open at month end ${end.toLocaleString('en-GB')}`;
                 },
               },
             },

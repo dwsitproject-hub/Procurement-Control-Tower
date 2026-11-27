@@ -3,6 +3,7 @@ import { ApiError, api, type DatasetCurrent, type Finding, type Kpi, type Me } f
 import { formatKpi, formatMoney, formatNumber } from './lib/format';
 import { PageIntro, type Takeaway } from './components/PageIntro';
 import { FreshnessBanner } from './components/FreshnessBanner';
+import { DotLegend } from './components/DotLegend';
 import { KpiCard, KpiSummaryCard } from './components/KpiCard';
 import { ChartPanel } from './components/Chart';
 import { DrillModal } from './components/DrillModal';
@@ -98,12 +99,11 @@ const SUBPATH_TABS = new Set<Tab>(['admin', 'master']);
  */
 const SUMMARY_CARDS: Record<string, { title: string; items: { id: string; label: string }[] }> = {
   pr_approval_summary: {
-    title: 'PR Approval & Value',
+    title: 'PR Approval',
     items: [
       { id: 'cycle_pr_approval', label: 'Avg PR approval' },
       { id: 'median_pr_approval', label: 'Median PR approval' },
       { id: 'pr_approval_lead_time', label: 'Approval lead time (SAP, median)' },
-      { id: 'avg_pr_line_value_idr', label: 'Avg PR line value' },
     ],
   },
   // Approvals (23 Nov 2026): the two approval cycles and the oldest wait, one card.
@@ -1042,6 +1042,8 @@ export default function App() {
                     ))}
                 </div>
               )}
+              {/* What the card dots mean (27 Nov 2026). */}
+              {tab === 'pr' && <DotLegend />}
               <div className="kpi-grid" style={{ marginBottom: '1rem' }}>
                 {visibleKpis
                   .filter(({ slot }) => !(TAB_WIDE_IDS[tab] ?? []).includes(slot))

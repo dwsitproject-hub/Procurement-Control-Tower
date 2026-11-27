@@ -106,10 +106,10 @@ export const CHART_META: ChartMeta[] = [
     unit: 'count',
     // Drawn as a waterfall (Chart.tsx WATERFALL_CHARTS) since 7 Oct 2026.
     notes: [
-      'Each month: what was still open when it began (stacked by how long it had '
-      + 'been waiting), plus what was raised, minus what became a PO. Where the '
-      + 'last step ends is what the next month brings forward.',
-      'Brought forward is a STOCK, not a flow: a requisition waiting three months '
+      'Each month: what was outstanding when it began (stacked by how long it had '
+      + 'been waiting) with what was newly raised on top, then what became a PO. '
+      + 'Where the last step ends is what is outstanding at the next month\'s start.',
+      'Outstanding is a STOCK, not a flow: a requisition waiting three months '
       + 'is counted in all three, so those bars must not be added up.',
       'Deleted requisitions are left out of every figure. A requisition whose purchase '
       + 'order was deleted (status PO-Deleted) leaves the stock as Cancelled, in the month '

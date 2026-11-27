@@ -1010,6 +1010,40 @@ New optional settings in `/opt/pct/secrets.production.env` (defaults shown):
 - `DHM_PLANT_SYNC_HOURS=24`: the interval;
 - `DHM_PLANT_ENABLED=true`: `false` stops the scheduled run, and Sync now still works.
 
+### 10u. Release of 27 Nov 2026 — exclusions recompute from the loaded data
+
+**What happened (staging, 26 Nov 2026).** Purchasing Orgs were excluded and saved three times, but
+every figure stayed the same.
+- "Save exclusions & recompute" re-read the SAP exports from the pickup folder and parsed them again.
+- On the staging BE host (2 vCPU, 3.5 GB RAM shared by about 30 containers, 3.1 of 4 GB swap in use) that
+  pushed the server into swap. The API stalled for up to 18 s at a time, its database connections timed
+  out, and the run died before writing anything.
+- That failure path also wrote no audit entry, so it looked as if nothing had happened.
+- Even on a healthy host it would have failed: after-run filing had already moved the exports out of the
+  pickup folder, so there was nothing to re-read.
+
+**What changed:**
+- **Save exclusions & recompute** now calls `POST /api/v1/ingest/recompute` (admin). It rebuilds every
+  fact from the records already loaded, under the exclusions and rules in force now:
+  - no file is read, so the pickup folder does not matter;
+  - nothing is parsed. Measured locally on the 25 Sep data: about 60–70 s and about 690 MB, against about
+    1.8 GB for a file load;
+  - reverting an exclusion and recomputing reproduced the original version exactly (row counts, IDR
+    totals and all 79 KPIs).
+- The batch is listed as `manual` with source detail `recompute`. Its Data Check line is
+  "Recompute: every figure rebuilt from the records already loaded…".
+- A Sync now or recompute that fails is **audited with its reason** (`ingest.sync` / `ingest.recompute`,
+  outcome failure).
+- An excluded Purchasing Org also removes PO lines raised from its requisitions, even when the PO line
+  carries another org. This is the existing rule, not new: on the local data, excluding LBG1 removed its
+  2,542 PO lines plus 2,616 PUR1/PCP1 lines raised from LBG1 requisitions.
+
+**Deploy:** the usual §10 BE and FE updates, with no migration, no new setting and no Rebuild. Then, in
+Admin → Exclusions, press **Save exclusions & recompute** once to apply the saved list.
+
+**Staging host:** the scheduled file pickup still needs about 1.8 GB. With the BE host already deep in swap,
+ask infra for more RAM there (or fewer co-tenants). A recompute is lighter but not free.
+
 ## 11. Rollback
 
 **On the affected server:**

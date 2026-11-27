@@ -1441,7 +1441,15 @@ export function buildRouter(): Router {
     const force = Boolean((req.body ?? {}).force);
     const ran = await withIngestLock(() => runIngestIsolated(
       { kind: 'share', submittedBy: ctx.principal.userId, force }, 'sync now'))
-      .catch((e) => { throw asIngestProblem(e); });
+      .catch(async (e) => {
+        // Audited too (27 Nov 2026): a run that died left no trace at all, so
+        // "why did nothing change" could not be answered from the app.
+        await recordAudit({
+          action: 'ingest.sync', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+          outcome: 'failure', detail: { force, error: e instanceof Error ? e.message : String(e) }, ip: req.ip,
+        }).catch(() => undefined);
+        throw asIngestProblem(e);
+      });
     if (ran === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
     const { out, archive, lastScan } = ran;
     await recordAudit({
@@ -1472,6 +1480,36 @@ export function buildRouter(): Router {
     }
     res.json(out);
   }));
+
+  /**
+   * Recompute (27 Nov 2026): rebuild every fact from the records already
+   * loaded, under the exclusions and rules in force now - what Admin ->
+   * Exclusions' "Save & recompute" needs. It used to re-read the pickup folder,
+   * which after-run filing empties once a load has published, and parsing the
+   * workbooks is the heaviest part of a load: on the shared staging host that
+   * pushed the server into swap until its database connections timed out.
+   */
+  r.post('/api/v1/ingest/recompute', role('admin', async (req, res, ctx) => {
+    const audit = (outcome: 'success' | 'failure', detail: Record<string, unknown>) => recordAudit({
+      action: 'ingest.recompute', actorUserId: ctx.principal.userId, actorEmail: ctx.principal.email,
+      outcome, detail, ip: req.ip,
+    }).catch(() => undefined);
+    const ran = await withIngestLock(() => runIngestIsolated(
+      { kind: 'recompute', submittedBy: ctx.principal.userId }, 'recompute'))
+      .catch(async (e) => {
+        await audit('failure', { error: e instanceof Error ? e.message : String(e) });
+        throw asIngestProblem(e);
+      });
+    if (ran === null) throw new HttpProblem(409, 'busy', 'Another load, upload or rebuild is running - try again in a minute');
+    const { out } = ran;
+    await audit(out.outcome === 'failed' ? 'failure' : 'success', {
+      outcome: out.outcome,
+      ...('datasetVersionId' in out ? { datasetVersionId: out.datasetVersionId } : {}),
+      ...('reason' in out ? { reason: out.reason } : {}),
+    });
+    res.json(out);
+  }));
+
 
   /**
    * The failing rows of a batch, as a workbook.

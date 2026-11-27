@@ -58,6 +58,10 @@ async function main(): Promise<number> {
       );
       return 0;
 
+    case 'nothing_to_recompute':
+      process.stdout.write('Nothing loaded yet to recompute from.\n');
+      return 0;
+
     case 'noop_unchanged':
       process.stdout.write(
         `Bundle unchanged (identical file hashes already published as batch ${result.batchId}).\n`,

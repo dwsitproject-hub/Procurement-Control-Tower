@@ -59,6 +59,14 @@ export interface IngestOptions {
    * exclusion edits, new fact columns, rule updates.
    */
   force?: boolean;
+  /**
+   * Recompute (27 Nov 2026): rebuild the facts from the records already
+   * stored, under the rules in force now, reading NO file. What an exclusion
+   * or rule change needs: the source is the merged store (035), so nothing
+   * depends on the exports still being in the pickup folder (after-run filing
+   * empties it), and no workbook is parsed - the costliest part of a load.
+   */
+  recompute?: boolean;
   safety?: SafetyLimits;
   onProgress?: (stage: string, detail?: string) => void;
 }
@@ -125,7 +133,9 @@ export type IngestOutcome =
    * once after-run filing is on — NOT a fault, which is the whole point of
    * separating it from `incomplete_bundle`.
    */
-  | { outcome: 'awaiting_exports'; filedBatchId: number; filedAt: string; hoursAgo: number };
+  | { outcome: 'awaiting_exports'; filedBatchId: number; filedAt: string; hoursAgo: number }
+  /** A recompute with no loaded data to rebuild from (first load not done, or merging off). */
+  | { outcome: 'nothing_to_recompute' };
 
 /**
  * How long an empty pickup folder stays "waiting" before it becomes "overdue".
@@ -173,6 +183,7 @@ async function lastFiling(): Promise<
 export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const log = opts.onProgress ?? (() => undefined);
   const safety = opts.safety ?? DEFAULT_SAFETY;
+  const recompute = opts.recompute === true;
 
   // ── discover ──
   let discovered;
@@ -186,7 +197,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
     throw err;
   }
 
-  if (discovered.length === 0) {
+  if (discovered.length === 0 && !recompute) {
     // An empty folder has two very different causes and they look identical on
     // disk: either a previous run filed the exports away and the next ones have
     // not arrived, or the exports stopped coming. ops.ingest_filing is the
@@ -245,8 +256,12 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   // ── idempotency: identical bundle already published is a no-op ──
   // Unless forced: a recompute after an exclusion or rule change must re-run
   // the transform even though the source files are byte-identical.
-  const bHash = bundleHash(prepared.map((p) => p.sha));
-  if (!opts.force) {
+  // A recompute has no files: its hash only has to be its own, since one
+  // PUBLISHED batch per bundle hash is allowed (ux_batch_bundle_published).
+  const bHash = recompute
+    ? sha256(Buffer.from(`recompute ${new Date().toISOString()} ${Math.random()}`))
+    : bundleHash(prepared.map((p) => p.sha));
+  if (!opts.force && !recompute) {
     const already = await queryOne<{ id: string }>(
       `SELECT id FROM ingest.batch WHERE bundle_hash = $1 AND state = 'PUBLISHED'`,
       [bHash],
@@ -273,7 +288,9 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   // Partial loads need something to carry a set-aside feed forward FROM.
   const partial = base && (await partialEnabled());
   const missing = REQUIRED_FEEDS.filter((f) => !foundFeeds.has(f));
-  const incomplete = base
+  // A recompute rebuilds what is stored, so it needs something stored.
+  if (recompute && !base) return { outcome: 'nothing_to_recompute' };
+  const incomplete = recompute ? false : base
     ? foundFeeds.size === 0
     : missing.length > 0;
   if (incomplete) {
@@ -293,7 +310,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
   const batchIns = await queryOne<{ id: string }>(
     `INSERT INTO ingest.batch (source_kind, source_detail, state, submitted_by, bundle_hash)
      VALUES ($1, $2, 'SCANNING', $3, $4) RETURNING id`,
-    [opts.source.kind, null, opts.submittedBy ?? null, bHash],
+    [opts.source.kind, recompute ? 'recompute' : null, opts.submittedBy ?? null, bHash],
   );
   const batchId = Number(batchIns!.id);
   const t0 = Date.now();
@@ -540,7 +557,7 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       }
       // Nothing left to load at all is still a failure.
       const accepted = [...foundFeeds].filter((f) => !setAsideFeeds.has(f));
-      if (accepted.length === 0) {
+      if (accepted.length === 0 && !recompute) {
         findings.push({
           ruleId: 'V-Q02', severity: 'BLOCKER', feed: null,
           message: 'Every SAP file in this upload was set aside, so there is nothing to load.',
@@ -591,7 +608,18 @@ export async function runIngest(opts: IngestOptions): Promise<IngestOutcome> {
       tr.metrics.continuationDuplicateKeys = fill?.continuationDuplicateKeys ?? 0;
       tr.metrics.l2BeforeL1 = fill?.l2BeforeL1 ?? 0;
 
-      findings.push(...mergeFindings(merge, parentBatchId, setAsideFeeds, opts.source.kind === 'manual'));
+      if (recompute) {
+        // One line instead of five "no file, carried forward" notes: nothing
+        // was meant to arrive.
+        findings.push({
+          ruleId: 'V-I04', severity: 'INFO', feed: null,
+          message: 'Recompute: every figure rebuilt from the records already loaded, under the exclusions '
+            + 'and rules in force now. No file was read.',
+          affectedRows: null, measured: { recompute: true }, disablesKpis: [], drillPredicate: null,
+        });
+      } else {
+        findings.push(...mergeFindings(merge, parentBatchId, setAsideFeeds, opts.source.kind === 'manual'));
+      }
       if (parentBatchId !== null) findings.push(...(await carriedCaveats(client, parentBatchId, merge)));
 
       const postFindings = checkMetrics(tr.metrics, rules);

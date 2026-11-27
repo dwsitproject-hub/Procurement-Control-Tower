@@ -21,6 +21,8 @@ import { PerFeedShareSource, archiveAfterRun, loadShareConfig, type FeedScan } f
 export type IngestJob =
   /** The per-feed share folders: the scheduled pickup and "Sync now". */
   | { kind: 'share'; submittedBy?: string | null; force?: boolean }
+  /** Rebuild from the stored records under today's rules - no file (27 Nov 2026). */
+  | { kind: 'recompute'; submittedBy?: string | null }
   /** Files an operator uploaded, already spooled to disk. */
   | { kind: 'manual'; files: DiscoveredFile[]; submittedBy?: string | null; autoPublish: boolean };
 
@@ -39,6 +41,14 @@ export async function runIngestJob(job: IngestJob): Promise<IngestJobResult> {
     });
     const archive = await archiveAfterRun(source, out.outcome, 'batchId' in out ? out.batchId : null, cfg);
     return { out, archive, lastScan: [...source.lastScan] };
+  }
+  if (job.kind === 'recompute') {
+    // An empty source: the files are not read, the store is.
+    const out = await runIngest({
+      source: new ManualUploadSource([]), submittedBy: job.submittedBy ?? null,
+      autoPublish: true, force: true, recompute: true,
+    });
+    return { out };
   }
   const out = await runIngest({
     source: new ManualUploadSource(job.files),

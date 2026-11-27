@@ -269,27 +269,21 @@ function ExclusionsPanel({ isAdmin }: { isAdmin: boolean }) {
     }
 
     setBusy('recompute');
-    setMsg('Saved. Rebuilding every fact from the source files — this takes a minute…');
+    setMsg('Saved. Rebuilding every fact from the data already loaded — this takes a minute or two…');
     try {
-      // force: exclusion changes alter the transform's behaviour while the
-      // source files stay byte-identical, so the bundle-hash no-op must be
-      // bypassed.
-      const out = await api.post<{ outcome: string; datasetVersionId?: number }>(
-        '/api/v1/ingest/sync', { force: true },
+      // From the records already loaded (27 Nov 2026), not the pickup folder:
+      // after-run filing empties the folder once a load publishes, and no
+      // workbook has to be parsed again.
+      const out = await api.post<{ outcome: string; datasetVersionId?: number; reason?: string }>(
+        '/api/v1/ingest/recompute', {},
       );
       setMsg(
         out.outcome === 'published'
           ? `Applied — dataset version ${out.datasetVersionId} published. Every page now uses the new scope; reload to see it.`
-          : out.outcome === 'source_unavailable'
-            ? 'Saved, but the source files could not be read, so nothing was rebuilt — the previous scope is still in force.'
-          : out.outcome === 'awaiting_exports'
-            // A recompute reads the pickup folder, and after-run filing empties
-            // it once a run has published. So between exports there is nothing
-            // to rebuild FROM, and saying "reported awaiting_exports" would
-            // leave an admin hunting for a fault that is not there.
-            ? 'Saved, but the pickup folder is empty — a previous run filed its exports away, '
-              + 'so there is nothing to rebuild from. The new scope takes effect at the next '
-              + 'publish, or sooner if you put the exports back in the pickup folder.'
+          : out.outcome === 'nothing_to_recompute'
+            ? 'Saved. There is no loaded data to rebuild yet — the exclusions apply from the first load.'
+          : out.outcome === 'failed'
+            ? `Saved, but the rebuild failed (${out.reason ?? 'no reason given'}) — the previous scope is still in force.`
             : `Saved, but the rebuild reported "${out.outcome}" — the previous scope is still in force.`,
       );
     } catch (e) {

@@ -203,6 +203,8 @@ export interface DrillPage {
   totalCount: number;
   note: string | null;
   columns: { key: string; label: string; type: string; currency?: string; coupa?: boolean }[];
+  /** Every Detail-table column this drill can also show, keyed `dt_<key>` (27 Nov 2026). */
+  extraColumns?: { key: string; label: string; type: string; currency?: string; coupa?: boolean }[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
   totals: {

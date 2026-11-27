@@ -51,9 +51,25 @@ export function DrillModal({
   const sortQs = sort ? `&sort=${encodeURIComponent(sort.key)}&dir=${sort.dir}` : '';
   // Column choice and order, remembered per grain: a PO-line drill and a GR
   // drill have different columns, and choosing for one must not hide the other's.
-  const layout = useColumnLayout(page ? `drill_layout_${page.grain}${page.view ? `_${page.view}` : ''}` : null, page?.columns ?? null);
+  // Its own columns plus, for PR-item and PO-line drills, every Detail-table
+  // column (27 Nov 2026), hidden until the reader picks them.
+  const allCols = page ? [...page.columns, ...(page.extraColumns ?? [])] : null;
+  const layout = useColumnLayout(
+    page ? `drill_layout_${page.grain}${page.view ? `_${page.view}` : ''}` : null,
+    allCols,
+    page?.columns.map((c) => c.key),
+  );
   const thProps = useHeaderDrag(layout.reorder);
-  const byKey = new Map((page?.columns ?? []).map((c) => [c.key, c]));
+  const byKey = new Map((allCols ?? []).map((c) => [c.key, c]));
+  // The Detail columns on screen are fetched with the rows; a price in the
+  // document currency brings the line's currency along for its tag.
+  const extraShown = layout.visible.filter((k) => k.startsWith('dt_'));
+  const needCcy = extraShown.some((k) => {
+    const c = byKey.get(k);
+    return (c?.type === 'money' || c?.type === 'price') && !c.currency;
+  });
+  const extraKeys = [...new Set([...extraShown, ...(needCcy ? ['dt_currencyCode'] : [])])].sort();
+  const colsQs = extraKeys.length > 0 ? `&cols=${encodeURIComponent(extraKeys.join(','))}` : '';
   const shownCols = layout.visible
     .map((k) => byKey.get(k))
     .filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -70,7 +86,7 @@ export function DrillModal({
     let cancelled = false;
     setLoading(true);
     api
-      .get<DrillPage>(`/api/v1/drill/${token}?limit=200${sortQs}`)
+      .get<DrillPage>(`/api/v1/drill/${token}?limit=200${sortQs}${colsQs}`)
       .then((d) => {
         if (cancelled) return;
         setPage(d);
@@ -91,7 +107,7 @@ export function DrillModal({
     return () => {
       cancelled = true;
     };
-  }, [token, sortQs]);
+  }, [token, sortQs, colsQs]);
 
   /**
    * Export every row behind this figure.
@@ -147,7 +163,7 @@ export function DrillModal({
 
   const loadMore = async () => {
     if (!cursor) return;
-    const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}${sortQs}`);
+    const d = await api.get<DrillPage>(`/api/v1/drill/${token}?limit=200&cursor=${cursor}${sortQs}${colsQs}`);
     setRows((r) => [...r, ...d.rows]);
     setCursor(d.nextCursor);
   };
@@ -166,7 +182,13 @@ export function DrillModal({
           <span className="spacer" />
           <FloatControls onClose={onClose} />
           {page && !error && page.totalCount > 0 && (
-            <ColumnChooser columns={page.columns} visible={layout.visible} onToggle={layout.toggle} onReset={layout.reset} />
+            <ColumnChooser
+              columns={page.columns}
+              more={page.extraColumns}
+              visible={layout.visible}
+              onToggle={layout.toggle}
+              onReset={layout.reset}
+            />
           )}
           {page && !error && page.totalCount > 0 && (
             <button
@@ -287,7 +309,11 @@ export function DrillModal({
                           </td>
                           {shownCols.map((c) => {
                             const v = r[c.key];
-                            const num = ['money', 'int', 'number', 'pct'].includes(c.type);
+                            const num = ['money', 'price', 'int', 'number', 'pct'].includes(c.type);
+                            if (c.type === 'price') {
+                              const ccy = c.currency ?? (r['currencyCode'] ?? r['dt_currencyCode']) as string | undefined;
+                              return <td key={c.key} className="num">{formatCell(v, 'price', ccy)}</td>;
+                            }
                             // v1's status pill, colour-coded per lifecycle state.
                             if (c.key === 'status' && v) {
                               return (
@@ -318,7 +344,7 @@ export function DrillModal({
                                   </td>
                                 );
                               }
-                              const ccy = c.currency ?? String(r['currencyCode'] ?? 'IDR');
+                              const ccy = c.currency ?? String(r['currencyCode'] ?? r['dt_currencyCode'] ?? 'IDR');
                               return (
                                 <td key={c.key} className="num">
                                   {moneyCellText(Number(v))} <span className="dd-ccy">{ccy}</span>

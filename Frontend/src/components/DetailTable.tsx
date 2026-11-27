@@ -99,7 +99,7 @@ const GLOBAL_LABELS: Record<(typeof GLOBAL_KEYS)[number], string> = {
   company: 'Company', plant: 'Plant', purchOrg: 'Purch Org', year: 'Year', monthKey: 'Month',
 };
 
-const NUMERIC = new Set(['int', 'number', 'money', 'pct']);
+const NUMERIC = new Set(['int', 'number', 'money', 'price', 'pct']);
 
 /** The Open Items card names, for the Stages chip. */
 const STAGE_LABEL: Record<string, string> = {
@@ -743,6 +743,14 @@ export function DetailTable({
                         return (
                           <td key={c.key} className="num">
                             {moneyCellText(Number(v))} <span className="dd-ccy">{ccy}</span>
+                          </td>
+                        );
+                      }
+                      // A price in the document currency carries the line's currency.
+                      if (c.type === 'price') {
+                        return (
+                          <td key={c.key} className="num">
+                            {formatCell(v, 'price', c.currency ?? (r['currencyCode'] as string | undefined))}
                           </td>
                         );
                       }

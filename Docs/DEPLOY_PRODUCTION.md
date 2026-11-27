@@ -1044,6 +1044,34 @@ Admin → Exclusions, press **Save exclusions & recompute** once to apply the sa
 **Staging host:** the scheduled file pickup still needs about 1.8 GB. With the BE host already deep in swap,
 ask infra for more RAM there (or fewer co-tenants). A recompute is lighter but not free.
 
+### 10v. Release of 27 Nov 2026 — unit price, and every Detail column on every line table
+
+**What changed:**
+- **Price columns in the Detail table** (off by default, in Columns):
+  - **Net Price** and **Price Unit** are SAP's;
+  - **Unit Price** is PO Value ÷ PO Qty: the price of one PO UoM, in the PO's currency;
+  - **Unit Price IDR** is the same in rupiah;
+  - **PR Valuation Price** is the requisition's estimate.
+
+  Prices show two decimals and are never compacted to "M".
+- **Why Unit Price is not Net Price ÷ Price Unit:** SAP prices per *order price unit*, which can differ
+  from the order unit (a PO ordered in KG and priced per MT). On the 25 Sep data that is 84 of 45,165
+  lines. The popups' existing "Unit price" column was SAP's ratio and showed 9,525,501.75 on a KG line;
+  it now uses the same Value ÷ Qty rule (9,525.50 per KG).
+- **Every PR-item and PO-line table can show every Detail column.** That covers the click-through
+  panels of every figure and the Vendor / Material / Category 360 PO lists:
+  - Columns lists the table's own columns, then "More columns — from the Detail table", with a search
+    box;
+  - choices and order are saved per user, and Reset to default columns returns to the table's own set;
+  - values come from the row's Detail row (a PR item's first PO line, a PO line's first PR item);
+  - a click-through panel sorts and exports the added columns too;
+  - measured locally: a 200-row page with Detail columns loads in about 0.15–0.2 s, and sorting a
+    31k-line panel by one takes about 1 s.
+- Tables of other things (GR postings, release steps, per-group summaries) keep their own columns: they
+  are not PR or PO lines.
+
+**Deploy:** the usual §10 BE and FE updates, with no migration, no new setting and no Rebuild.
+
 ## 11. Rollback
 
 **On the affected server:**

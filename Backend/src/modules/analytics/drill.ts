@@ -14,6 +14,7 @@
 
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { plantLabelSql } from './plant_label.js';
+import { detailCatalog, detailLateral, detailMatch, type DetailCatalogColumn } from './detail.js';
 import { loadEnv } from '../../config/env.js';
 import { query, queryOne } from '../../db/client.js';
 import {
@@ -890,6 +891,11 @@ export interface DrillPage {
   totalCount: number;
   note: string | null;
   columns: { key: string; label: string; type: string; currency?: string }[];
+  /**
+   * Every Detail-table column this drill can also show (27 Nov 2026), keyed
+   * `dt_<key>`; PR-item and PO-line drills only. Rows carry the ones asked for.
+   */
+  extraColumns?: DetailCatalogColumn[];
   rows: Record<string, unknown>[];
   nextCursor: string | null;
   /**
@@ -1088,6 +1094,8 @@ export async function executeDrill(
    * tiebreak, so paging through a sorted drill never repeats or skips a row.
    */
   sort: { key: string; dir: 'asc' | 'desc' } | null = null,
+  /** Detail columns to add (`dt_<key>`), PR-item / PO-line drills only (27 Nov 2026). */
+  extraKeys: readonly string[] = [],
 ): Promise<DrillPage> {
   const t = TABLES[payload.grain];
   const params: unknown[] = [payload.v];
@@ -1240,17 +1248,52 @@ export async function executeDrill(
               AND _pr.pr_no = ${t.alias}.pr_no AND _pr.pr_item = ${t.alias}.pr_item)) AS "prToGrDays"`
       : '');
 
-  const sortCol = sort ? columns.find((c) => c.key === sort.key) : undefined;
+  // Detail columns the reader added (27 Nov 2026), from the row's Detail row.
+  const lineGrain = payload.grain === 'pr_item' || payload.grain === 'po_line' ? payload.grain : null;
+  const extra = lineGrain ? detailLateral(extraKeys, detailMatch(lineGrain, t.alias)) : null;
+
+  const sortCol = sort
+    ? columns.find((c) => c.key === sort.key) ?? extra?.columns.find((c) => c.key === sort.key)
+    : undefined;
   const orderBy = sortCol
     ? `"${sortCol.key}" ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, ${t.order}`
     : t.order;
   const pageParams = [...params, limit, offset];
-  const rows = await query<Record<string, unknown>>(
-    `SELECT ${SELECTS[payload.grain]}${measureSelect} FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''}
-      WHERE ${whereSql} ORDER BY ${orderBy}
-      LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
-    pageParams,
-  );
+  let rows: Record<string, unknown>[];
+  const sortByDetail = sortCol !== undefined && lineGrain !== null && sortCol.key.startsWith('dt_');
+  if (!sortByDetail) {
+    rows = await query<Record<string, unknown>>(
+      `SELECT ${SELECTS[payload.grain]}${measureSelect}${extra ? `, ${extra.select}` : ''}
+         FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''} ${extra?.join ?? ''}
+        WHERE ${whereSql} ORDER BY ${orderBy}
+        LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+      pageParams,
+    );
+  } else {
+    // Sorted by a Detail column (27 Nov 2026): order the population by that ONE
+    // column first, then fetch every column for the page's rows only. One
+    // lateral over the whole drill instead of one per column chosen - a
+    // 31k-line drill sorted with five Detail columns took 6 s in one pass.
+    const sortLat = detailLateral([sortCol!.key], detailMatch(lineGrain!, t.alias))!;
+    const ids = await query<{ id: string }>(
+      `SELECT ${t.id} AS id
+         FROM ${t.table} ${t.alias} ${sortLat.join}
+        WHERE ${whereSql} ORDER BY ${sortLat.select} ${sort!.dir === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, ${t.order}
+        LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+      pageParams,
+    );
+    const idParams = [...params, ids.map((x) => x.id)];
+    const got = await query<Record<string, unknown>>(
+      `SELECT ${t.id} AS "_id", ${SELECTS[payload.grain]}${measureSelect}${extra ? `, ${extra.select}` : ''}
+         FROM ${t.table} ${t.alias} ${PAGE_JOINS[payload.grain] ?? ''} ${extra?.join ?? ''}
+        WHERE ${whereSql} AND ${t.id} = ANY($${idParams.length}::text[])`,
+      idParams,
+    );
+    const pos = new Map(ids.map((x, i) => [x.id, i]));
+    rows = got
+      .sort((a, b) => (pos.get(String(a['_id'])) ?? 0) - (pos.get(String(b['_id'])) ?? 0))
+      .map(({ _id: _drop, ...rest }) => rest);
+  }
 
   // Row flags drive the UI markers: STO, token price, release-exempt, dangling.
   const decorated = rows.map((r) => {
@@ -1279,6 +1322,7 @@ export async function executeDrill(
     totalCount: total,
     note,
     columns,
+    ...(lineGrain ? { extraColumns: detailCatalog() } : {}),
     rows: decorated,
     nextCursor: offset + rows.length < total ? String(offset + rows.length) : null,
     totals,

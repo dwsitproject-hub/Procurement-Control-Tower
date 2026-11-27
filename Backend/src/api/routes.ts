@@ -55,7 +55,7 @@ import { ingestFailureBody } from '../modules/notify/messages.js';
 import { loadRuleSnapshot, listRuleHistory, setRule } from '../modules/admin/rules.js';
 import {
   queryDetail, DETAIL_COLUMNS, DETAIL_QUERY_PARAMS, parseDetailQuery,
-  describeDetailFilters, isAgeBand, isMoneyState,
+  describeDetailFilters, isAgeBand, isMoneyState, detailCatalog, detailLookup,
 } from '../modules/analytics/detail.js';
 import {
   buildExportWorkbook, exportFileName, MAX_EXPORT_ROWS,
@@ -950,7 +950,9 @@ export function buildRouter(): Router {
       const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
       const sort = sortKey === null ? null
         : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' as const : 'asc' as const };
-      const page = await executeDrill(payload, limit, offset, sort);
+      const extra = req.query.cols === undefined ? []
+        : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x.startsWith('dt_')).slice(0, 100);
+      const page = await executeDrill(payload, limit, offset, sort, extra);
       res.json({ ...page, asOfDate: (await currentVersion())?.asOfDate ?? null });
     } catch (e) {
       if (e instanceof DrillTokenError) {
@@ -987,8 +989,11 @@ export function buildRouter(): Router {
       const payload = openDrillToken(req.params.token!, sessionFingerprint(ctx.sid), ctx.scope);
       // The panel's sort, so the file is in the order on screen.
       const sortKey = req.query.sort === undefined ? null : String(req.query.sort);
+      // The Detail columns shown on screen come along (27 Nov 2026).
+      const extraKeys = req.query.cols === undefined ? []
+        : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x.startsWith('dt_')).slice(0, 100);
       const page = await executeDrill(payload, MAX_EXPORT_ROWS, 0, sortKey === null ? null
-        : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' : 'asc' });
+        : { key: sortKey, dir: String(req.query.dir) === 'desc' ? 'desc' : 'asc' }, extraKeys);
       const v = await currentVersion();
 
       // The panel's heading, so the file is named after the figure the user
@@ -1031,7 +1036,7 @@ export function buildRouter(): Router {
       // means every column, as before.
       const wanted = req.query.cols === undefined ? []
         : String(req.query.cols).split(',').map((x) => x.trim()).filter((x) => x !== '');
-      const byKey = new Map(page.columns.map((c) => [c.key, c]));
+      const byKey = new Map([...page.columns, ...(page.extraColumns ?? [])].map((c) => [c.key, c]));
       const picked = wanted.map((k) => byKey.get(k)).filter((c): c is NonNullable<typeof c> => c !== undefined);
       const wb = buildExportWorkbook(picked.length > 0 ? picked : page.columns, page.rows, {
         sheetName: 'Rows',
@@ -1118,6 +1123,31 @@ export function buildRouter(): Router {
 
   r.get('/api/v1/detail/columns', role('analyst', async (_req, res) => {
     res.json({ columns: DETAIL_COLUMNS.map(({ sql: _s, ...rest }) => rest) });
+  }));
+
+  /**
+   * Detail columns for rows another table already holds (27 Nov 2026): the
+   * entity popups' PO lists ask for the Detail columns their reader added.
+   * GET with no body returns the catalog; POST {grain, keys, cols} the values.
+   */
+  r.get('/api/v1/detail/catalog', role('analyst', async (_req, res) => {
+    res.json({ columns: detailCatalog() });
+  }));
+
+  r.post('/api/v1/detail/lookup', role('analyst', async (req, res, ctx) => {
+    requireScope(ctx);
+    const v = await currentVersion();
+    if (!v) throw new HttpProblem(404, 'not-found', 'No published dataset');
+    const b = (req.body ?? {}) as { grain?: unknown; keys?: unknown; cols?: unknown };
+    const grain = b.grain === 'pr_item' ? 'pr_item' : b.grain === 'po_line' ? 'po_line' : null;
+    if (grain === null) throw new HttpProblem(400, 'invalid-parameter', 'grain must be pr_item or po_line');
+    const keys = (Array.isArray(b.keys) ? b.keys : [])
+      .filter((k): k is [unknown, unknown] => Array.isArray(k) && k.length === 2)
+      .map((k) => [String(k[0]), Number(k[1])] as const)
+      .filter((k) => k[0] !== '' && Number.isInteger(k[1]))
+      .slice(0, 1000);
+    const cols = (Array.isArray(b.cols) ? b.cols : []).map(String).slice(0, 100);
+    res.json(await detailLookup(v.id, ctx.scope, grain, keys, cols));
   }));
 
   r.get('/api/v1/detail', role('analyst', async (req, res, ctx) => {

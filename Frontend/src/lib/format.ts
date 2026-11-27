@@ -76,6 +76,9 @@ export function formatCell(v: unknown, type: string, currency?: string): string 
   switch (type) {
     case 'money':
       return formatMoney(Number(v), currency);
+    // A per-unit price (27 Nov 2026): two decimals, never compacted to "M".
+    case 'price':
+      return `${currency ? `${currency} ` : ''}${formatNumber(Number(v), 2)}`;
     case 'number':
       return formatNumber(Number(v), 3);
     case 'int':

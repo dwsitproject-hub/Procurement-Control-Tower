@@ -353,7 +353,7 @@ export async function vendorDetail(
   const poHistory = await query<Record<string, unknown>>(
     `SELECT pol.po_no AS "poNo", pol.po_item AS "poItem", pol.document_date AS "documentDate",
             left(pol.short_text, 60) AS "shortText", pol.order_qty AS "orderQty",
-            pol.order_unit AS "orderUnit", pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
+            pol.order_unit AS "orderUnit", pol.net_order_value / NULLIF(pol.order_qty, 0) AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd",
             pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
@@ -876,7 +876,7 @@ export async function materialDetail(
   const poHistory = await query<Record<string, unknown>>(
     `SELECT pol.po_no AS "poNo", pol.po_item AS "poItem", pol.document_date AS "documentDate",
             pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
-            pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
+            pol.net_order_value / NULLIF(pol.order_qty, 0) AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd",
             pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",
@@ -1098,7 +1098,7 @@ export async function categoryDetail(
             pol.material_code AS "materialCode", left(pol.short_text, 60) AS "shortText",
             pol.plant || COALESCE(' — ' || NULLIF((SELECT _pl.plant_name FROM core.dim_plant _pl WHERE _pl.plant = pol.plant), pol.plant), '') AS plant,
             pol.vendor_name AS "vendorName", pol.order_qty AS "orderQty", pol.order_unit AS "orderUnit",
-            pol.unit_price AS "unitPrice", pol.price_unit AS "priceUnit",
+            pol.net_order_value / NULLIF(pol.order_qty, 0) AS "unitPrice", pol.price_unit AS "priceUnit",
             pol.currency_code AS "currencyCode", pol.net_order_value AS "netOrderValue",
             pol.net_order_value_usd AS "netOrderValueUsd",
             pol.net_order_value_idr AS "netOrderValueIdr", pol.status, pol.receipt_date AS "receiptDate",

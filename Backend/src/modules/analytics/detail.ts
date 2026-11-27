@@ -38,7 +38,8 @@ export interface DetailColumn {
   coupa?: boolean;
   /** `sql` is an expression over `d` (a correlated lookup), not a view column. */
   expr?: boolean;
-  type: 'string' | 'int' | 'number' | 'money' | 'date' | 'enum' | 'pct';
+  /** `price`: a per-unit amount (27 Nov 2026), shown to two decimals, never compacted. */
+  type: 'string' | 'int' | 'number' | 'money' | 'price' | 'date' | 'enum' | 'pct';
   currency?: string;
   /** Shown by default; the rest are available in the column chooser. */
   default: boolean;
@@ -92,6 +93,29 @@ export const DETAIL_COLUMNS: DetailColumn[] = [
   { key: 'poUom',           label: 'PO UoM',                 sql: 'po_uom',              type: 'string', default: false, sortable: true },
   { key: 'orderPriceUnit',  label: 'Order Price Unit',       sql: 'order_price_unit',    type: 'string', default: false, sortable: true },
   { key: 'priceUnit',       label: 'Price Unit',             sql: 'price_unit',          type: 'int',    default: false, sortable: true },
+  // Prices (27 Nov 2026). Net Price is SAP's, per Price Unit of the ORDER
+  // PRICE unit - which is not always the order unit (a PO ordered in KG and
+  // priced per MT): on the 25 Sep data 84 of 45,165 lines disagree with
+  // value / quantity. Unit Price is therefore PO Value / PO Qty: the price of
+  // ONE PO UoM, the unit the PO Qty column shows, in the PO's currency. Unit
+  // Price IDR is the same in rupiah (the line's IDR value). PR Valuation
+  // Price is the requisition's estimate.
+  {
+    key: 'netPrice', label: 'Net Price', expr: true, type: 'price', default: false, sortable: true,
+    sql: `(SELECT _u.net_price FROM core.fact_po_line _u WHERE _u.dataset_version_id = d.dataset_version_id AND _u.po_no = d.po_no AND _u.po_item = d.po_item)`,
+  },
+  {
+    key: 'unitPrice', label: 'Unit Price', expr: true, type: 'price', default: false, sortable: true,
+    sql: `(SELECT _u.net_order_value / NULLIF(_u.order_qty, 0) FROM core.fact_po_line _u WHERE _u.dataset_version_id = d.dataset_version_id AND _u.po_no = d.po_no AND _u.po_item = d.po_item)`,
+  },
+  {
+    key: 'unitPriceIdr', label: 'Unit Price IDR', expr: true, type: 'price', currency: 'IDR', default: false, sortable: true,
+    sql: `(SELECT _u.net_order_value_idr / NULLIF(_u.order_qty, 0) FROM core.fact_po_line _u WHERE _u.dataset_version_id = d.dataset_version_id AND _u.po_no = d.po_no AND _u.po_item = d.po_item)`,
+  },
+  {
+    key: 'prValuationPrice', label: 'PR Valuation Price', expr: true, type: 'price', default: false, sortable: true,
+    sql: `(SELECT _v.valuation_price FROM core.fact_pr_item _v WHERE _v.dataset_version_id = d.dataset_version_id AND _v.pr_no = d.pr_no AND _v.pr_item = d.pr_item)`,
+  },
   { key: 'poDate',          label: 'PO Date',                sql: 'po_date',             type: 'date',   default: true,  sortable: true },
   { key: 'poFull',          label: 'PO Final Approved Date', sql: 'po_full',             type: 'date',   default: false, sortable: true },
   { key: 'vendorCode',      label: 'Vendor Code',            sql: 'vendor_code',         type: 'string', default: false, sortable: true },
@@ -228,6 +252,102 @@ const COUPA_JOIN = `
 
 /** A column's SELECT/ORDER expression: the view's column, or the Coupa lookup's. */
 const colExpr = (c: DetailColumn): string => (c.coupa || c.expr ? c.sql : `d.${c.sql}`);
+
+/**
+ * Every Detail column on any PR / PO line table (27 Nov 2026: "every detail
+ * table, on a page or a floating page, can show all the Detail columns").
+ *
+ * Inside another table a Detail column is keyed `dt_<key>`, so it cannot
+ * collide with that table's own columns. The values come from the row's
+ * Detail row - for a PR item its first PO line, for a PO line its first PR
+ * item, the order the Detail table lists them - so they read as in the
+ * Detail tab.
+ */
+export const DETAIL_COL_PREFIX = 'dt_';
+
+export type DetailCatalogColumn = Omit<DetailColumn, 'sql' | 'expr'>;
+
+/** The catalog, prefixed, without SQL. */
+export function detailCatalog(): DetailCatalogColumn[] {
+  return DETAIL_COLUMNS.map(({ sql: _s, expr: _e, ...c }) => ({ ...c, key: DETAIL_COL_PREFIX + c.key }));
+}
+
+/**
+ * The chosen Detail columns as a LEFT JOIN LATERAL `dx` (one row per outer
+ * row) and its select list. `match` ties `d` (core.v_detail) to the outer row;
+ * unknown keys are ignored. Null when none is chosen.
+ */
+export function detailLateral(
+  keys: readonly string[],
+  match: { where: string; order: string },
+): { join: string; select: string; columns: DetailCatalogColumn[] } | null {
+  const seen = new Set<string>();
+  const cols = keys
+    .filter((k) => k.startsWith(DETAIL_COL_PREFIX))
+    .map((k) => DETAIL_COLUMNS.find((c) => c.key === k.slice(DETAIL_COL_PREFIX.length)))
+    .filter((c): c is DetailColumn => c !== undefined && !seen.has(c.key) && (seen.add(c.key), true));
+  if (cols.length === 0) return null;
+  const coupa = cols.some((c) => c.coupa);
+  const join = `LEFT JOIN LATERAL (
+      SELECT ${cols.map((c) => `${colExpr(c)} AS "${DETAIL_COL_PREFIX}${c.key}"`).join(', ')}
+        FROM core.v_detail d ${coupa ? COUPA_JOIN : ''}
+       WHERE ${match.where}
+       ORDER BY ${match.order} LIMIT 1) dx ON true`;
+  return {
+    join,
+    select: cols.map((c) => `dx."${DETAIL_COL_PREFIX}${c.key}"`).join(', '),
+    columns: cols.map(({ sql: _s, expr: _e, ...c }) => ({ ...c, key: DETAIL_COL_PREFIX + c.key })),
+  };
+}
+
+/** How a PR item / PO line finds its Detail row. */
+export function detailMatch(grain: 'pr_item' | 'po_line', outer: string): { where: string; order: string } {
+  return grain === 'pr_item'
+    ? {
+      where: `d.dataset_version_id = ${outer}.dataset_version_id AND d.pr_no = ${outer}.pr_no AND d.pr_item = ${outer}.pr_item`,
+      order: 'd.po_no NULLS LAST, d.po_item',
+    }
+    : {
+      where: `d.dataset_version_id = ${outer}.dataset_version_id AND d.po_no = ${outer}.po_no AND d.po_item = ${outer}.po_item`,
+      order: 'd.pr_no NULLS LAST, d.pr_item',
+    };
+}
+
+/**
+ * Detail columns for rows another table already holds (the entity popups'
+ * PO lists, 27 Nov 2026): keyed "poNo|poItem" or "prNo|prItem". The reader's
+ * data scope applies, as on the Detail tab.
+ */
+export async function detailLookup(
+  versionId: number,
+  scope: readonly ScopeEntry[],
+  grain: 'pr_item' | 'po_line',
+  keys: ReadonlyArray<readonly [string, number]>,
+  colKeys: readonly string[],
+): Promise<{ columns: DetailCatalogColumn[]; rows: Record<string, Record<string, unknown>> }> {
+  const w = buildDetailWhere(versionId, scope, {});
+  const params = [...w.params];
+  params.push(keys.map((k) => k[0]));
+  const a = `$${params.length}`;
+  params.push(keys.map((k) => k[1]));
+  const b = `$${params.length}`;
+  const m = grain === 'pr_item'
+    ? { where: `${w.sql} AND d.pr_no = k.a AND d.pr_item = k.b`, order: 'd.po_no NULLS LAST, d.po_item' }
+    : { where: `${w.sql} AND d.po_no = k.a AND d.po_item = k.b`, order: 'd.pr_no NULLS LAST, d.pr_item' };
+  const lat = detailLateral(colKeys, m);
+  if (lat === null || keys.length === 0) return { columns: lat?.columns ?? [], rows: {} };
+  const r = await query<Record<string, unknown>>(
+    `SELECT k.a || '|' || k.b AS "_k", ${lat.select}
+       FROM unnest(${a}::text[], ${b}::int[]) AS k(a, b) ${lat.join}`,
+    params,
+  );
+  const rows: Record<string, Record<string, unknown>> = {};
+  for (const x of r) {
+    const { _k, ...rest } = x;
+    rows[String(_k)] = rest;
+  }
+  return { columns: lat.columns, rows };
+}
 
 const COLUMN_BY_KEY = new Map(DETAIL_COLUMNS.map((c) => [c.key, c]));
 

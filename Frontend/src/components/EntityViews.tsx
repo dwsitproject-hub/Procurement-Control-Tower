@@ -1419,6 +1419,13 @@ function SimpleTable({ prefKey, head, rows, sortValues, right }: {
   return <ToolTable prefKey={prefKey} columns={columns} rows={data} maxHeight="300px" className="data" />;
 }
 
+/** How a popup PO-list row finds its Detail row. */
+const PO_LINE_DETAIL = {
+  grain: 'po_line' as const,
+  key: (r: Record<string, any>) => (r.poNo && r.poItem !== null && r.poItem !== undefined
+    ? [String(r.poNo), Number(r.poItem)] as const : null),
+};
+
 function PoHistoryTable({ rows, vendor = false, material = false, currency = 'USD' }: {
   rows: Record<string, any>[]; vendor?: boolean;
   /** Material, description and plant columns - the Category 360's list. */
@@ -1466,6 +1473,8 @@ function PoHistoryTable({ rows, vendor = false, material = false, currency = 'US
       columns={columns}
       rows={rows}
       maxHeight="340px"
+      // Every Detail-table column on these PO lines too (27 Nov 2026).
+      detail={PO_LINE_DETAIL}
       lead={(r) => ((r.flags as string[]) ?? []).map((f) => {
         const m = FLAG_META[f];
         return m ? <span key={f} className="flag" title={m.label}>{m.icon}</span> : null;

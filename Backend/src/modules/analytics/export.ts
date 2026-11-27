@@ -153,7 +153,7 @@ function cellValue(v: unknown, type: string): string | number | Date | null {
       ? s
       : excelSerial(d.getFullYear(), d.getMonth() + 1, d.getDate());
   }
-  if (type === 'money' || type === 'number' || type === 'int' || type === 'pct') {
+  if (type === 'money' || type === 'price' || type === 'number' || type === 'int' || type === 'pct') {
     const n = Number(v);
     // A numeric column holding something unparseable is written as the text it
     // is, rather than as NaN — which Excel shows as an error in every cell.

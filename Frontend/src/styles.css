@@ -1949,3 +1949,6 @@ button.tk-card:hover .tk-go { opacity: 1; transform: translateX(3px); }
   .btn::after, .pi-live, .freshness .dot, .content > main, .modal { animation: none !important; }
   .kpi, .kpi:hover, .tk-card, button.tk-card:hover { transition: none; transform: none !important; }
 }
+
+/* The column chooser's search, for tables offering the Detail catalog (27 Nov 2026). */
+.tt-chooser-q { width: 100%; max-width: 320px; margin-bottom: .4rem; }
